@@ -398,6 +398,8 @@ func getTraceSource(provider, integrationSource string) (TraceSource, error) {
 		// GCP cloud accounts have no agent/integration row; the provider is synthesized
 		// by the resolver, so match on provider alone regardless of source.
 		return &GcpTraceSource{}, nil
+	case provider == "openobserve" && integrationSource == "user":
+		return &OpenObserveTraceSource{}, nil
 	default:
 		return nil, fmt.Errorf(
 			"unsupported traces provider/source combination: provider=%s, integrationSource=%s",
@@ -468,6 +470,8 @@ func getMetricsSource(provider, integrationSource string) (MetricSource, error) 
 		return &DynatraceMetricSource{}, nil
 	case provider == "solarwinds" && integrationSource == "user":
 		return &SolarWindsMetricSource{}, nil
+	case provider == "openobserve" && integrationSource == "user":
+		return &OpenObserveMetricSource{}, nil
 	default:
 		return nil, fmt.Errorf(
 			"unsupported metric provider/source combination: provider=%s, integrationSource=%s",
@@ -1629,6 +1633,12 @@ var allProviderCaps = map[string]providerStaticCaps{
 	"prometheus": {
 		SupportsServiceMap: true,
 		SupportsRawQuery:   true,
+	},
+	"openobserve": {
+		SupportsServiceMap:    true,
+		SupportsRawQuery:      true,
+		SupportsHeatmap:       false,
+		SupportsTraceGrouping: false,
 	},
 }
 
