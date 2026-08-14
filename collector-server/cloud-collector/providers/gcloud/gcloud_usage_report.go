@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"cloud.google.com/go/bigquery"
+	"cloud.google.com/go/civil"
 	"google.golang.org/api/iterator"
 	"google.golang.org/api/option"
 )
@@ -637,4 +638,174 @@ func getGcloudUsageReport(ctx providers.CloudProviderContext, account providers.
 		Items: aggregatedItems,
 		Dates: []time.Time{}, // GCP doesn't use dates array like AWS
 	}, nil
+}
+
+// billingDateRangeRow holds the MIN/MAX of usage_start_time returned by the
+// period-discovery query. Both fields are NULL when the export has no rows for
+// the account (an aggregate over zero rows yields a single all-NULL row).
+type billingDateRangeRow struct {
+	Earliest bigquery.NullDate `bigquery:"earliest"`
+	Latest   bigquery.NullDate `bigquery:"latest"`
+}
+
+// queryBillingDateRange returns the earliest and latest usage_start_time dates
+// present in the account's billing export, scoped to this account's project.
+//
+// It reads only the usage_start_time and project columns. Because BigQuery is
+// columnar, this is not a full-table scan — it touches a tiny fraction of a
+// wide, multi-terabyte billing export (a TIMESTAMP is 8 bytes/row) and so stays
+// cheap on the customer's bill. Verify the actual bytes billed with a dry-run
+// against a large real export before relying on this in production.
+//
+// hasData is false when the export contains no rows for the account. Declared as
+// a package-level var so tests can substitute it without a live BigQuery client,
+// mirroring streamBigQueryBilling.
+var queryBillingDateRange = func(ctx providers.CloudProviderContext, config models.BillingConfig, account providers.Account) (earliest, latest time.Time, hasData bool, err error) {
+	logger := ctx.GetLogger()
+
+	if account.AccountNumber == "" {
+		return time.Time{}, time.Time{}, false, fmt.Errorf("accountNumber is empty — cannot discover billing periods without a project filter")
+	}
+
+	session, err := getGcloudSessionFromAccount(ctx, account)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, fmt.Errorf("failed to get gcloud session: %w", err)
+	}
+	client, err := newBigQueryClient(ctx.GetContext(), config.ProjectID, session.Opts...)
+	if err != nil {
+		return time.Time{}, time.Time{}, false, fmt.Errorf("failed to create BigQuery client: %w", err)
+	}
+	defer func() {
+		if cerr := client.Close(); cerr != nil {
+			logger.Error("failed to close BigQuery client", "error", cerr)
+		}
+	}()
+
+	// Same per-account isolation as queryBigQueryAndStream: nested schemas expose
+	// the project as project.id, flat schemas as project_id. Parent accounts also
+	// own NULL-project rows (invoice-level adjustments, rounding errors).
+	isParent := account.ParentAccountId == nil
+	nestedFilter := "project.id = @account_project_id"
+	flatFilter := "project_id = @account_project_id"
+	if isParent {
+		nestedFilter = "(project.id = @account_project_id OR project.id IS NULL)"
+		flatFilter = "(project_id = @account_project_id OR project_id IS NULL)"
+	}
+
+	rangeSQL := func(projectFilter string) string {
+		return fmt.Sprintf(`
+    SELECT
+        MIN(DATE(usage_start_time)) AS earliest,
+        MAX(DATE(usage_start_time)) AS latest
+    FROM `+"`%s.%s.%s`"+`
+    WHERE %s
+    `, config.ProjectID, config.DatasetID, config.TableID, projectFilter)
+	}
+
+	// usage_start_time is common to every schema variant; only the project column
+	// name differs, so two candidates cover the same shapes the main query handles.
+	variants := []struct {
+		name string
+		sql  string
+	}{
+		{"nested", rangeSQL(nestedFilter)},
+		{"flat", rangeSQL(flatFilter)},
+	}
+
+	var it *bigquery.RowIterator
+	for _, v := range variants {
+		q := client.Query(v.sql)
+		q.Parameters = []bigquery.QueryParameter{
+			{Name: "account_project_id", Value: account.AccountNumber},
+		}
+		it, err = q.Read(ctx.GetContext())
+		if err == nil {
+			logger.Info("billing date-range query succeeded", "variant", v.name)
+			break
+		}
+		errStr := err.Error()
+		logger.Warn("billing date-range query failed", "variant", v.name, "error", errStr)
+		// Only fall through to the next variant on a schema mismatch; fail fast otherwise.
+		if !strings.Contains(errStr, "Unrecognized name") && !strings.Contains(errStr, "Cannot access field") {
+			return time.Time{}, time.Time{}, false, fmt.Errorf("failed to query billing date range: %w", err)
+		}
+	}
+	if err != nil {
+		return time.Time{}, time.Time{}, false, fmt.Errorf("failed to query billing date range across schema variants: %w", err)
+	}
+
+	var row billingDateRangeRow
+	if nerr := it.Next(&row); nerr != nil && nerr != iterator.Done {
+		return time.Time{}, time.Time{}, false, fmt.Errorf("failed to read billing date range: %w", nerr)
+	}
+	if !row.Earliest.Valid || !row.Latest.Valid {
+		return time.Time{}, time.Time{}, false, nil // no rows for this account
+	}
+
+	return civilToTime(row.Earliest.Date), civilToTime(row.Latest.Date), true, nil
+}
+
+// discoverAvailableUsageReportPeriods implements providers.UsageReportPeriodDiscoverer
+// for GCP by asking the billing export which months actually contain data, rather
+// than walking back a fixed number of months and probing each one.
+//
+// The discovered range is clamped to the trailing maxMonths window (a safety cap
+// shared with AWS) and never extends into the future. To backfill deeper history
+// than the default, raise cloud_collector_server_cost_backfill_months.
+func discoverAvailableUsageReportPeriods(ctx providers.CloudProviderContext, account providers.Account, maxMonths int) ([]providers.UsageReportPeriod, error) {
+	if maxMonths <= 0 {
+		return nil, nil
+	}
+	logger := ctx.GetLogger()
+
+	config, err := getBillingConfigFromAccount(account)
+	if err != nil {
+		return nil, err
+	}
+
+	earliest, latest, hasData, err := queryBillingDateRange(ctx, config, account)
+	if err != nil {
+		return nil, err
+	}
+	if !hasData {
+		logger.Info("gcp: no billing rows found for account; nothing to backfill",
+			"accountNumber", account.AccountNumber)
+		return []providers.UsageReportPeriod{}, nil
+	}
+
+	now := time.Now().UTC()
+	currentMonthStart := monthStart(now)
+	oldestAllowed := currentMonthStart.AddDate(0, -(maxMonths - 1), 0)
+
+	from := monthStart(earliest)
+	if from.Before(oldestAllowed) {
+		from = oldestAllowed
+	}
+	to := monthStart(latest)
+	if to.After(currentMonthStart) {
+		to = currentMonthStart
+	}
+
+	periods := []providers.UsageReportPeriod{}
+	for m := from; !m.After(to); m = m.AddDate(0, 1, 0) {
+		periods = append(periods, providers.UsageReportPeriod{Month: m.Month(), Year: m.Year()})
+	}
+
+	logger.Info("gcp: discovered billing periods for backfill",
+		"accountNumber", account.AccountNumber,
+		"earliest", earliest.Format("2006-01"),
+		"latest", latest.Format("2006-01"),
+		"count", len(periods),
+		"maxMonths", maxMonths)
+	return periods, nil
+}
+
+// monthStart returns the first day of t's month at UTC midnight.
+func monthStart(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), 1, 0, 0, 0, 0, time.UTC)
+}
+
+// civilToTime converts a BigQuery civil.Date (no timezone) to a UTC time.Time.
+func civilToTime(d civil.Date) time.Time {
+	return time.Date(d.Year, d.Month, d.Day, 0, 0, 0, 0, time.UTC)
 }
