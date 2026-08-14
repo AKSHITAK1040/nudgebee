@@ -750,6 +750,12 @@ type appConfig struct {
 	// enforces grounding, not tool choice. Default off; enable per env after
 	// monitoring `SDG_no_data_rate` on dev to confirm no over-firing.
 	LlmServerSDGGroundingContractEnabled bool `mapstructure:"llm_server_sdg_grounding_contract_enabled"`
+	// LlmServerReAct4Enabled gates the provider-native tool-calling planner
+	// (ReAct4). Default false: a ReAct/Orchestrating agent only routes to ReAct4
+	// when this is on AND its resolved provider/model supports native tools
+	// (SupportsNativeTools); otherwise it stays on ReAct3. See
+	// docs/planner_react_4.md.
+	LlmServerReAct4Enabled bool `mapstructure:"llm_server_react4_enabled"`
 	// LlmServerThinkToolEnabled gates injection of the `think` tool into the
 	// six orchestrator agents (k8s / aws / azure / gcp / datadog / finops).
 	// Default flipped to false 2026-07-12 after 30d prod data showed the
@@ -1427,6 +1433,7 @@ func init() {
 	// used to flip this on at boot; baking it in preserves that behavior.
 	viper.SetDefault("llm_server_react_critique_enabled", true)
 	viper.SetDefault("llm_server_sdg_grounding_contract_enabled", false)
+	viper.SetDefault("llm_server_react4_enabled", false)
 	viper.SetDefault("llm_server_react3_orchestrator_mode_enabled", true)
 	viper.SetDefault("llm_server_react3_query_lean_prompt_enabled", true)
 	viper.SetDefault("llm_server_react3_query_model_downshift_enabled", false)

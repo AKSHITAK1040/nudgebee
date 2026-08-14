@@ -36,6 +36,7 @@ const (
 	PromptWebhookSubjectExtractor            = "webhook_subject_extractor"
 	PromptAgentRewriteToolInput              = "agent_rewrite_tool_input"
 	PromptReact3Base                         = "react_3_base"
+	PromptReact4Base                         = "react_4_base"
 	PromptReactCritiquer                     = "react_critiquer"
 	PromptConfigAutoSelection                = "config_auto_selection"
 	PromptRemediationGenerate                = "remediation_generate"
@@ -94,6 +95,7 @@ var promptCategories = map[string]PromptCategory{
 	PromptWebhookSubjectExtractor:            CategoryAgents,
 	PromptAgentRewriteToolInput:              CategoryPlanners,
 	PromptReact3Base:                         CategoryPlanners,
+	PromptReact4Base:                         CategoryPlanners,
 	PromptReactCritiquer:                     CategoryPlanners,
 	PromptConfigAutoSelection:                CategoryTools,
 	PromptRemediationGenerate:                CategoryTools,

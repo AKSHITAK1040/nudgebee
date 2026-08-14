@@ -1399,6 +1399,24 @@ func attachTenantIDForEgressFilter(ctx context.Context, sc *security.SecurityCon
 	return egressfilter.WithTenantID(ctx, parsed)
 }
 
+// isEmptyCompletion reports whether a completion carries no usable payload and
+// should be treated as a broken generation (retry / model fallback).
+//
+// A response carrying TOOL CALLS is complete even with empty text. The
+// emptiness check predates provider-native tool calling, when every valid
+// response was text and "no text" reliably meant a broken generation. A native
+// tool-calling planner (react_4) routinely produces a turn whose entire payload
+// is a tool_use block with no prose — observed live as stopReason=STOP,
+// toolCalls=1, outputTokens=25. Counting that as empty burned the
+// retry/fallback budget on healthy responses and then failed the turn outright.
+func isEmptyCompletion(completion *llms.ContentResponse) bool {
+	if completion == nil || len(completion.Choices) == 0 {
+		return true
+	}
+	choice := completion.Choices[0]
+	return len(choice.ToolCalls) == 0 && choice.Content == ""
+}
+
 func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 	if rc == nil {
 		return nil, fmt.Errorf("retryContext is nil")
@@ -1563,6 +1581,15 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 		if sc := rc.ctx.GetSecurityContext(); sc != nil {
 			tenantId = sc.GetTenantId()
 		}
+		// Native tool declarations must be baked into the cached content: Google AI
+		// rejects a request that sets both CachedContent and tools. Materialize the
+		// caller's options to recover them. Callers that pass no tools (react_3 and
+		// every summarizer) yield an empty slice, leaving the cache path unchanged.
+		cacheCallOpts := llms.CallOptions{}
+		for _, opt := range optionsToSend {
+			opt(&cacheCallOpts)
+		}
+
 		cacheReq := &CacheRequest{
 			TenantId:       tenantId,
 			AccountId:      rc.accountId,
@@ -1576,6 +1603,7 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 			Scope:          rc.cacheScope,
 			Capabilities:   rc.capabilities,
 			PromptVariant:  rc.promptVariant,
+			Tools:          cacheCallOpts.Tools,
 		}
 
 		cacheResp := cacheManager.ApplyCache(ctx, cacheReq)
@@ -1714,7 +1742,14 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 		err = fmt.Errorf("sustained generation timeout: model exceeded %ds total call duration, timeout — retrying same model: %w",
 			sustainedGenSeconds, err)
 	}
-	if err == nil && (completion == nil || len(completion.Choices) == 0 || completion.Choices[0].Content == "") {
+	// A response carrying tool calls is COMPLETE even with empty text. This check
+	// predates provider-native tool calling, when every valid response was text and
+	// "no text" reliably meant a broken generation. A native tool-calling planner
+	// (react_4) routinely gets a turn whose entire payload is a tool_use block with
+	// no prose — observed live as stopReason=STOP, toolCalls=1, outputTokens=25.
+	// Treating that as empty burned the retry/fallback budget on healthy responses
+	// and then failed the turn outright.
+	if err == nil && isEmptyCompletion(completion) {
 		stopReason := ""
 		var toolCallCount int
 		var promptTokens, outputTokens, thinkingTokens int

@@ -2161,7 +2161,7 @@ func (o *NBReActPlanner3) runCritique(input, scratchpad, finalAnswer string, int
 	}
 	critiquePrompt := prompts.NewPromptTemplate(
 		critiquerPrompt,
-		[]string{"input", "scratchpad", "final_answer", "question_type", "tool_names", "tool_descriptions", "tools_invoked", "hypothesis_mode_enabled", "sdg_grounding_enabled", "premise_verification_enabled", "notebook", "today"},
+		reactCritiquerInputVariables,
 	)
 	critiquePromptStr, promptErr := critiquePrompt.Format(map[string]any{
 		"input":                        input,

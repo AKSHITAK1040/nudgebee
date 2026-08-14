@@ -11,6 +11,12 @@ const (
 
 const ToolExecuteShellCommand = "shell_execute"
 
+// NotebookToolName is the registered name of the update_notebook control tool.
+// Canonical here (in tools/core) because both the tool implementation (package
+// tools) and the ReAct4 planner (package agents/core) reference it and both
+// import this package, avoiding a duplicated literal or an import cycle.
+const NotebookToolName = "update_notebook"
+
 type NBToolCommand struct {
 	Name        string     `json:"name"`
 	Description string     `json:"description"`

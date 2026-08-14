@@ -833,9 +833,13 @@ func (e *plannerExecutor) doIteration(
 	}
 
 	// Enable parallel execution when multiple actions are returned by a react_3
-	// planner and parallel execution is enabled in config.
+	// or react_4 planner and parallel execution is enabled in config. The write
+	// pre-flight (below) must run for both — a native react_4 tool batch can
+	// contain write actions just like a react_3 <actions> batch.
 	_, isReAct3Planner := e.agentPlanner.(*NBReActPlanner3)
-	if len(actions) > 1 && config.Config.PlannerParallelExecEnabled && isReAct3Planner {
+	_, isReAct4Planner := e.agentPlanner.(*NBReActPlanner4)
+	isParallelCapablePlanner := isReAct3Planner || isReAct4Planner
+	if len(actions) > 1 && config.Config.PlannerParallelExecEnabled && isParallelCapablePlanner {
 		// Pre-flight check: detect actions that might trigger followups (write approval
 		// or config resolution). Only one followup can be active at a time, so if any
 		// action in the batch could trigger one, fall back to sequential execution.
@@ -3275,6 +3279,29 @@ func (e *plannerExecutor) Unmarshal(previousState []byte) error {
 				Log:        logValue,
 				Dependency: dependencies,
 				Condition:  actionCondition,
+				// Restored explicitly: this reconstruction is field-by-field, so any
+				// field omitted here is silently dropped on every resume. A resume is
+				// not an edge case — it is the write-approval path.
+				//
+				// DisplayID keeps citations ([E3]) pointing at the same step after a
+				// resume. TurnID and ThoughtSignature are load-bearing for react_4:
+				// without the signature a replayed Gemini functionCall is rejected
+				// outright ("missing a thought_signature"), and without the TurnID a
+				// parallel batch is split into separate assistant messages, which
+				// strips the signature from every sibling but the first. Losing
+				// either turns an approved write into a dead conversation.
+				DisplayID: toString(getVal(actionData, "display_id")),
+				TurnID:    toString(getVal(actionData, "turn_id")),
+			}
+			// []byte marshals to a base64 STRING, so it has to be decoded back or the
+			// signature survives serialization as unusable text.
+			if sig, ok := getVal(actionData, "thought_signature").(string); ok && sig != "" {
+				if decoded, decErr := base64.StdEncoding.DecodeString(sig); decErr == nil {
+					action.ThoughtSignature = decoded
+				} else {
+					e.ctx.GetLogger().Warn("plannerexecutor: could not decode thought signature on resume — react_4 replay of this call will be rejected",
+						"toolId", action.ToolID, "error", decErr)
+				}
 			}
 
 			status := ToolStatusSuccess // default
