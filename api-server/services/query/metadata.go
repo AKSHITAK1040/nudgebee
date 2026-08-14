@@ -657,6 +657,10 @@ var prDependentColumns = map[string]bool{
 var incidentDependentColumns = map[string]bool{
 	"incident_leader_id":    true,
 	"incident_member_count": true,
+	// Aggregate forms for grouped (inbox) rows.
+	"incident_group_size":      true,
+	"is_incident_child":        true,
+	"incident_group_leader_id": true,
 }
 
 func whereReferencesColumns(where QueryWhereClause, cols map[string]bool) bool {
@@ -1288,10 +1292,25 @@ var table_metadata = map[string]TableDefinition{
 		Type:             Aggregate,
 		Source:           getSource("event_groupings_v2"),
 		DefGenerator: func(ctx *security.RequestContext, accountId string, request QueryRequest) (string, QueryRequest, error) {
+			from := "events"
 			if requestReferencesColumns(request, fingerprintDependentColumns) {
-				return "events LEFT JOIN event_duplicates ed ON ed.event_id = events.id AND ed.cloud_account_id = events.cloud_account_id", request, nil
+				from += " LEFT JOIN event_duplicates ed ON ed.event_id = events.id AND ed.cloud_account_id = events.cloud_account_id"
 			}
-			return "events", request, nil
+			if requestReferencesColumns(request, incidentDependentColumns) {
+				// Same-subject incident grouping (#34655): mirrors the events_v2
+				// joins so grouped counts can filter/aggregate on the same
+				// incident columns the list filters on (children folded by
+				// default must fold in the counts too).
+				from += ` LEFT JOIN (SELECT DISTINCT ON (event_id, cloud_account_id) event_id, cloud_account_id, related_event_id
+					FROM event_correlations WHERE correlation_type = 'same_incident'
+					ORDER BY event_id, cloud_account_id, related_event_id) ecl
+					ON ecl.event_id = events.id AND ecl.cloud_account_id = events.cloud_account_id`
+				from += ` LEFT JOIN (SELECT related_event_id, cloud_account_id, count(*) AS incident_member_count
+					FROM event_correlations WHERE correlation_type = 'same_incident'
+					GROUP BY related_event_id, cloud_account_id) ecc
+					ON ecc.related_event_id = events.id AND ecc.cloud_account_id = events.cloud_account_id`
+			}
+			return from, request, nil
 		},
 		Name:                "event_groupings_v2",
 		TenantIdColumnName:  "tenant_id",
@@ -1592,6 +1611,33 @@ var table_metadata = map[string]TableDefinition{
 				Type: ColumnDefinitionTypeBoolean,
 				Def:  "CASE WHEN ed.absolute_first_seen_at > NOW() - INTERVAL '7 days' THEN true ELSE false END",
 			},
+			"incident_leader_id": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "ecl.related_event_id",
+			},
+			"incident_member_count": {
+				Type: ColumnDefinitionTypeInt,
+				Def:  "coalesce(ecc.incident_member_count, 0)",
+			},
+			// Row-level group signals for the Triage Inbox (#34655): a
+			// fingerprint row LEADS a group when any of its events has
+			// members; it is a CHILD when any of its events links to a
+			// leader. Aggregated because inbox rows span many events.
+			"incident_group_size": {
+				Type:         ColumnDefinitionTypeInt,
+				Def:          "max(coalesce(ecc.incident_member_count, 0))",
+				IsAggregated: true,
+			},
+			"is_incident_child": {
+				Type:         ColumnDefinitionTypeBoolean,
+				Def:          "bool_or(ecl.related_event_id IS NOT NULL)",
+				IsAggregated: true,
+			},
+			"incident_group_leader_id": {
+				Type:         ColumnDefinitionTypeString,
+				Def:          "max(ecl.related_event_id::text)",
+				IsAggregated: true,
+			},
 		},
 	},
 	"events_v2": {
@@ -1631,7 +1677,8 @@ var table_metadata = map[string]TableDefinition{
 					`coalesce(ecc.incident_member_count, 0) as incident_member_count`)
 				joins = append(joins,
 					`LEFT JOIN (SELECT DISTINCT ON (event_id, cloud_account_id) event_id, cloud_account_id, related_event_id
-						FROM event_correlations WHERE correlation_type = 'same_incident') ecl
+						FROM event_correlations WHERE correlation_type = 'same_incident'
+						ORDER BY event_id, cloud_account_id, related_event_id) ecl
 						ON ecl.event_id = e.id AND ecl.cloud_account_id = e.cloud_account_id`,
 					`LEFT JOIN (SELECT related_event_id, cloud_account_id, count(*) AS incident_member_count
 						FROM event_correlations WHERE correlation_type = 'same_incident'

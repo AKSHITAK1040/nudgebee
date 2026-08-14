@@ -5,6 +5,7 @@ import CloudProviderIcon from '@shared/icons/CloudIcon';
 
 // Components
 import KubernetesTable from '@components/k8s/common/KubernetesTable';
+import IncidentGroupDrilldown from '@components/events/IncidentGroupDrilldown';
 import Datetime from '@shared/format/Datetime';
 import SeverityIcon from '@ui/SeverityIcon';
 import ListingLayout from '@ui/ListingLayout';
@@ -164,6 +165,10 @@ const transformTableData = (
       startTime: dateRange.startDate,
       endTime: dateRange.endDate,
       accountId: item.account_id,
+      // For the Grouped Alerts drill-down tab (#34655).
+      latestEventId: item.latest_event_id,
+      aggregationKey: item.aggregation_key,
+      hasAlertGroup: Boolean((item.incident_group_size ?? 0) > 0 || item.is_incident_child),
       ...(nbStatus && nbStatus.length > 0 ? { nb_status: nbStatus } : {}),
     };
 
@@ -204,6 +209,34 @@ const transformTableData = (
                     <span>
                       <Chip variant='tag' tone='success' size='xs' data-testid='new-issue-chip'>
                         NEW
+                      </Chip>
+                    </span>
+                  </Tooltip>
+                )}
+                {item.incident_group_size > 0 && (
+                  <Tooltip
+                    title={`${item.incident_group_size} related alert${
+                      item.incident_group_size > 1 ? 's' : ''
+                    } grouped under this alert — expand for Grouped Alerts`}
+                  >
+                    <span>
+                      <Chip variant='tag' tone='warning' size='xs' data-testid='inbox-group-leader-chip'>
+                        +{item.incident_group_size} GROUPED
+                      </Chip>
+                    </span>
+                  </Tooltip>
+                )}
+                {!item.incident_group_size && item.is_incident_child && (
+                  <Tooltip title='Part of an alert group — click to open the leading alert'>
+                    <span
+                      style={{ cursor: 'pointer' }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        window.open(`/investigate?id=${item.incident_group_leader_id}&accountId=${item.account_id}`, '_blank');
+                      }}
+                    >
+                      <Chip variant='tag' tone='neutral' size='xs' data-testid='inbox-group-child-chip'>
+                        GROUPED
                       </Chip>
                     </span>
                   </Tooltip>
@@ -866,6 +899,9 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
         'is_new_issue',
         'fingerprint_first_seen_at',
         'fingerprint_event_count',
+        'incident_group_size',
+        'is_incident_child',
+        'incident_group_leader_id',
       ];
       groupCols = ['tenant_id', 'account_id', 'subject_name', 'subject_namespace', 'aggregation_key', 'fingerprint'];
     } else if (groupEventType === 'app') {
@@ -1294,7 +1330,22 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
             tableHeadingCenter={['Severity']}
             showExpandable
             expandable={{
-              tabs: [{ text: 'Events', key: 'events' }],
+              // Per-row tab order: rows in an alert group open on Grouped
+              // Alerts; ungrouped rows open on their occurrences instead of an
+              // empty group message (#34655).
+              tabs: (dq: any) => {
+                // The table passes the row's merged drilldownQuery here.
+                if (groupEventType !== 'fingerprint') {
+                  return [{ text: 'Events', key: 'events' }];
+                }
+                const eventsTab = { text: 'Events', key: 'events' };
+                const groupedTab = {
+                  text: 'Grouped Alerts',
+                  key: 'incident-members',
+                  componentFn: (_opt: any, q: any) => <IncidentGroupDrilldown eventId={q.latestEventId} accountId={q.accountId} />,
+                };
+                return dq?.hasAlertGroup ? [groupedTab, eventsTab] : [eventsTab, groupedTab];
+              },
             }}
           />
         </ListingLayout.Body>

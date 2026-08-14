@@ -310,7 +310,7 @@ function InvestigateSidebar({
 
             {row?.incident_leader_id && (
               <Box sx={{ display: 'grid', flexDirection: 'column', alignItems: 'flex-start', gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr` }}>
-                <Text value={'Same incident'} secondaryText />
+                <Text value={'Alert group'} secondaryText />
                 <Box sx={{ minHeight: ds.space.mul(0, 9), fontSize: 'var(--ds-text-body)' }}>
                   <Link
                     style={{ textDecoration: 'none', display: 'inline-flex', margin: '0' }}
@@ -832,8 +832,8 @@ function InvestigateSidebar({
               subjectName={row?.subject_name}
               subjectNamespace={row?.subject_namespace}
               resetStateWhenItemSelected={onResetState}
-              title={`Same Incident (${row.incident_member_count})`}
-              placeholder='Grouped alerts on this subject'
+              title={`Grouped Alerts (${row.incident_member_count})`}
+              placeholder='Alerts grouped with this event'
               optionsOverride={incidentMembers.map((m) => ({
                 value: String(m.id),
                 label: m.title || m.aggregation_key,

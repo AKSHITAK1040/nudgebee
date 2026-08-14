@@ -829,6 +829,11 @@ function buildEventFilterParams(query: any) {
   if (query?.incident_leader_id) {
     filterParams['incident_leader_id'] = { _eq: query['incident_leader_id'] };
   }
+  // Fold incident children out of the list: only leaders and ungrouped events
+  // remain, each group represented by its leader row (#34655).
+  if (query?.hide_incident_children) {
+    filterParams['incident_leader_id'] = { _is_null: true };
+  }
   if (Array.isArray(query?.aggregation_key_nin) && query['aggregation_key_nin'].length) {
     filterParams['aggregation_key'] = { ...(filterParams['aggregation_key'] || {}), _not_in: query['aggregation_key_nin'] };
   }
@@ -1695,10 +1700,13 @@ const apiKubernetes = {
        finding_id
        fingerprint
        subject_owner
+       source
        computed_score
        computed_priority
        score_factors
-       score_confidence${issueTypeFields}
+       score_confidence
+       incident_leader_id
+       incident_member_count${issueTypeFields}
      }
    }
  }`;
