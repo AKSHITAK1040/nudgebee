@@ -260,17 +260,11 @@ const Header1 = ({ showBorder = false }) => {
       },
       {
         // The fleet-wide overview across every provider's accounts. /kubernetes
-        // keeps an entry because it is still a route — a redirector that shows a
-        // spinner while it resolves which cluster (or /overview) to open.
+        // is intentionally absent here — it is a pure redirector (spinner only),
+        // so giving it a header entry would flash "Account Overview" for a beat
+        // before it resolves to the cluster detail page's own title.
         name: 'Account Overview',
         route: '/overview',
-        icon: ClusterIconBlue,
-        showActiveCluster: false,
-        connectClusterButton: true,
-      },
-      {
-        name: 'Account Overview',
-        route: '/kubernetes',
         icon: ClusterIconBlue,
         showActiveCluster: false,
         connectClusterButton: true,
