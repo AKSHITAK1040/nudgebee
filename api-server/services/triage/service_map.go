@@ -292,30 +292,53 @@ func (g *DependencyGraph) registerNodeAliases(canonical, namespace, nodeType, na
 	}
 	// Event-side kind synonyms. nodeType is the canonical form (from the graph
 	// source); the rest are what different event collectors typically write.
-	kinds := []string{nodeType, "Deployment", "StatefulSet", "DaemonSet", "Rollout", "Pod", "Service", "Workload"}
-	seen := make(map[string]struct{}, len(kinds)*2)
+	// Lowercase variants included because k8s enrichers write kinds lowercase
+	// ("deployment") while graph sources capitalize.
+	base := []string{nodeType, "Deployment", "StatefulSet", "DaemonSet", "Rollout", "Pod", "Service", "Workload"}
+	kinds := make([]string, 0, len(base)*2)
+	for _, kind := range base {
+		kinds = append(kinds, kind)
+		if lower := strings.ToLower(kind); lower != kind {
+			kinds = append(kinds, lower)
+		}
+	}
+	seen := make(map[string]struct{}, len(kinds)*2+2)
+	register := func(key string) {
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		if key == canonical {
+			return
+		}
+		if _, isCanonical := g.Nodes[key]; isCanonical {
+			// Don't shadow a real canonical node with an alias.
+			return
+		}
+		if _, already := g.nodeAliases[key]; already {
+			return
+		}
+		g.nodeAliases[key] = canonical
+	}
 	for _, kind := range kinds {
 		if kind == "" {
 			continue
 		}
 		for _, sep := range []string{":", "/"} {
-			key := fmt.Sprintf("%s%s%s%s%s", namespace, sep, kind, sep, name)
-			if _, dup := seen[key]; dup {
-				continue
-			}
-			seen[key] = struct{}{}
-			if key == canonical {
-				continue
-			}
-			if _, isCanonical := g.Nodes[key]; isCanonical {
-				// Don't shadow a real canonical node with an alias.
-				continue
-			}
-			if _, already := g.nodeAliases[key]; already {
-				continue
-			}
-			g.nodeAliases[key] = canonical
+			register(fmt.Sprintf("%s%s%s%s%s", namespace, sep, kind, sep, name))
 		}
+	}
+	// Two-part form: k8s collectors write events.service_key as "ns/name"
+	// with no kind at all (e.g. "nudgebee-on-prem-test/temporal-frontend").
+	// Without this alias every graph lookup keyed on a real service_key
+	// silently misses — which no-ops both incident topology grouping and the
+	// legacy correlation engine's cross-service scoring. Priority ordering at
+	// the call site still applies: Workload nodes register first and are not
+	// overwritten by same-named Service/K8sService nodes. Guarded so an empty
+	// namespace or name can't mint malformed "/name" or "ns/" aliases.
+	if namespace != "" && name != "" {
+		register(namespace + "/" + name)
+		register(namespace + ":" + name)
 	}
 }
 
