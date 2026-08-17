@@ -990,11 +990,11 @@ const KubernetesWorkloadsTable = ({ accountId, resource_ids = [] }) => {
             <Typography
               sx={{
                 '& .suffix': {
-                  color: ds.gray[400],
+                  color: ds.gray[600],
                   fontSize: 'var(--ds-text-small)',
                 },
                 '& span': {
-                  color: ds.gray[400],
+                  color: ds.gray[600],
                   fontSize: 'var(--ds-text-small)',
                 },
               }}
@@ -1013,7 +1013,7 @@ const KubernetesWorkloadsTable = ({ accountId, resource_ids = [] }) => {
                   value={matchedItem.avg_cpu_request || null}
                   suffix={'vCPU'}
                   sx={{
-                    color: ds.gray[400],
+                    color: ds.gray[600],
                     fontSize: 'var(--ds-text-small)',
                   }}
                 />
@@ -1027,16 +1027,16 @@ const KubernetesWorkloadsTable = ({ accountId, resource_ids = [] }) => {
             <Typography
               sx={{
                 '& .sufix': {
-                  color: ds.gray[400],
+                  color: ds.gray[600],
                   fontSize: 'var(--ds-text-small)',
                 },
                 '& span': {
-                  color: ds.gray[400],
+                  color: ds.gray[600],
                   fontSize: 'var(--ds-text-small)',
                 },
               }}
             >
-              <Memory value={matchedItem.avg_memory_used || null} />
+              <Memory value={matchedItem.avg_memory_used || null} sx={{ color: ds.gray[700], fontSize: 'var(--ds-text-body-lg)' }} />
               <span style={{ paddingLeft: ds.space[1] }}>
                 {matchedItem.avg_memory_request && matchedItem.avg_memory_used
                   ? `(${((matchedItem.avg_memory_used / matchedItem.avg_memory_request) * 100).toFixed(1)}%)`
@@ -1048,7 +1048,7 @@ const KubernetesWorkloadsTable = ({ accountId, resource_ids = [] }) => {
                 <Memory
                   value={matchedItem.avg_memory_request || null}
                   sx={{
-                    color: ds.gray[400],
+                    color: ds.gray[600],
                     fontSize: 'var(--ds-text-small)',
                   }}
                 />
