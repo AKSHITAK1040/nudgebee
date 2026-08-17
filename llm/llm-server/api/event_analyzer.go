@@ -464,6 +464,19 @@ func processEventAnalysis(c *gin.Context, tracer trace.Tracer, meter metric.Mete
 	executeEventInvestigation(context, request, c)
 }
 
+// shouldAttributeToSystemUser reports whether an event analysis run must be
+// attributed to the system user rather than the caller's own identity.
+// regenerate is the one signal that reliably means a human asked for this
+// (set only by the UI's "Regenerate" action, see RCACard.js). Everything
+// else — first-time analyses auto-triggered on event ingestion, and any
+// implicit re-trigger, e.g. a plain page view silently retrying a previously
+// failed analysis that produced no output — is automated, not user-driven,
+// and must not get tagged with whichever operator's session happened to be
+// open when it ran (#35805).
+func shouldAttributeToSystemUser(existingAnalysis *events.EventAnalysis, regenerate bool) bool {
+	return existingAnalysis == nil || !regenerate
+}
+
 func executeEventAnalysis(ctx *security.RequestContext, c *gin.Context, request any, analysisType events.EventAnalysisType, analysisFunc func(ctx *security.RequestContext, request any) (any, error)) {
 	dbManager, err := common.GetDatabaseManager(common.Metastore)
 	if err != nil {
@@ -520,12 +533,7 @@ func executeEventAnalysis(ctx *security.RequestContext, c *gin.Context, request 
 		return
 	}
 
-	// First-time analyses are system-initiated (auto-triggered on event
-	// ingestion), not user-driven. Attribute them to the system user so
-	// token-usage, audit, and conversation rows don't get tagged with
-	// whichever operator happened to hit the API first. Re-analyses
-	// (existingAnalysis != nil) keep the caller's identity.
-	if existingAnalysis == nil {
+	if shouldAttributeToSystemUser(existingAnalysis, regenerate) {
 		userId = security.GetSystemUserId()
 		switch r := request.(type) {
 		case EventRCAAnalysisRequest:
