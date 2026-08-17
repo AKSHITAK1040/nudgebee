@@ -4044,6 +4044,7 @@ input AIGetLogQueryRequest {
   user_id: String
   async: Boolean
   log_provider: String
+  index: String
 }
 
 input AiFeedbackCreateRequest {

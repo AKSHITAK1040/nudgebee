@@ -94,6 +94,11 @@ export interface GenerateQueryRequest {
   // user's "Log Provider:" dropdown selection, when it differs from the
   // account's default. Ignored by the other AI query-generation actions.
   log_provider?: string;
+  // Optional Elasticsearch index for ai_generate_log_query — the user's "Select
+  // an Index" dropdown selection. ES field sets are per-index, so this both
+  // scopes the fields the generator is shown and pins the index the generated
+  // query resolves against. Ignored by backends with no index concept.
+  index?: string;
 }
 
 export interface InvestigateRequest {

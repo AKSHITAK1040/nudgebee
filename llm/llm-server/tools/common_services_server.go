@@ -298,6 +298,17 @@ func GetLogsQueryPreview(ctx *security.RequestContext, accountId string, logProv
 	}
 	setRequestIndex(&logRequest, p.index)
 
+	// The index has to ride in `request`, not just the top-level field:
+	// services-server's FetchLogRequest — the struct logs_get_query decodes
+	// into — has no top-level index at all, and reads it only out of the
+	// free-form request bag (labelDiscoveryRequest). Without this, an ES index
+	// selection is silently dropped and logs_get_query type-checks the where
+	// clause against whichever index label discovery falls back to, since
+	// Elasticsearch field types are per-index.
+	if p.index != "" {
+		logRequest.Request = map[string]any{"index": p.index}
+	}
+
 	output, err := services_server.GetLogsQuery(*ctx, logRequest)
 	if err != nil {
 		return "", err

@@ -76,6 +76,12 @@ type ConversationApiRequest struct {
 	// question a response answers. Never read or interpreted here; passed
 	// through unchanged.
 	ReplyRef string `json:"reply_ref,omitempty"`
+	// Index optionally pins /log-query generation to a specific Elasticsearch
+	// index — the logs tab's "Select an Index" dropdown selection. It scopes the
+	// field list the query generator is shown (fields are per-index) and is the
+	// index the generated query is resolved against. Ignored for backends with
+	// no index concept (Loki, …) and by every other handler.
+	Index string `json:"index,omitempty"`
 }
 
 type ConversationTerminateApiRequest struct {
@@ -1399,7 +1405,7 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 			source = request.Source
 		}
 
-		var logQueryChain = agents.NewLogQueryAgent(request.AccountId, request.LogProvider)
+		var logQueryChain = agents.NewLogQueryAgent(request.AccountId, request.LogProvider, request.Index)
 		// Check budget limits for tenant and account
 		module := budget.ModuleUserInvestigation
 		if strings.HasPrefix(request.SessionId, events.SessionIdPrefixEvent) {
