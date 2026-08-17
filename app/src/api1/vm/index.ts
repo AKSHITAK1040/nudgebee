@@ -285,6 +285,15 @@ mutation ScanVm($accountId: String!, $datasourceId: String!, $cloudResourceId: S
   }
 }`;
 
+const SCAN_VM_ACCOUNT = `
+mutation ScanVmAccount($accountId: String!) {
+  security_scan_vm_account(object: {
+    account_id: $accountId
+  }) {
+    data
+  }
+}`;
+
 const safeParse = (value: any) => {
   if (typeof value !== 'string') return value;
   try {
@@ -616,6 +625,20 @@ const apiVm = {
       throw new Error(errors[0]?.message || 'Failed to start VM scan');
     }
     return response?.data?.data?.security_scan_vm?.data || [];
+  },
+
+  /**
+   * Fire an on-demand scan for every instance reachable by the account's
+   * discovery datasource(s). Same ack-now/runs-detached contract as scanVm;
+   * fails with a clear error when no discovery agent is configured.
+   */
+  async scanVmAccount({ accountId }: { accountId: string }) {
+    const response = await queryGraphQL(SCAN_VM_ACCOUNT, 'ScanVmAccount', { accountId });
+    const errors = response?.data?.errors;
+    if (errors?.length) {
+      throw new Error(errors[0]?.message || 'Failed to start account scan');
+    }
+    return response?.data?.data?.security_scan_vm_account?.data || [];
   },
 };
 

@@ -307,7 +307,7 @@ func buildVulnerabilityRow(pkg Package, f vulnmatcher.Finding) models.Vulnerabil
 		PackageType:  nonEmptyPtr(pkg.Type),
 		FixedVersion: nonEmptyPtr(f.FixedVersion),
 		Severity:     &severity,
-		CVSSScore:    &f.CVSSv3Score,
+		CVSSScore:    f.CVSSv3Score,
 		CVSSVector:   nonEmptyPtr(f.CVSSv3Vector),
 		Description:  nonEmptyPtr(f.Description),
 		DataSource:   nonEmptyPtr(f.DataSource),

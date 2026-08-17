@@ -33,6 +33,33 @@ func TestListDiscoveryDatasources_FiltersIneligible(t *testing.T) {
 	assert.Empty(t, datasources[1].TargetAccountID, "unassociated datasource must resolve to an empty TargetAccountID, not error")
 }
 
+func TestListDiscoveryDatasourcesForAccount_FiltersByTargetAndEligibility(t *testing.T) {
+	mock := withMockDB(t)
+	rows := sqlmock.NewRows([]string{"integration_id", "tenant_id", "account_id", "target_account_id", "labels"}).
+		AddRow("int-1", "tenant-1", "account-1", "aws-account-1", `{"actions":["discovery_sweep","discovery_inventory"],"allowed_cidrs":["172.31.0.0/28"],"pack_versions":[2]}`)
+	mock.ExpectQuery("SELECT i.id::text AS integration_id").
+		WithArgs("aws-account-1").
+		WillReturnRows(rows)
+
+	datasources, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "aws-account-1")
+	require.NoError(t, err)
+	require.Len(t, datasources, 1)
+	assert.Equal(t, "int-1", datasources[0].IntegrationID)
+	assert.Equal(t, "aws-account-1", datasources[0].TargetAccountID)
+}
+
+func TestListDiscoveryDatasourcesForAccount_NoneEligible(t *testing.T) {
+	mock := withMockDB(t)
+	rows := sqlmock.NewRows([]string{"integration_id", "tenant_id", "account_id", "target_account_id", "labels"})
+	mock.ExpectQuery("SELECT i.id::text AS integration_id").
+		WithArgs("aws-account-2").
+		WillReturnRows(rows)
+
+	datasources, err := ListDiscoveryDatasourcesForAccount(mockDBManager, "aws-account-2")
+	require.NoError(t, err)
+	assert.Empty(t, datasources)
+}
+
 func TestGetDiscoveryDatasourceByID_Found(t *testing.T) {
 	mock := withMockDB(t)
 	rows := sqlmock.NewRows([]string{"tenant_id", "target_account_id", "labels"}).
