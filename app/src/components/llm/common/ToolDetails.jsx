@@ -3,14 +3,7 @@ import PropTypes from 'prop-types';
 import { Box, Typography, Grid } from '@mui/material';
 import { ds } from '@utils/colors';
 import { getIcon } from './AgentIcon';
-import {
-  WrenchIcon,
-  AskNudgebeeErrorIcon,
-  AskNudgebeeInProgressIcon,
-  AskNudgebeeSkipIcon,
-  AskNudgebeeSuccessIcon,
-  AskNudgebeeWaitingIcon,
-} from '@assets';
+import { WrenchIcon, AskNudgebeeErrorIcon, AskNudgebeeInProgressIcon, AskNudgebeeSkipIcon, AskNudgebeeSuccessIcon, RunningIcon } from '@assets';
 import SafeIcon from '@shared/icons/SafeIcon';
 import Tooltip from '@ui/Tooltip';
 import Duration from './Duration';
@@ -96,7 +89,7 @@ const getStatusIcon = (status) => {
     return { icon: AskNudgebeeSkipIcon, label: 'Skipped' };
   }
   if (s === 'waiting' || s === 'waiting_for_client' || s === 'waiting_for_client_tool') {
-    return { icon: AskNudgebeeWaitingIcon, label: 'Waiting' };
+    return { icon: RunningIcon, label: 'Waiting' };
   }
   if (s === 'in_progress') {
     return { icon: AskNudgebeeInProgressIcon, label: 'In-Progress' };

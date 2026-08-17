@@ -7,8 +7,8 @@ import SafeIcon from '@shared/icons/SafeIcon';
 import Text from '@shared/format/Text';
 import ConversationCollapsableCard from '@components/llm/common/ConversationCollapsableCardV2';
 import KubernetesLLMRequestResponse from './KubernetesLLMRequestResponseV2';
-import { AskNudgebeeErrorIcon, AskNudgebeeInProgressIcon, AskNudgebeeSkipIcon, AskNudgebeeSuccessIcon, AskNudgebeeWaitingIcon } from '@assets';
-import capitalize from 'lodash/capitalize';
+import { AskNudgebeeErrorIcon, AskNudgebeeInProgressIcon, AskNudgebeeSkipIcon, AskNudgebeeSuccessIcon, RunningIcon } from '@assets';
+import { capitalize } from '@utils/common';
 import { ds } from '@utils/colors';
 import { Button } from '@ui/Button';
 import ReferencesPopover from './common/ReferencesModal';
@@ -29,7 +29,7 @@ const getStatusIcon = (status) => {
     return { icon: AskNudgebeeSkipIcon, label: 'Skipped' };
   }
   if (s === 'waiting') {
-    return { icon: AskNudgebeeWaitingIcon, label: 'Waiting' };
+    return { icon: RunningIcon, label: 'Waiting' };
   }
   if (s === 'in_progress') {
     return { icon: AskNudgebeeInProgressIcon, label: 'In-Progress' };

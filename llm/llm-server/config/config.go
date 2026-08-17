@@ -929,6 +929,11 @@ type appConfig struct {
 	MemoryTTLStaleDays            int `mapstructure:"llm_memory_ttl_stale_days"`
 	MemoryTTLCleanupIntervalHours int `mapstructure:"llm_memory_ttl_cleanup_interval_hours"`
 
+	// WaitingExpireDays: WAITING conversations idle longer than this are marked
+	// TERMINATED so the Waiting list stays an inbox instead of accumulating dead
+	// approvals forever (0 = disabled).
+	WaitingExpireDays int `mapstructure:"llm_server_waiting_expire_days"`
+
 	// LlmCircuitBreakerCooldownSeconds defines how long a model is placed in cooldown after hitting rate limits.
 	LlmCircuitBreakerCooldownSeconds int `mapstructure:"llm_server_circuit_breaker_cooldown_seconds"`
 
@@ -1494,6 +1499,7 @@ func init() {
 	viper.SetDefault("llm_memory_ttl_never_used_days", 90)
 	viper.SetDefault("llm_memory_ttl_stale_days", 180)
 	viper.SetDefault("llm_memory_ttl_cleanup_interval_hours", 24)
+	viper.SetDefault("llm_server_waiting_expire_days", 14)
 
 	viper.SetDefault("llm_server_productivity_metrics_enabled", false)
 

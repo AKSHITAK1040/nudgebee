@@ -23,12 +23,11 @@ import {
   InterruptedIcon,
   QueuedIcon,
   UnknownIcon,
-  // Canonical agent-status glyphs already used by MessageItem — spinner-in-blue
-  // for active, clock-in-amber for awaiting-user. Split off from the older
-  // RunningIcon (arc + dash) which failed the "AI working vs AI waiting on me"
-  // distinction because both statuses shared the same amber icon.
+  // Running = blue spinner, Waiting = amber arc (RunningIcon). The arc is safe
+  // for waiting now that Running is unambiguously blue — the old collision was
+  // both statuses sharing the same amber glyph.
   AskNudgebeeInProgressIcon,
-  AskNudgebeeWaitingIcon,
+  RunningIcon,
 } from '@assets';
 
 export const STATUS_MAP = Object.freeze({
@@ -46,7 +45,7 @@ export const STATUS_ICON_MAP = Object.freeze({
   Running: AskNudgebeeInProgressIcon, // blue spinner — AI is actively working
   Completed: SuccessIcon,
   Failed: ErrorIcon,
-  'Waiting for Approval': AskNudgebeeWaitingIcon, // amber clock — user must click to unblock
+  'Waiting for Approval': RunningIcon, // amber arc — user must click to unblock
   Queued: QueuedIcon, // lighter-blue dashed circle — queued, not started
   Stopped: StoppedIcon, // grey stop square — user pressed Stop
   Interrupted: InterruptedIcon, // amber dash — supervisor reap, cut short
