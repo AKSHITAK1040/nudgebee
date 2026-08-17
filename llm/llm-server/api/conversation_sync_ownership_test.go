@@ -69,6 +69,25 @@ func TestOwnOrphanRecovery(t *testing.T) {
 		"work begun after this process started is live, not an orphan of a previous run")
 }
 
+// TestOwnOrphanRecoveryCoversSameNameRestart is the case the dead-worker reaper structurally
+// cannot see. That reaper matches on "owner absent from nb_workers", so a process that returns
+// under the SAME name — an OOMKilled container, whose pod name survives the restart — never
+// looks dead, and its in-flight messages are stranded. The boot sweep is what closes that,
+// which is why it registers in-cluster too and not only on developer machines.
+func TestOwnOrphanRecoveryCoversSameNameRestart(t *testing.T) {
+	pod := "llm-server-7f86ddd467-d6scf" // a pod name, deliberately not a local: name
+	cut := time.Now().Add(-time.Minute)  // stands in for the DB-side boot cutoff
+
+	abandoned := ago(30 * time.Minute) // in flight when the container was OOMKilled
+	assert.True(t, isOwnOrphanRecoverable(msg(pod, "user", abandoned), cut),
+		"a restarted container must reclaim the work it abandoned — the dead-worker reaper "+
+			"cannot, because the pod re-registers under the same worker name")
+
+	inFlight := time.Now()
+	assert.False(t, isOwnOrphanRecoverable(msg(pod, "user", &inFlight), cut),
+		"work started after this process booted belongs to the live request, not the sweep")
+}
+
 // TestOrphanRecoveryHorizon pins the shared horizon. Both recovery paths read this
 // one constant — the boot sweep via time.Since, the dead-worker query via
 // make_interval — so the value itself is the contract between them.

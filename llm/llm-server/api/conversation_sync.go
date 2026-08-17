@@ -71,15 +71,20 @@ func init() {
 		slog.Error("sync: unable to create sync_stuck_event_analyses job", "error", err)
 	}
 
-	// Keyed on locality, not eligibility: the cluster reaper skips whatever carries the
-	// "local:" prefix, and that prefix is decided by IsInCluster. Gating this on
-	// eligibility instead would strand a laptop's orphans whenever a developer forces
-	// LLM_SERVER_SCHEDULER_LEADER_ELIGIBLE=true — skipped by the cluster, swept by
-	// nobody.
-	if !config.IsInCluster() {
-		if err := common.NewPooledJob("sync_own_orphan_messages", syncOwnOrphanMessages); err != nil {
-			slog.Error("sync: unable to create sync_own_orphan_messages job", "error", err)
-		}
+	// Registered everywhere, pods included. The dead-worker reaper above can only recover
+	// a message whose owner has vanished from nb_workers, so it is blind to any process
+	// that comes back under the SAME worker name — which is exactly what an OOMKilled
+	// container does: the pod (and its name) survives, only the container restarts, and
+	// the heartbeat resumes as if nothing happened. Its in-flight messages then stay
+	// IN_PROGRESS forever, with the restarted process often being the very leader running
+	// the reaper that skips them. Observed on dev: llm-server-7f86ddd467-d6scf, OOMKilled
+	// twice in one afternoon, still holding an orphan 35 minutes later.
+	//
+	// Safe in-cluster because bootCutoff() bounds the sweep to work that predates this
+	// process: a restarted container recovers what it abandoned and cannot touch a request
+	// its siblings are still serving.
+	if err := common.NewPooledJob("sync_own_orphan_messages", syncOwnOrphanMessages); err != nil {
+		slog.Error("sync: unable to create sync_own_orphan_messages job", "error", err)
 	}
 }
 
