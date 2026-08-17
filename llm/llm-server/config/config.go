@@ -42,10 +42,16 @@ func (c *appConfig) GetFloat64(key string, defaultValue float64) float64 {
 var Config appConfig
 
 // SERVICE_NAME is the worker_type used in the leader-election table (nb_workers).
-// Defaults to "llm-server" so production behavior is unchanged. Local developers
-// can override via LLM_SERVER_SERVICE_NAME=llm-server-<dev> to opt out of the
-// shared election pool — each dev's local llm-server then has its own pool of
-// one, always wins the leader lease, and runs the watch dispatcher reliably.
+// Defaults to "llm-server" so production behavior is unchanged.
+//
+// To run leader jobs locally, a developer needs BOTH knobs:
+// LLM_SERVER_SCHEDULER_LEADER_ELIGIBLE=true to be electable at all (see
+// IsSchedulerLeaderEligible), and LLM_SERVER_SERVICE_NAME=llm-server-<dev> to be
+// elected in a private pool. The second without the first is silent — the process
+// heartbeats and never wins. The first without the second is worse: it makes the
+// laptop leader of the shared fleet, and the dead-worker query is scoped to
+// worker_type, so every real pod looks dead to it and their conversations get
+// restarted on the laptop.
 var SERVICE_NAME = func() string {
 	if v := os.Getenv("LLM_SERVER_SERVICE_NAME"); v != "" {
 		return v
@@ -429,6 +435,13 @@ type appConfig struct {
 	LlmServerImageMaxSizeMB     float64 `mapstructure:"llm_server_image_max_size_mb"`
 
 	ServerName string `mapstructure:"llm_server_name"`
+	// SchedulerLeaderEligible controls whether this process may win the scheduler
+	// leader election. "auto" (default) grants eligibility to in-cluster replicas
+	// only; "true"/"false" force it. Developer machines run against the shared
+	// metastore, and the election is first-come with no preemption — an unguarded
+	// laptop wins it and silently disables every leader job in the cluster for as
+	// long as it keeps heartbeating.
+	SchedulerLeaderEligible string `mapstructure:"llm_server_scheduler_leader_eligible"`
 	// ServerHeartBeatFrequncySecond defines how often the server sends a heartbeat to indicate it is alive.
 	ServerHeartBeatFrequncySecond int `mapstructure:"server_heartbeat_frequency_second"`
 	// ServerHeartBeatTimeoutSecond defines the time after which a server is considered dead if no heartbeat is received.
@@ -1559,6 +1572,7 @@ func init() {
 	}
 
 	viper.SetDefault("llm_server_name", hostName)
+	viper.SetDefault("llm_server_scheduler_leader_eligible", "auto")
 
 	err = viper.ReadInConfig()
 	if err != nil {
@@ -1595,12 +1609,63 @@ func init() {
 		Config.OtelMetricsExporter = Config.OtelExporter
 	}
 
+	// Tag workers running outside the cluster. Locality has to be part of the name:
+	// a worker's nb_workers row is deleted once it stops, so by the time its
+	// conversation messages look orphaned there is nothing left to join against —
+	// this prefix is the only durable record of who owned them.
+	if !IsInCluster() && !strings.HasPrefix(Config.ServerName, LocalWorkerNamePrefix) {
+		Config.ServerName = LocalWorkerNamePrefix + Config.ServerName
+	}
+
 	if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
 		namespace := strings.TrimSpace(string(data))
 		if namespace != "" {
 			Config.LlmServerCodeAgentNamespace = namespace
 		}
 	}
+}
+
+// OrphanRecoveryHorizon bounds how stale an abandoned conversation may be and still
+// be restarted. Shared by both recovery paths — the cluster's dead-worker query and
+// the boot-time own-orphan sweep — so they cannot drift into disagreeing about what
+// counts as abandoned. Past this point nobody is waiting for the answer, and
+// resuming only spends LLM budget.
+const OrphanRecoveryHorizon = 48 * time.Hour
+
+// LocalWorkerNamePrefix marks a worker — and every conversation message it owns —
+// as running outside the cluster. ':' is not legal in a hostname or a pod name, so
+// the prefix can never collide with a real in-cluster worker.
+const LocalWorkerNamePrefix = "local:"
+
+// IsInCluster reports whether this process runs as a Kubernetes pod. The kubelet
+// injects KUBERNETES_SERVICE_HOST into every container and it is never set on a
+// developer machine.
+func IsInCluster() bool {
+	return os.Getenv("KUBERNETES_SERVICE_HOST") != ""
+}
+
+// IsSchedulerLeaderEligible reports whether this process may claim scheduler
+// leadership. Physical locality (IsInCluster) and this policy are deliberately
+// separate: forcing eligibility on a laptop lets a developer exercise leader jobs
+// without also making the cluster treat that laptop's conversations as its own.
+func IsSchedulerLeaderEligible() bool {
+	switch strings.ToLower(strings.TrimSpace(Config.SchedulerLeaderEligible)) {
+	case "true":
+		return true
+	case "false":
+		return false
+	default:
+		return IsInCluster()
+	}
+}
+
+// IsLocalWorkerName reports whether a worker name belongs to a process running
+// outside the cluster. The trailing checks cover rows written before
+// LocalWorkerNamePrefix existed, which carry a bare hostname or loopback address.
+func IsLocalWorkerName(name string) bool {
+	return strings.HasPrefix(name, LocalWorkerNamePrefix) ||
+		name == "localhost" || name == "127.0.0.1" || name == "0.0.0.0" || name == "::" ||
+		strings.Contains(name, ".local")
 }
 
 const insecureJWTSecret = "default-jwt-secret"

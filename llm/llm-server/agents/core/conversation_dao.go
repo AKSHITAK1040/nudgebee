@@ -2033,9 +2033,18 @@ func (chat *ConversationDao) ListConversationMessages(status ConversationStatus,
 	if deadWorker {
 		query += fmt.Sprintf(" AND worker_name not in (select worker_name from nb_workers where worker_type = $%d)", len(args)+1)
 		args = append(args, config.SERVICE_NAME)
-		// Only look at messages updated within the last 48 hours to avoid fetching
-		// ancient stuck records (3,600+ rows from months ago causing 30-60s query times)
-		query += " AND updated_at > now() - interval '48 hours'"
+		// Only look at recently-updated messages to avoid fetching ancient stuck
+		// records (3,600+ rows from months ago causing 30-60s query times). The
+		// horizon is shared with the boot-time own-orphan sweep so the two recovery
+		// paths cannot disagree about what counts as abandoned.
+		// Bound against the database clock, not the caller's: this query runs on every
+		// replica, and updated_at is written with now(), so the DB is the one clock all
+		// of them agree on.
+		// make_interval takes a number, so the horizon crosses into SQL as seconds and
+		// never as text — no dependence on how Go formats a Duration or on how Postgres
+		// parses it.
+		query += fmt.Sprintf(" AND updated_at > now() - make_interval(secs => $%d)", len(args)+1)
+		args = append(args, config.OrphanRecoveryHorizon.Seconds())
 	}
 
 	query += " ORDER BY created_at"
