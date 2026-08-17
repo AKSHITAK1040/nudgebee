@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -712,7 +713,12 @@ func FetchLogs(ctx *security.RequestContext, fetchLogRequest FetchLogRequest) (F
 		}
 	}
 	if err != nil {
-		return FetchLogsResult{}, err
+		// Carry the executed query and resolved provider even on failure: the
+		// caller records a FAILED history row from them, and the client has no
+		// other way to learn what actually ran (Builder mode sends a where
+		// clause and no query string). Logs stays nil, so callers that inspect
+		// the result after a non-nil error are unaffected.
+		return FetchLogsResult{Query: usedQuery, Provider: provider}, err
 	}
 	normalizeOutputLogLabels(logs, filteringMap)
 
@@ -2711,6 +2717,20 @@ func parseRequestMetadata(reqMap map[string]any) (RequestMetadata, error) {
 }
 
 func SaveUserHistory(ctx *security.RequestContext, userHistoryRequest UserHistoryRequest) (map[string]string, error) {
+	return SaveUserHistoryForUser(
+		ctx,
+		ctx.GetSecurityContext().GetUserId(),
+		ctx.GetSecurityContext().GetTenantId(),
+		userHistoryRequest,
+	)
+}
+
+// SaveUserHistoryForUser is SaveUserHistory with the identity passed explicitly.
+//
+// Async callers snapshot user/tenant off the request context before spawning
+// their goroutine, so the INSERT never reads context state that may have gone
+// away once the handler returned.
+func SaveUserHistoryForUser(ctx *security.RequestContext, userId, tenantId string, userHistoryRequest UserHistoryRequest) (map[string]string, error) {
 	if userHistoryRequest.AccountId == "" {
 		return nil, fmt.Errorf("account id is required")
 	}
@@ -2730,7 +2750,14 @@ func SaveUserHistory(ctx *security.RequestContext, userHistoryRequest UserHistor
 	// explicitly — time.Now() would store the process-local wall clock and read back
 	// labeled as UTC (see issue #31312).
 	now := time.Now().UTC()
-	_, err = dbms.Exec(query, ctx.GetSecurityContext().GetUserId(), ctx.GetSecurityContext().GetTenantId(), userHistoryRequest.AccountId, userHistoryRequest.Module, userHistoryRequest.Data, now, now, userHistoryRequest.Duration, userHistoryRequest.Status)
+	// ExecContext, not Exec: the async caller wraps this in a bounded context, and
+	// that bound only reaches the driver if the context is propagated. database/sql
+	// panics on a nil context, so fall back to Background.
+	execCtx := ctx.GetContext()
+	if execCtx == nil {
+		execCtx = context.Background()
+	}
+	_, err = dbms.ExecContext(execCtx, query, userId, tenantId, userHistoryRequest.AccountId, userHistoryRequest.Module, userHistoryRequest.Data, now, now, userHistoryRequest.Duration, userHistoryRequest.Status)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert record in user_history: %w", err)

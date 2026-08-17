@@ -581,16 +581,6 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     };
   };
 
-  const createUserHistory = async (query: string, status: string, duration: number) => {
-    await observability.createUserHistory({
-      account_id: accountId,
-      data: query,
-      duration: duration,
-      module: `metrics_query_${metricsProvider}`,
-      status: status,
-    });
-  };
-
   const handleSubmit = (
     query = '',
     queryKeys = [''],
@@ -610,7 +600,6 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     setChartData([]);
     setTruncationWarnings({});
 
-    const now = new Date().getTime();
     const queryBlocks = query
       .replace(/^;+|;+$/g, '')
       .split(';')
@@ -658,6 +647,10 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
       ...(metricsProvider !== null && metricsProvider !== undefined ? { metric_provider: metricsProvider } : {}),
       ...(metricsProvider === 'solarwinds' && solarwindsRequest ? { request: solarwindsRequest } : {}),
       ...(metricsProvider === 'ES' && esIndex ? { request: { metric_name: esIndex, ...(qLEditor === 'code' ? { query_type: 'dsl' } : {}) } } : {}),
+      // The backend records query history; this flag distinguishes a real submit
+      // from the date-range/instant-toggle re-runs that reuse this same path.
+      // See FetchMetricsRequest.RecordHistory.
+      record_history: fromOnSubmit,
     };
 
     observability
@@ -675,22 +668,18 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
           const displayMessage =
             errorMessages.length > 0 ? errorMessages.join('\n') : 'Invalid query: No data returned. Please check your query syntax.';
           snackbar.error(displayMessage);
-          fromOnSubmit && createUserHistory(query, 'FAILED', new Date().getTime() - now);
         } else if (results?.length) {
           const { tableData, graphData, truncationInfo } = processEvidenceDataKeys(results, getQueryByKey);
           setData(tableData);
           setChartData(graphData);
           setTruncationWarnings(truncationInfo);
-          fromOnSubmit && createUserHistory(query, 'SUCCESS', new Date().getTime() - now);
         } else if (res?.data?.errors?.length) {
           setData([]);
           setChartData([]);
           snackbar.error(`failed to query metrics ${parseHttpResponseBodyMessage(res?.data)}`);
-          fromOnSubmit && createUserHistory(query, 'FAILED', new Date().getTime() - now);
         } else {
           setData([]);
           setChartData([]);
-          fromOnSubmit && createUserHistory(query, 'SUCCESS', new Date().getTime() - now);
         }
         if (type == 'ai') {
           aiCreateFeedback(true, query, llmQueryResponse);
@@ -698,7 +687,6 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
       })
       .catch(() => {
         snackbar.error('Failed to fetch the Data');
-        fromOnSubmit && createUserHistory(query, 'FAILED', new Date().getTime() - now);
       })
       .finally(() => {
         setLoading(false);
@@ -845,7 +833,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
                       )}
                     </>
                   )}
-                  <UserHistoryButton accountId={accountId} module={`metrics_query_${metricsProvider}`} />
+                  <UserHistoryButton accountId={accountId} module={`metrics_query_${metricsProvider?.toLowerCase()}`} />
                 </>
               )}
               {showDateTime && (

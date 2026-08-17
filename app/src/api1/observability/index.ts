@@ -15,6 +15,7 @@ query FetchLogs(
   $step_interval: Int
   $query_request: jsonb
   $request: jsonb
+  $record_history: Boolean
 ) {
   logs_list(request: {
     account_id: $account_id
@@ -29,6 +30,7 @@ query FetchLogs(
     step_interval: $step_interval
     query_request: $query_request
     request: $request
+    record_history: $record_history
   }) {
     logs {
       timestamp
@@ -61,14 +63,6 @@ query FetchLogLabelValues {
 }
 `;
 
-const USER_HISTORY = `
-mutation UserHistory {
-  users_create_history(request: __WHERE__) {
-    status
-  }
-}
-`;
-
 const observability = {
   async fetchLogs(data: any) {
     try {
@@ -94,6 +88,7 @@ const observability = {
         step_interval: data.step_interval,
         query_request: data.query_request,
         request: data.request,
+        record_history: data.record_history,
       });
       return response;
     } catch (error) {
@@ -124,14 +119,6 @@ const observability = {
       console.log('failed to fetch log label values-', error);
       throw error;
     }
-  },
-
-  async createUserHistory(data: any) {
-    if (!data.data) {
-      return;
-    }
-    const response = await queryGraphQL(USER_HISTORY.replace('__WHERE__', gqlStringify(data)), 'UserHistory');
-    return response;
   },
 
   async metricsList(accountId: string, options?: { metricProvider?: string; metricProviderSource?: string; serviceName?: string }) {
@@ -250,6 +237,7 @@ const observability = {
       $request: jsonb
       $metric_provider: String
       $metric_provider_source: String
+      $record_history: Boolean
     ) {
       metrics_list(
         request: {
@@ -261,6 +249,7 @@ const observability = {
           request: $request
           metric_provider: $metric_provider
           metric_provider_source: $metric_provider_source
+          record_history: $record_history
         }
       ) {
         results
@@ -288,6 +277,7 @@ const observability = {
         request: data.request,
         metric_provider: data.metric_provider,
         metric_provider_source: data.metric_provider_source,
+        record_history: data.record_history,
       });
       return response;
     } catch (err) {

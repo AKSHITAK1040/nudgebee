@@ -34,6 +34,14 @@ type FetchLogRequest struct {
 	// Off by default so existing callers keep the plain empty-result behavior;
 	// opt-in callers (notably the LLM agent) enable it to self-correct.
 	ValidateRequest bool `json:"validate_request"`
+	// RecordHistory opts this call into a user_history row. Set ONLY by the
+	// browser's Run button: /rpc/logs is shared by the UI, llm-server,
+	// runbook-server and cost-server behind one X-ACTION-TOKEN, and polling,
+	// dashboard panels and drilldowns all reach the same action, so recording is
+	// opt-in rather than inferred. Deliberately a typed top-level field and not
+	// a key in Request — that map is provider-parameter space that LLM tools
+	// populate freely, which would make this flag agent-settable.
+	RecordHistory bool `json:"record_history"`
 }
 
 type OutputLog struct {
@@ -156,6 +164,9 @@ type FetchMetricsRequest struct {
 	Labels               map[string]string    `json:"labels"`         // eq-only; used by internal callers
 	LabelMatchers        []LabelMatcher       `json:"label_matchers"` // synthesized per-item by GetMetricsQuery; not sent from UI
 	QueryItems           map[string]QueryItem `json:"query_items"`    // BUILDER per-key shape: {key: {metric, label_matchers}}
+	// RecordHistory opts this call into a user_history row; see the identically
+	// named field on FetchLogRequest for why this is opt-in and top-level.
+	RecordHistory bool `json:"record_history"`
 }
 
 type FetchMetricLabelsRequest struct {

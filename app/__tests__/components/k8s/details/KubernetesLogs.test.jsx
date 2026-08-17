@@ -69,7 +69,6 @@ jest.mock('@api1/observability', () => ({
   default: {
     fetchLogs: jest.fn(),
     fetchLogLabels: jest.fn(),
-    createUserHistory: jest.fn(),
   },
 }));
 
