@@ -688,11 +688,15 @@ func buildWorkspaceResources() corev1.ResourceRequirements {
 			corev1.ResourceMemory: resource.MustParse(config.Config.LlmServerWorkspaceResourceRequestMemory),
 		},
 	}
-	if config.Config.LlmServerWorkspaceResourceLimitCpu != "" && config.Config.LlmServerWorkspaceResourceLimitMemory != "" {
-		resources.Limits = corev1.ResourceList{
-			corev1.ResourceCPU:    resource.MustParse(config.Config.LlmServerWorkspaceResourceLimitCpu),
-			corev1.ResourceMemory: resource.MustParse(config.Config.LlmServerWorkspaceResourceLimitMemory),
-		}
+	resources.Limits = corev1.ResourceList{}
+	if config.Config.LlmServerWorkspaceResourceLimitCpu != "" {
+		resources.Limits[corev1.ResourceCPU] = resource.MustParse(config.Config.LlmServerWorkspaceResourceLimitCpu)
+	}
+	if config.Config.LlmServerWorkspaceResourceLimitMemory != "" {
+		resources.Limits[corev1.ResourceMemory] = resource.MustParse(config.Config.LlmServerWorkspaceResourceLimitMemory)
+	}
+	if config.Config.LlmServerWorkspaceResourceLimitStorage != "" {
+		resources.Limits[corev1.ResourceEphemeralStorage] = resource.MustParse(config.Config.LlmServerWorkspaceResourceLimitStorage)
 	}
 	return resources
 }
@@ -1408,6 +1412,9 @@ func (w *workspaceManager) callWorkspaceAPIWithClient(ctx *security.RequestConte
 			return nil, fmt.Errorf("failed to build local request: %w", reqErr)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if localToken := config.Config.LlmServerWorkspaceLocalToken; localToken != "" {
+			req.Header.Set("X-Workspace-Token", localToken)
+		}
 		resp, err := httpClient.Do(req)
 		if err != nil {
 			return nil, fmt.Errorf("local workspace call failed: %w", err)
@@ -1563,6 +1570,9 @@ func (w *workspaceManager) callWorkspaceAPIStream(ctx *security.RequestContext, 
 			return nil, fmt.Errorf("failed to build local stream request: %w", err)
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if localToken := config.Config.LlmServerWorkspaceLocalToken; localToken != "" {
+			req.Header.Set("X-Workspace-Token", localToken)
+		}
 		localClient := &http.Client{}
 		resp, err := localClient.Do(req)
 		if err != nil {

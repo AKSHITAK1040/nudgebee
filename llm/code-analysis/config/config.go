@@ -35,6 +35,7 @@ type ExecutionConfig struct {
 
 type AnalysisConfig struct {
 	MaxProcessingTime time.Duration `mapstructure:"max_processing_time"`
+	CheckInTimeout    time.Duration `mapstructure:"check_in_timeout"`
 	WorkspaceDir      string        `mapstructure:"workspace_dir"`
 	FuzzyThreshold    float64       `mapstructure:"fuzzy_threshold"`
 	MaxResults        int           `mapstructure:"max_results"`
@@ -162,6 +163,7 @@ func LoadConfig() (*Config, error) {
 	viper.SetDefault("server.shutdown_timeout", "30s")
 
 	viper.SetDefault("analysis.max_processing_time", "30m")
+	viper.SetDefault("analysis.check_in_timeout", "2m")
 	viper.SetDefault("analysis.workspace_dir", "/tmp/code-analysis")
 	viper.SetDefault("analysis.fuzzy_threshold", 0.8)
 	viper.SetDefault("analysis.max_results", 100)

@@ -249,6 +249,17 @@ func main() {
 		initLogger.Error(common.EventAnalysisFailure, "Failed to initialize agentic handler", err, nil)
 		log.Fatalf("failed to initialize agentic handler: %v", err)
 	}
+	go func() {
+		ticker := time.NewTicker(15 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			maxAge := cfg.Analysis.MaxProcessingTime + time.Hour
+			if maxAge < 2*time.Hour {
+				maxAge = 2 * time.Hour
+			}
+			handlers.SweepOrphanedAnalysisWorkspaces(maxAge)
+		}
+	}()
 
 	// Initialize execution handler
 	executionHandler := handlers.NewExecutionHandler(cfg)
@@ -261,6 +272,7 @@ func main() {
 	{
 		v1.POST("/analyze", agenticHandler.HandleAnalyze)
 		v1.GET("/status/*id", agenticHandler.HandleStatus)
+		v1.POST("/cancel/*id", agenticHandler.HandleCancel)
 		v1.POST("/execute", executionHandler.HandleExecute)
 
 		// File operations
@@ -277,6 +289,7 @@ func main() {
 	// Root routes
 	router.POST("/analyze", agenticHandler.HandleAnalyze)
 	router.GET("/status/*id", agenticHandler.HandleStatus)
+	router.POST("/cancel/*id", agenticHandler.HandleCancel)
 	router.POST("/execute", executionHandler.HandleExecute)
 
 	// Health check

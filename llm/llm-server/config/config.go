@@ -584,6 +584,7 @@ type appConfig struct {
 	LlmServerWorkspaceDockerNetwork         string `mapstructure:"llm_server_workspace_docker_network"`
 	LlmServerWorkspaceResourceLimitCpu      string `mapstructure:"llm_server_workspace_resource_limit_cpu"`
 	LlmServerWorkspaceResourceLimitMemory   string `mapstructure:"llm_server_workspace_resource_limit_memory"`
+	LlmServerWorkspaceResourceLimitStorage  string `mapstructure:"llm_server_workspace_resource_limit_storage"`
 	LlmServerWorkspaceResourceRequestCpu    string `mapstructure:"llm_server_workspace_resource_request_cpu"`
 	LlmServerWorkspaceResourceRequestMemory string `mapstructure:"llm_server_workspace_resource_request_memory"`
 	// LlmServerWorkspaceCommandTimeout sets SERVER_WRITE_TIMEOUT on the workspace
@@ -653,6 +654,7 @@ type appConfig struct {
 	TraceAgentV2Enabled                    bool   `mapstructure:"llm_server_trace_agent_v2_enabled"`
 	LlmServerWorkspacePort                 int    `mapstructure:"llm_server_workspace_port"`
 	LlmServerWorkspaceLocalUrl             string `mapstructure:"llm_server_workspace_local_url"`
+	LlmServerWorkspaceLocalToken           string `mapstructure:"llm_server_workspace_local_token"`
 	LlmServerWorkspaceFileMaxDownloadBytes int    `mapstructure:"llm_server_workspace_file_max_download_bytes"`
 
 	NotificationServerUrl   string `mapstructure:"notification_service_url"`
@@ -1081,12 +1083,6 @@ type appConfig struct {
 	MemoryMaintenancePatternsStaleDays   int `mapstructure:"llm_memory_maintenance_patterns_stale_days"`
 	MemoryMaintenanceEventsRetentionDays int `mapstructure:"llm_memory_maintenance_events_retention_days"`
 
-	// OSS legacy-memory migration controls. The typed memory-v2 implementation
-	// is excluded, but the retained legacy migration package still consumes
-	// these settings.
-	MemoryMigrationMode        string  `mapstructure:"llm_memory_migration_mode"`
-	MemoryShadowSampleFraction float64 `mapstructure:"llm_memory_shadow_sample_fraction"`
-
 	// Productivity dashboard tunables. The "Time Saved" widget compares each
 	// completed investigation's AI runtime against a flat per-task manual
 	// baseline; the "Savings" widget multiplies the resulting hours by an
@@ -1379,6 +1375,7 @@ func init() {
 
 	viper.SetDefault("llm_server_workspace_resource_limit_cpu", "")
 	viper.SetDefault("llm_server_workspace_resource_limit_memory", "")
+	viper.SetDefault("llm_server_workspace_resource_limit_storage", "5Gi")
 	viper.SetDefault("llm_server_workspace_resource_request_cpu", "250m")
 	viper.SetDefault("llm_server_workspace_resource_request_memory", "256Mi")
 	// 58s: see WorkspaceHTTPClientTimeout / workspaceCommandTimeoutBuffer doc
@@ -1397,10 +1394,11 @@ func init() {
 	viper.SetDefault("llm_k8s_grounding_enabled", false)
 	viper.SetDefault("llm_premise_verification_enabled", false)
 	viper.SetDefault("llm_server_workspace_port", 8080)
+	viper.SetDefault("llm_server_workspace_local_url", "")   // e.g. http://localhost:8080 for local dev
+	viper.SetDefault("llm_server_workspace_local_token", "") // must match NB_WORKSPACE_TOKEN on the local code-analysis process
 	viper.SetDefault("llm_server_workspace_runtime", "kubernetes")
 	viper.SetDefault("llm_server_workspace_docker_host", "unix:///var/run/docker.sock")
 	viper.SetDefault("llm_server_workspace_docker_network", "nudgebee-workspace")
-	viper.SetDefault("llm_server_workspace_local_url", "") // e.g. http://localhost:8080 for local dev
 	viper.SetDefault("llm_server_workspace_file_max_download_bytes", 5*1024*1024)
 
 	viper.SetDefault("notification_service_url", "http://notifications:8080")
