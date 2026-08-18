@@ -3,6 +3,7 @@ package gcloud
 import (
 	"fmt"
 	"nudgebee/collector/cloud/providers"
+	"nudgebee/collector/cloud/providers/constants"
 	"strings"
 	"time"
 
@@ -212,7 +213,7 @@ func (s *cloudSQLService) GetRecommendations(ctx providers.CloudProviderContext,
 		if len(resource.Tags) == 0 {
 			recommendations = append(recommendations, providers.Recommendation{
 				CategoryName: providers.RecommendationCategoryConfiguration,
-				RuleName:     "gcp_sql_no_labels",
+				RuleName:     constants.GCPSQLNoLabels,
 				Severity:     providers.RecommendationSeverityLow,
 				Savings:      0,
 				Data: map[string]any{
@@ -254,7 +255,7 @@ func (s *cloudSQLService) GetRecommendations(ctx providers.CloudProviderContext,
 			if enabled, ok := meta["enabled"].(bool); ok && !enabled {
 				recommendations = append(recommendations, providers.Recommendation{
 					CategoryName: providers.RecommendationCategoryConfiguration,
-					RuleName:     "gcp_sql_no_backup",
+					RuleName:     constants.GCPSQLNoBackup,
 					Severity:     providers.RecommendationSeverityHigh,
 					Savings:      0,
 					Data: map[string]any{
@@ -425,7 +426,7 @@ func (s *cloudSQLService) ApplyRecommendation(ctx providers.CloudProviderContext
 	}
 
 	switch recommendation.RuleName {
-	case "gcp_sql_no_labels":
+	case constants.GCPSQLNoLabels:
 		return fmt.Errorf("automatic label addition not yet implemented - please add labels manually via GCP console or gcloud CLI")
 
 	case "gcp_sql_inactive_instance":
@@ -438,7 +439,7 @@ func (s *cloudSQLService) ApplyRecommendation(ctx providers.CloudProviderContext
 		ctx.GetLogger().Info("successfully initiated SQL instance deletion", "instance", instanceName, "operation", op.Name)
 		return nil
 
-	case "gcp_sql_no_backup":
+	case constants.GCPSQLNoBackup:
 		// Enable automated backups
 		// This requires updating the instance settings
 		return fmt.Errorf("automatic backup configuration not yet implemented - please enable backups manually via GCP console")
