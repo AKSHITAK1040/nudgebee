@@ -123,6 +123,44 @@ if (!CLUSTER) throw new Error("CLUSTER is not set — add it to .env / .env.dev"
   3. the QA has been told to update the **`E2E_DEV_ENV`** GitHub secret — CI rebuilds `.env.dev` from it, so a key that exists only locally fails CI with "undefined env var",
   4. multi-line values (service-account JSON, PEM) stored **base64-encoded** — the line-by-line `$GITHUB_ENV` export truncates them.
 
+#### Identity leakage in run logs
+
+A hardcoded secret is not the only thing that escapes. A `console.log` of an **env value** escapes too, and it is easier to miss because the value never appears in the source. CI runs Playwright with the configured reporter — no `--reporter` override, no output suppression — so every `console.log` lands in the GitHub Actions job log. `SlackReporter` only alerts on `failed` / `timedOut` / `interrupted`, so a leak on a **green** run is never surfaced to anyone. On an `@oss` file (P7) those lines travel to the public repo with the test.
+
+FAIL when a log prints the **value** of anything identifying a person, tenant, or repository owner — `GITHUB_ASSIGNEE`, `*_USERNAME`, `*_EMAIL`, `LDAP_USERNAME`, `USER_n_EMAIL` — or a composite containing one. Log which key or which branch was used instead:
+
+| Leaks | Write instead |
+|---|---|
+| `Selected assignee: ${assignee}` | `"Selected assignee from GITHUB_ASSIGNEE"` |
+| `Fell back to "${picked}"` | `"GITHUB_ASSIGNEE not assignable - used a repo-offered assignee"` |
+| `Project Key: ${projectKey}` | mask the owner segment, log `***/<repo>` |
+
+**Composite values are the trap.** `GITHUB_PROJECT_KEY` is `<owner>/<repo>` and the owner is a real username, so de-identifying the assignee log alone still leaves that name printed one line earlier. Sweep every log in the flow, not only the line you changed.
+
+Both checks below are required.
+
+**Static** — read every hit; a `mask*()` wrapper around the value is the fix, not a violation:
+
+```bash
+grep -nE 'console[.]log[(].*[$][{]' $T
+grep -nEi 'console[.]log[(].*[$][{][^}]*(assignee|username|user|email|owner|project_?key)' $T
+```
+
+**Empirical** — the one that actually proves it. Run the spec, then search the output for the literal identity values in the env files:
+
+```bash
+cd app-e2e-tests
+npm run test:dev -- <spec> --workers=1 > run.log 2>&1
+
+IDENT='^(GITHUB_ASSIGNEE|GITHUB_USERNAME|JIRA_USERNAME|GITLAB_USERNAME|PAGER_DUTY_EMAIL|ZENDUTY_EMAIL|CONFLUENCE_USER_NAME|LDAP_USERNAME|USER_[0-9]+_EMAIL)='
+PAT=$(grep -hE "$IDENT" .env .env.dev | cut -d= -f2- | grep -v '^$' | sort -u | paste -sd'|' -)
+grep -nE "$PAT" run.log && echo "LEAK" || echo "clean"
+```
+
+Any hit is a FAIL. Run it for **both branches** of a conditional flow — a fallback path logs different lines than the happy path, and it is usually the fallback that names the person. Confirm the check can actually fire before trusting a clean result: point it at a file containing a known identity and check it reports `LEAK`.
+
+**What this does not cover:** screenshots, videos and traces upload as CI artifacts on failure and show the names visually. Log masking does not touch them. If that matters for an OSS-bound spec, raise it rather than assuming this check closed the hole.
+
 A non-secret fixture constant (`HASH_INPUT = "nudgebee-task-runner"`, a pinned sha256 digest, a crypto test vector) is **not** a secret. Pinned expected values must stay in the file — moving them to `.env` would make the assertion unverifiable. Do not FAIL these.
 
 ### P4 — Tags on every test
@@ -297,6 +335,7 @@ Use `AskUserQuestion` with **Yes — push to OSS** / **No — internal only**. N
 **If YES:**
 - Add `@oss` to the `tag` array of **every** test in the affected file(s).
 - Re-run the P3 secrets pass on those files — OSS-bound code gets a second look for tenant names, internal URLs, and customer-identifying strings.
+- Run the P3 *Identity leakage in run logs* check as well. Hardcoded-string greps pass clean while a logged env value still ships: a green run publishes its job log, and an `@oss` spec carries those lines to the public repo.
 
 **If NO:**
 - Add this as the **first line of the file**, above the imports:
@@ -339,6 +378,9 @@ for f in $T; do
   [ "$t" -ne "$g" ] && echo "$f: $t tests, $g tagged"
 done
 
+# P3 — identity values reaching the run log (see "Identity leakage in run logs")
+grep -nEi 'console[.]log[(].*[$][{][^}]*(assignee|username|user|email|owner|project_?key)' $T
+
 # P3 — hardcoded secret-ish literals
 grep -niE '(password|passwd|token|secret|api[_-]?key|webhook)\s*[:=]\s*"' $T
 grep -n '"https\?://' $T | grep -v localhost
@@ -374,7 +416,7 @@ Report in exactly this shape.
 |---|---|---|---|
 | P1 | Locators — testid/role primary + safe fallback | ✅ / ❌ | `file:line` |
 | P2 | Comments — single-line only | ✅ / ❌ | |
-| P3 | Secrets from `.env` | ✅ / ❌ | |
+| P3 | Secrets + identities from `.env`, none logged | ✅ / ❌ | |
 | P4 | Tags — env + depth + type | ✅ / ❌ | |
 | P5 | Structure, waits, assertions, titles | ✅ / ❌ | |
 | P6 | Run evidence | ✅ / ❌ | command + result |
