@@ -616,13 +616,29 @@ func (s *cloudSQLService) GetLogFilter(ctx providers.CloudProviderContext, accou
 	if resourceId == "" {
 		return `resource.type="cloudsql_database"`
 	}
-	// GCP Cloud SQL database_id label format is "project_id:instance_name"
-	session, err := getGcloudSessionFromAccount(ctx, account)
-	if err != nil {
-		ctx.GetLogger().Warn("failed to get gcloud session for log filter, falling back to broad filter", "error", err)
-		return `resource.type="cloudsql_database"`
+	// GCP Cloud SQL database_id label format is "project_id:instance_name".
+	//
+	// Callers disagree on which half they hold. The resource inventory passes a
+	// bare instance name ("sample-db"), but a monitoring alert's
+	// gcp_event_instance label is already the full database_id
+	// ("example-project:sample-db"). Prepending unconditionally produced
+	// database_id="example-project:example-project:sample-db", which matches no
+	// log entry — so every plain Cloud SQL metric alert (CPU, memory, disk) got
+	// an empty log result and no evidence card at all. Log-based metric alerts
+	// were unaffected only because they set log_group_name, which skips this
+	// path entirely.
+	//
+	// An instance name cannot contain a colon, so a colon means the caller
+	// already handed us a full database_id.
+	databaseId := resourceId
+	if !strings.Contains(resourceId, ":") {
+		session, err := getGcloudSessionFromAccount(ctx, account)
+		if err != nil {
+			ctx.GetLogger().Warn("failed to get gcloud session for log filter, falling back to broad filter", "error", err)
+			return `resource.type="cloudsql_database"`
+		}
+		databaseId = fmt.Sprintf("%s:%s", session.ProjectId, resourceId)
 	}
-	databaseId := fmt.Sprintf("%s:%s", session.ProjectId, resourceId)
 	return fmt.Sprintf(`resource.type="cloudsql_database" resource.labels.database_id="%s"`, databaseId)
 }
 
