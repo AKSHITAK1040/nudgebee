@@ -509,16 +509,34 @@ func (a *OrchestratorAgent) Execute(ctx context.Context, request NBAgentRequest)
 					"workspace_dir": workDir,
 				})
 
-				// Add PR creation status if RaisePR was requested
-				if request.RaisePR {
-					var resultData map[string]any
-					if err := json.Unmarshal([]byte(specialistResult), &resultData); err == nil {
+				// Report the skip on EVERY path, not just when a PR was wanted.
+				//
+				// Without this, a propose-mode caller (mode=fix, raise_pr=false —
+				// the eager-fix flow and anything asking for a diff) gets back
+				// requires_fix=true with fixed_code populated from
+				// submit_analysis, an absent git_diff, and nothing saying the
+				// fixer never ran. That reads as "a fix was produced" and is
+				// indistinguishable from one. It took a benchmark and a log dig
+				// to notice; execution_status makes it a field.
+				// The nil check is load-bearing, not defensive noise: unmarshaling
+				// the literal `null` succeeds and yields a nil map, and writing to
+				// a nil map panics. A specialist returning "null" is unlikely but
+				// entirely possible, and this branch now runs on every request
+				// rather than only the raise_pr one, so the exposure is wider than
+				// it was.
+				var resultData map[string]any
+				if err := json.Unmarshal([]byte(specialistResult), &resultData); err == nil && resultData != nil {
+					resultData["execution_status"] = "skipped"
+					resultData["execution_summary"] = fmt.Sprintf(
+						"CodeFixer did not run: file_path %q was not found under the repository root. No changes were written and git_diff is empty; any fixed_code below is the specialist's proposal, not an applied change.",
+						filePath)
+					resultData["mode"] = mode
+					if request.RaisePR {
 						resultData["pr_creation_status"] = "skipped"
 						resultData["pr_creation_reason"] = fmt.Sprintf("file_path does not exist in repository: %s", filePath)
-						resultData["mode"] = mode
-						if modifiedJSON, err := json.Marshal(resultData); err == nil {
-							return string(modifiedJSON), nil
-						}
+					}
+					if modifiedJSON, err := json.Marshal(resultData); err == nil {
+						return string(modifiedJSON), nil
 					}
 				}
 
@@ -2981,6 +2999,22 @@ func instructionsRequireWrite(factsData map[string]any) bool {
 // pre-flight existence check consistent with them.
 func repoRelativeFilePath(workDir, filePath string) string {
 	if workDir == "" || filePath == "" {
+		return filePath
+	}
+	// A path that already resolves is returned untouched. The strip below is a
+	// heuristic for ripgrep-relative paths, and it is actively wrong whenever a
+	// repository contains a top-level directory named after the repository
+	// itself — astropy/astropy, django/django, sympy/sympy, requests/requests,
+	// which is the ordinary Python layout. There the prefix is a real segment,
+	// removing it makes the caller's existence check fail, and CodeFixer is
+	// skipped for a file_path that was correct all along. The run still returns
+	// fixed_code from submit_analysis, so the response looks like it carries a
+	// fix while git_diff is empty and nothing was ever written.
+	//
+	// Measured on SWE-bench Verified: 414 of 500 instances (83%) have a gold
+	// file path beginning with the repository name, so the heuristic misfired
+	// far more often than it helped.
+	if _, err := os.Stat(filepath.Join(workDir, filePath)); err == nil {
 		return filePath
 	}
 	repoName := filepath.Base(workDir)
