@@ -25,15 +25,20 @@ from notifications_server.services.cache import Cache
 
 LOG = logging.getLogger(__name__)
 
-# Turn-terminal conversation statuses: the run stopped producing steps, either
-# for good or until the user answers a follow-up.
+# Turn-terminal conversation statuses: the run stopped producing steps for
+# good. Mirrors llm-server's own IsTerminalConversationStatus (agents/core/
+# interface.go) — WAITING and WAITING_FOR_CLIENT_TOOL are deliberately NOT
+# here: llm-server treats both as resumable in-flight state (a delegate/
+# sub-agent step can leave the parent conversation reading WAITING_FOR_
+# CLIENT_TOOL, or even WAITING, without a real end-user follow-up pending),
+# so this poller closing the panel on either would end it mid-investigation.
+# The genuine "Nubi asked a follow-up question" case already gets its own
+# explicit stop_progress_stream call from handle_followup_response.
 _TERMINAL_CONVERSATION_STATUSES = {
     "COMPLETED",
     "FAILED",
     "KILLED",
     "TERMINATED",
-    "WAITING",
-    "WAITING_FOR_CLIENT_TOOL",
 }
 
 _TOOL_STATUS_TO_TASK_STATUS = {
@@ -52,6 +57,17 @@ _SETTLED_TASK_STATUSES = ("complete", "error")
 _TASK_FIELD_LIMIT = 250
 # Header shown from panel creation until the first tool title arrives.
 _INITIAL_HEADER = "Thinking"
+# Synthetic first task so the panel opens already populated (Slack renders a
+# bare plan_update as plain "Thinking..." text; adding a task turns it into
+# the collapsible panel right away). Doubles as the panel's "something is
+# always active" placeholder: real tool tasks can all settle with the next
+# one not started yet, and with nothing in_progress the panel would read as
+# finished mid-turn. Whenever no real tool is in_progress, this task is
+# (re)opened — titled _CONTINUING_TASK_TITLE once real activity has started
+# — until either a real tool takes over or the final flush closes the panel.
+_INITIAL_TASK_ID = "starting"
+_INITIAL_TASK_TITLE = "Understanding your query"
+_CONTINUING_TASK_TITLE = "investigating..."
 # Placeholder stream key written before chat.startStream returns a real ts, so
 # a settle racing the stream's creation always finds a key to clear. Each claim
 # carries a unique suffix so overlapping turns can't mistake each other's claim
@@ -113,13 +129,61 @@ def stop_progress_stream(common_service, cached_entry, channel_id, team_id, thre
         stream_ts = entry.get("stream_ts")
         if not stream_ts:
             return
-        cache.remove_event_keys(thread_ts, ["stream_ts"])
+        cache.remove_event_keys(thread_ts, ["stream_ts", "progress_since"])
         if not _is_pending(stream_ts):
+            # This settle can race the poller's own poll cadence: a tool call
+            # that completed in the turn's final seconds may not have been
+            # picked up yet. One last fetch from turn start catches it before
+            # the stream closes.
+            _flush_final_delta(common_service, entry, team_id, channel_id, stream_ts, entry.get("progress_since"))
             _stop_stream(common_service, team_id, channel_id, stream_ts)
         # A pending stream has no ts to stop yet; clearing the key is enough —
         # the poller notices the mismatch after startStream and stops its own.
     except Exception as e:
         LOG.debug("thinking steps: settle stop failed: %s", e)
+
+
+_FLUSH_FETCH_TIMEOUT_SECONDS = 5
+
+
+def _flush_final_delta(common_service, entry, team_id, channel_id, stream_ts, since):
+    """Best-effort catch-up fetch before the stream closes.
+
+    Uses the turn-start cursor (not the poller's own, thread-local advancing
+    one) and a fresh dedupe map, so it re-sends every tool call's current
+    status regardless of what was already sent — harmless (Slack task_update
+    is an upsert by id) and guarantees nothing from this turn is missed,
+    including when the poller closes the panel itself (a terminal status can
+    still be read a beat before the turn's own final write, e.g. on a reused
+    session where a stale prior-turn row briefly makes it look active).
+
+    Called both from the poller's own finally block and, via
+    stop_progress_stream, inline from the Slack response handlers on the
+    shared event loop — the fetch uses a tight timeout so the latter case
+    can't gate the user's answer on api-server latency. A catch-up that
+    misses is a cosmetic loss, not a correctness one.
+    """
+    if not since:
+        return
+    try:
+        bot = common_service.get_slack_installation(team_id)
+        if not bot:
+            return
+        delta = _fetch_delta(entry, since, _FLUSH_FETCH_TIMEOUT_SECONDS)
+        if delta is None:
+            return
+        chunks = _build_chunks(delta.get("tool_calls"), {})
+        for chunk in chunks:
+            if chunk["status"] not in _SETTLED_TASK_STATUSES:
+                chunk["status"] = "complete"
+        chunks.append(
+            {"type": "task_update", "id": _INITIAL_TASK_ID, "title": _INITIAL_TASK_TITLE, "status": "complete"}
+        )
+        common_service.slack_app.client.append_stream(
+            token=bot.token, channel_id=channel_id, ts=stream_ts, chunks=chunks
+        )
+    except Exception as e:
+        LOG.debug("thinking steps: final catch-up flush failed: %s", e)
 
 
 def _run_poller(common_service, entry, thread_ts):
@@ -137,28 +201,39 @@ def _poll(common_service, entry, thread_ts):
     cache = Cache()
     bot = common_service.get_slack_installation(entry["team_id"])
     if not bot:
+        LOG.info("thinking steps: no Slack installation for team %s, no panel for %s", entry["team_id"], thread_ts)
         return
     token = bot.token
 
-    stream_ts = _open_stream(common_service, cache, entry, thread_ts, token)
+    # Fixed for the whole turn (never advanced): the settle handler's final
+    # catch-up flush re-fetches from this same point, not the poller's own
+    # advancing cursor, so it re-covers the entire turn rather than just the
+    # gap since the poller's last iteration.
+    since = (datetime.now(timezone.utc) - timedelta(seconds=_INITIAL_SINCE_SKEW_SECONDS)).isoformat()
+    stream_ts = _open_stream(common_service, cache, entry, thread_ts, token, since)
     if not stream_ts:
         return
     try:
-        _stream_updates(common_service, cache, entry, thread_ts, token, stream_ts)
+        _stream_updates(common_service, cache, entry, thread_ts, token, stream_ts, since)
     finally:
         current = cache.get_event_entry(thread_ts)
         if current and current.get("stream_ts") == stream_ts:
-            cache.remove_event_keys(thread_ts, ["stream_ts"])
+            cache.remove_event_keys(thread_ts, ["stream_ts", "progress_since"])
+            # Same rationale as the settle handler's flush: whatever made the
+            # poller stop (a trusted terminal status, the deadline, giving up
+            # on fetch failures) can still land a beat before the turn's own
+            # last write, so take one more look before actually closing.
+            _flush_final_delta(common_service, entry, entry["team_id"], entry["channel_id"], stream_ts, since)
             _stop_stream(common_service, entry["team_id"], entry["channel_id"], stream_ts)
 
 
-def _open_stream(common_service, cache, entry, thread_ts, token):
+def _open_stream(common_service, cache, entry, thread_ts, token, since):
     """Start the streaming message and record ownership; None means no panel."""
     # A previous turn's stream can still be open here (its poller died or was
     # superseded mid-run). Close it so the thread never shows two live panels.
     previous = (cache.get_event_entry(thread_ts) or {}).get("stream_ts")
     if previous:
-        cache.remove_event_keys(thread_ts, ["stream_ts"])
+        cache.remove_event_keys(thread_ts, ["stream_ts", "progress_since"])
         if not _is_pending(previous):
             _stop_stream(common_service, entry["team_id"], entry["channel_id"], previous)
 
@@ -180,14 +255,17 @@ def _open_stream(common_service, cache, entry, thread_ts, token):
             # renders every task as its own card, which reads as multiple
             # loaders — confirmed on dev.
             task_display_mode="plan",
-            chunks=[{"type": "plan_update", "title": _INITIAL_HEADER}],
+            chunks=[
+                {"type": "plan_update", "title": _INITIAL_HEADER},
+                {"type": "task_update", "id": _INITIAL_TASK_ID, "title": _INITIAL_TASK_TITLE, "status": "in_progress"},
+            ],
         )
         stream_ts = response["ts"]
     except SlackApiError as e:
         LOG.info("thinking steps: start_stream refused (%s), no panel for %s", _slack_error(e), thread_ts)
         current = cache.get_event_entry(thread_ts)
         if current and current.get("stream_ts") == claim:
-            cache.remove_event_keys(thread_ts, ["stream_ts"])
+            cache.remove_event_keys(thread_ts, ["stream_ts", "progress_since"])
         return None
 
     # If our claim is gone (settle raced us, entry expired, or a newer turn
@@ -196,16 +274,28 @@ def _open_stream(common_service, cache, entry, thread_ts, token):
     if not current or current.get("stream_ts") != claim:
         _stop_stream(common_service, entry["team_id"], entry["channel_id"], stream_ts)
         return None
-    if not cache.update_event_entry(thread_ts, stream_ts=stream_ts):
+    if not cache.update_event_entry(thread_ts, stream_ts=stream_ts, progress_since=since):
         _stop_stream(common_service, entry["team_id"], entry["channel_id"], stream_ts)
         return None
     return stream_ts
 
 
-def _stream_updates(common_service, cache, entry, thread_ts, token, stream_ts):
-    sent_statuses = {}
+def _stream_updates(common_service, cache, entry, thread_ts, token, stream_ts, since):
+    sent_statuses = {_INITIAL_TASK_ID: "in_progress"}
+    # Set once, on the first reopen, and never reverted: once real activity
+    # has happened the "Understanding your query" framing no longer fits, so
+    # every later settle/reopen of this task reuses _CONTINUING_TASK_TITLE
+    # instead of flapping the title back and forth.
+    placeholder_title = _INITIAL_TASK_TITLE
     failures = 0
-    since = (datetime.now(timezone.utc) - timedelta(seconds=_INITIAL_SINCE_SKEW_SECONDS)).isoformat()
+    # On a reused session (an existing Slack thread with prior completed
+    # turns), `conversation.status` can still read COMPLETED from the last
+    # turn for a moment after this one starts — llm-server's async endpoint
+    # returns 202 as soon as the request is queued, before a worker actually
+    # dequeues it and flips the row's status. A terminal status is only
+    # trusted once this turn has shown up as real activity (a message or
+    # tool call), which lands in the same write as the status flip.
+    turn_activity_seen = False
     deadline = time.monotonic() + settings.slack.thinking_steps_max_minutes * 60
 
     # Fetch-first (sleep at the bottom): the panel opens before the LLM request
@@ -215,6 +305,7 @@ def _stream_updates(common_service, cache, entry, thread_ts, token, stream_ts):
         if current is None:
             # Entry expired mid-run: nothing can ever settle the panel, so
             # close it now (the caller's ownership check needs the entry).
+            LOG.info("thinking steps: cache entry expired mid-run for %s, closing panel", thread_ts)
             _stop_stream(common_service, entry["team_id"], entry["channel_id"], stream_ts)
             return
         if current.get("stream_ts") != stream_ts:
@@ -228,13 +319,37 @@ def _stream_updates(common_service, cache, entry, thread_ts, token, stream_ts):
         if delta is None:
             failures += 1
             if failures >= _MAX_POLL_FAILURES:
+                LOG.warning("thinking steps: giving up after %d consecutive fetch failures for %s", failures, thread_ts)
                 return
             time.sleep(settings.slack.thinking_steps_poll_seconds)
             continue
         failures = 0
         since = delta.get("cursor") or since
+        if delta.get("messages") or delta.get("tool_calls"):
+            turn_activity_seen = True
 
         chunks = _build_chunks(delta.get("tool_calls"), sent_statuses)
+        # A real tool finishing doesn't guarantee the next one has started
+        # yet (or that llm-server is done): with nothing else in the panel
+        # currently in_progress, it would read as finished mid-turn. So
+        # _INITIAL_TASK_ID tracks the gaps — settled while a real tool is
+        # active, (re)opened the moment none are, right up to the final
+        # flush (_flush_final_delta), which is what actually closes it out.
+        any_tool_active = any(
+            status == "in_progress" for tid, status in sent_statuses.items() if tid != _INITIAL_TASK_ID
+        )
+        placeholder_status = sent_statuses.get(_INITIAL_TASK_ID)
+        if any_tool_active and placeholder_status == "in_progress":
+            chunks.append(
+                {"type": "task_update", "id": _INITIAL_TASK_ID, "title": placeholder_title, "status": "complete"}
+            )
+            sent_statuses[_INITIAL_TASK_ID] = "complete"
+        elif not any_tool_active and placeholder_status != "in_progress":
+            placeholder_title = _CONTINUING_TASK_TITLE
+            chunks.append(
+                {"type": "task_update", "id": _INITIAL_TASK_ID, "title": placeholder_title, "status": "in_progress"}
+            )
+            sent_statuses[_INITIAL_TASK_ID] = "in_progress"
         if chunks:
             try:
                 common_service.slack_app.client.append_stream(
@@ -245,16 +360,27 @@ def _stream_updates(common_service, cache, entry, thread_ts, token, stream_ts):
                 return
 
         conversation = delta.get("conversation") or {}
-        if (conversation.get("status") or "").upper() in _TERMINAL_CONVERSATION_STATUSES:
-            # Give the settle handler a moment to close the panel itself so
-            # the stop lands in answer order; fall through if it never came.
-            time.sleep(2)
-            return
+        status = (conversation.get("status") or "").upper()
+        if status == "IN_PROGRESS":
+            turn_activity_seen = True
+        if status in _TERMINAL_CONVERSATION_STATUSES:
+            if not turn_activity_seen:
+                LOG.info(
+                    "thinking steps: ignoring stale terminal status %s for %s (no turn activity observed yet)",
+                    status,
+                    thread_ts,
+                )
+            else:
+                # Give the settle handler a moment to close the panel itself
+                # so the stop lands in answer order; fall through if it never
+                # came.
+                time.sleep(2)
+                return
 
         time.sleep(settings.slack.thinking_steps_poll_seconds)
 
 
-def _fetch_delta(entry, since):
+def _fetch_delta(entry, since, timeout=10):
     try:
         response = requests.post(
             settings.services.api_server + "/rpc/ai",
@@ -273,7 +399,7 @@ def _fetch_delta(entry, since):
                 },
             },
             headers={"X-ACTION-TOKEN": settings.action_api_server_token},
-            timeout=10,
+            timeout=timeout,
         )
         response.raise_for_status()
         return response.json()

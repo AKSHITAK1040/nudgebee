@@ -154,6 +154,43 @@ class TestStopProgressStream:
             slack_progress.stop_progress_stream(common, None, "C222", "T111", "1000.1")
         assert calls == ["clear", "stop"]
         common.slack_app.client.stop_stream.assert_called_once_with(token="xoxb-test", channel_id="C222", ts="2000.2")
+        # No progress_since on the entry: nothing to catch up from, so no flush.
+        common.slack_app.client.append_stream.assert_not_called()
+
+    def test_flushes_final_delta_before_stopping(self):
+        common = MagicMock()
+        common.get_slack_installation.return_value.token = "xoxb-test"
+        calls = []
+        delta = {"tool_calls": [_tool_row("t1", "SUCCESS")]}
+        with patch.object(slack_progress, "Cache") as cache_cls:
+            cache = cache_cls.return_value
+            cache.get_event_entry.return_value = {"stream_ts": "2000.2", "progress_since": "2026-08-14T10:00:00Z"}
+            with patch.object(slack_progress, "_fetch_delta", return_value=delta):
+                common.slack_app.client.append_stream.side_effect = lambda **kw: calls.append(("append", kw))
+                common.slack_app.client.stop_stream.side_effect = lambda **kw: calls.append(("stop", kw))
+                slack_progress.stop_progress_stream(common, None, "C222", "T111", "1000.1")
+        assert [c[0] for c in calls] == ["append", "stop"]
+        appended_chunks = calls[0][1]["chunks"]
+        assert appended_chunks == [
+            {"type": "task_update", "id": "t1", "title": "Get pod logs", "status": "complete"},
+            {
+                "type": "task_update",
+                "id": slack_progress._INITIAL_TASK_ID,
+                "title": slack_progress._INITIAL_TASK_TITLE,
+                "status": "complete",
+            },
+        ]
+        assert calls[0][1]["ts"] == "2000.2"
+
+    def test_flush_failure_still_stops_the_stream(self):
+        common = MagicMock()
+        common.get_slack_installation.return_value.token = "xoxb-test"
+        with patch.object(slack_progress, "Cache") as cache_cls:
+            cache = cache_cls.return_value
+            cache.get_event_entry.return_value = {"stream_ts": "2000.2", "progress_since": "2026-08-14T10:00:00Z"}
+            with patch.object(slack_progress, "_fetch_delta", side_effect=RuntimeError("boom")):
+                slack_progress.stop_progress_stream(common, None, "C222", "T111", "1000.1")
+        common.slack_app.client.stop_stream.assert_called_once_with(token="xoxb-test", channel_id="C222", ts="2000.2")
 
     def test_falls_back_to_passed_entry_and_never_raises(self):
         common = MagicMock()
@@ -169,7 +206,7 @@ class TestStopProgressStream:
             cache = cache_cls.return_value
             cache.get_event_entry.return_value = {"stream_ts": "pending-fixed"}
             slack_progress.stop_progress_stream(common, None, "C222", "T111", "1000.1")
-        cache.remove_event_keys.assert_called_once_with("1000.1", ["stream_ts"])
+        cache.remove_event_keys.assert_called_once_with("1000.1", ["stream_ts", "progress_since"])
         common.slack_app.client.stop_stream.assert_not_called()
 
 
@@ -245,12 +282,44 @@ class TestPollLifecycle:
             {"stream_ts": "3000.3"},
         ]
         cache.update_event_entry.return_value = True
-        delta = {"conversation": {"status": "COMPLETED"}, "tool_calls": [], "cursor": "c1"}
-        self._run(common, cache, deltas=[delta])
+        # A zero-tool-call turn (e.g. "hi") still has to show up in `messages`
+        # for the terminal status to be trusted — an empty delta alongside
+        # COMPLETED would now be treated as a stale read from a prior turn.
+        delta = {
+            "conversation": {"status": "COMPLETED"},
+            "messages": [{"id": "m1"}],
+            "tool_calls": [],
+            "cursor": "c1",
+        }
+        # Same delta twice: the main loop's poll, then the finally block's
+        # own re-fetch from turn start once it decides to close the panel.
+        self._run(common, cache, deltas=[delta, delta])
         common.slack_app.client.stop_stream.assert_called_once()
-        cache.remove_event_keys.assert_called_with("1000.1", ["stream_ts"])
+        cache.remove_event_keys.assert_called_with("1000.1", ["stream_ts", "progress_since"])
         start_chunks = common.slack_app.client.start_stream.call_args.kwargs["chunks"]
-        assert start_chunks == [{"type": "plan_update", "title": "Thinking"}]
+        assert start_chunks == [
+            {"type": "plan_update", "title": "Thinking"},
+            {
+                "type": "task_update",
+                "id": slack_progress._INITIAL_TASK_ID,
+                "title": slack_progress._INITIAL_TASK_TITLE,
+                "status": "in_progress",
+            },
+        ]
+        # No tool calls, so the main loop's own poll has nothing to append —
+        # the synthetic task stays in_progress instead of completing early.
+        # Only the finally block's flush, right before the panel closes,
+        # resolves it to complete.
+        appended = common.slack_app.client.append_stream.call_args_list
+        assert len(appended) == 1
+        assert appended[0].kwargs["chunks"] == [
+            {
+                "type": "task_update",
+                "id": slack_progress._INITIAL_TASK_ID,
+                "title": slack_progress._INITIAL_TASK_TITLE,
+                "status": "complete",
+            }
+        ]
 
     def test_appends_tool_chunks_from_delta(self):
         common = self._common()
@@ -265,3 +334,157 @@ class TestPollLifecycle:
         appended = common.slack_app.client.append_stream.call_args_list
         assert [c.kwargs["chunks"][0]["status"] for c in appended] == ["in_progress", "complete"]
         assert all(c.kwargs["ts"] == "3000.3" for c in appended)
+
+    def test_synthetic_task_reopens_in_gaps_between_real_tools(self):
+        """Between t1 finishing and t2 starting, nothing real is in_progress —
+        the synthetic task must reopen (relabeled, since real activity has
+        started) rather than leaving the panel with everything checked off."""
+        common = self._common()
+        cache = MagicMock()
+        cache.get_event_entry.side_effect = [{}, {"stream_ts": "pending-fixed"}] + [{"stream_ts": "3000.3"}] * 5
+        cache.update_event_entry.return_value = True
+        t1_running = {
+            "conversation": {"status": "IN_PROGRESS"},
+            "tool_calls": [_tool_row("t1", "IN_PROGRESS")],
+            "cursor": "c1",
+        }
+        t1_done = {
+            "conversation": {"status": "IN_PROGRESS"},
+            "tool_calls": [_tool_row("t1", "SUCCESS")],
+            "cursor": "c2",
+        }
+        t2_running = {
+            "conversation": {"status": "IN_PROGRESS"},
+            "tool_calls": [_tool_row("t2", "IN_PROGRESS")],
+            "cursor": "c3",
+        }
+        t2_done = {"conversation": {"status": "COMPLETED"}, "tool_calls": [_tool_row("t2", "SUCCESS")], "cursor": "c4"}
+        # t2_done twice: once for the main loop, once for the finally block's
+        # own re-fetch once it decides the terminal status closes the panel.
+        self._run(common, cache, deltas=[t1_running, t1_done, t2_running, t2_done, t2_done])
+        appended = common.slack_app.client.append_stream.call_args_list
+        starting = slack_progress._INITIAL_TASK_ID
+
+        def placeholder_chunk(call):
+            return next(c for c in call.kwargs["chunks"] if c["id"] == starting)
+
+        # t1 starts: synthetic task settles under its original title.
+        assert placeholder_chunk(appended[0]) == {
+            "type": "task_update",
+            "id": starting,
+            "title": slack_progress._INITIAL_TASK_TITLE,
+            "status": "complete",
+        }
+        # t1 finishes, nothing else active: reopens, relabeled.
+        assert placeholder_chunk(appended[1]) == {
+            "type": "task_update",
+            "id": starting,
+            "title": slack_progress._CONTINUING_TASK_TITLE,
+            "status": "in_progress",
+        }
+        # t2 starts: settles again, keeping the relabeled title (no flapping
+        # back to "Understanding your query").
+        assert placeholder_chunk(appended[2]) == {
+            "type": "task_update",
+            "id": starting,
+            "title": slack_progress._CONTINUING_TASK_TITLE,
+            "status": "complete",
+        }
+        # t2 finishes and the turn is over, but this poll iteration still
+        # sees nothing active — reopens once more before the loop exits.
+        assert placeholder_chunk(appended[3]) == {
+            "type": "task_update",
+            "id": starting,
+            "title": slack_progress._CONTINUING_TASK_TITLE,
+            "status": "in_progress",
+        }
+        # The finally block's flush is what actually closes the panel out.
+        assert placeholder_chunk(appended[4]) == {
+            "type": "task_update",
+            "id": starting,
+            "title": slack_progress._INITIAL_TASK_TITLE,
+            "status": "complete",
+        }
+        common.slack_app.client.stop_stream.assert_called_once()
+
+    def test_waiting_for_client_tool_does_not_stop_the_panel_mid_run(self):
+        """A delegate/sub-agent step can leave the conversation reading WAITING
+        or WAITING_FOR_CLIENT_TOOL without a real end-user follow-up pending —
+        neither is terminal in llm-server's own model, so the poller must keep
+        going past it instead of closing the panel mid-investigation."""
+        common = self._common()
+        cache = MagicMock()
+        cache.get_event_entry.side_effect = [{}, {"stream_ts": "pending-fixed"}] + [{"stream_ts": "3000.3"}] * 4
+        cache.update_event_entry.return_value = True
+        deltas = [
+            {
+                "conversation": {"status": "WAITING_FOR_CLIENT_TOOL"},
+                "tool_calls": [_tool_row("t1", "IN_PROGRESS")],
+                "cursor": "c1",
+            },
+            {"conversation": {"status": "WAITING"}, "tool_calls": [_tool_row("t1", "SUCCESS")], "cursor": "c2"},
+            {"conversation": {"status": "COMPLETED"}, "tool_calls": [_tool_row("t2", "SUCCESS")], "cursor": "c3"},
+        ]
+        self._run(common, cache, deltas=deltas)
+        appended = common.slack_app.client.append_stream.call_args_list
+        # All three deltas were processed — the two non-terminal-for-llm-server
+        # statuses didn't cut the loop short — and the panel only closes once,
+        # on the truly terminal COMPLETED delta.
+        assert len(appended) == 3
+        common.slack_app.client.stop_stream.assert_called_once()
+
+    def test_stale_completed_status_before_turn_activity_is_ignored(self):
+        """On a reused Slack thread, the very first poll can still read
+        COMPLETED left over from the previous turn (llm-server's async
+        endpoint returns 202 before a worker dequeues the request and flips
+        the row's status). That stale read must not close the panel — only a
+        COMPLETED seen after real activity (a message or tool call) for this
+        turn should."""
+        common = self._common()
+        cache = MagicMock()
+        cache.get_event_entry.side_effect = [{}, {"stream_ts": "pending-fixed"}] + [{"stream_ts": "3000.3"}] * 4
+        cache.update_event_entry.return_value = True
+        deltas = [
+            {"conversation": {"status": "COMPLETED"}, "tool_calls": [], "cursor": "c1"},
+            {"conversation": {"status": "IN_PROGRESS"}, "tool_calls": [_tool_row("t1", "IN_PROGRESS")], "cursor": "c2"},
+            {"conversation": {"status": "COMPLETED"}, "tool_calls": [_tool_row("t1", "SUCCESS")], "cursor": "c3"},
+        ]
+        self._run(common, cache, deltas=deltas)
+        appended = common.slack_app.client.append_stream.call_args_list
+        # All three deltas were processed — the stale COMPLETED on the first
+        # poll didn't cut the loop short — and the panel only closes once,
+        # on the COMPLETED that arrives after real activity was observed. The
+        # first (empty) delta has nothing to show, so it appends nothing —
+        # the synthetic task stays in_progress rather than completing early.
+        assert len(appended) == 2
+        common.slack_app.client.stop_stream.assert_called_once()
+
+    def test_poller_self_close_still_flushes_a_tool_call_that_missed_the_last_poll(self):
+        """A tool call can finish in the same window the poller decides the
+        turn is done (a live incident: the conversation read COMPLETED before
+        the turn's own final write), so when the poller closes the panel
+        itself — not via the external settle handler — it must still take one
+        more look before actually stopping, exactly like stop_progress_stream
+        already does."""
+        common = self._common()
+        cache = MagicMock()
+        cache.get_event_entry.side_effect = [{}, {"stream_ts": "pending-fixed"}] + [{"stream_ts": "3000.3"}] * 3
+        cache.update_event_entry.return_value = True
+        deltas = [
+            {"conversation": {"status": "IN_PROGRESS"}, "tool_calls": [_tool_row("t1", "IN_PROGRESS")], "cursor": "c1"},
+            {"conversation": {"status": "COMPLETED"}, "tool_calls": [], "cursor": "c2"},
+            # Only reached by the finally-block flush, after the main loop
+            # already decided to close on the (trusted, but incomplete) delta
+            # above.
+            {"tool_calls": [_tool_row("t2", "SUCCESS")]},
+        ]
+        self._run(common, cache, deltas=deltas)
+        appended = common.slack_app.client.append_stream.call_args_list
+        assert len(appended) == 2
+        assert appended[-1].kwargs["chunks"][0] == {
+            "type": "task_update",
+            "id": "t2",
+            "title": "Get pod logs",
+            "status": "complete",
+        }
+        common.slack_app.client.stop_stream.assert_called_once()

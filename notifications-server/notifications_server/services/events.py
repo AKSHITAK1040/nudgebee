@@ -977,28 +977,35 @@ class Events:
             cleaned_string = conversation
             cached_entry = self.cache.get_event_entry(thread_ts)
 
-        channel_context, channel_context_refs = self._build_channel_context(
-            cached_entry, channel_id, team_id, thread_ts, cleaned_string
+        if not cached_entry:
+            self.reply(channel_id, team_id, thread_ts, get_session_expired_message())
+            return
+
+        # Panel opens as soon as the turn is known-valid, before the (potentially
+        # slow, DB-backed) channel-context build and LLM payload assembly below —
+        # otherwise the user sees nothing during that stretch.
+        slack_progress.start_progress_poller(
+            self.common_service, cached_entry, thread_ts, cached_entry.get("session_id", "")
         )
-        payload = self.build_llm_payload(
-            cached_entry,
-            thread_ts,
-            query_override=cleaned_string,
-            channel_context=channel_context,
-            channel_context_refs=channel_context_refs,
-        )
 
-        headers = {
-            "x-tenant-id": cached_entry["tenant_id"],
-            "x-user-id": cached_entry["user_id"],
-        }
-
-        self._attach_images(payload, thread_ts)
-
-        # Panel opens before the LLM request goes out: agent inference runs
-        # before the 202, and the user should see "thinking" during it.
-        slack_progress.start_progress_poller(self.common_service, cached_entry, thread_ts, payload["session_id"])
         try:
+            channel_context, channel_context_refs = self._build_channel_context(
+                cached_entry, channel_id, team_id, thread_ts, cleaned_string
+            )
+            payload = self.build_llm_payload(
+                cached_entry,
+                thread_ts,
+                query_override=cleaned_string,
+                channel_context=channel_context,
+                channel_context_refs=channel_context_refs,
+            )
+
+            headers = {
+                "x-tenant-id": cached_entry["tenant_id"],
+                "x-user-id": cached_entry["user_id"],
+            }
+
+            self._attach_images(payload, thread_ts)
             self.query_llm_server(payload, headers)
         except requests.RequestException as e:
             LOG.debug(f"Query to LLM failed: {e}")
