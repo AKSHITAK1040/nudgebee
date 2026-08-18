@@ -239,6 +239,10 @@ func main() {
 	gitClient := git.NewGitClient(cfg.Analysis.WorkspaceDir, cfg.Git.CloneTimeout, cfg.Git.MaxRepoSize)
 	credHandler := credentials.NewCredentialHandler()
 
+	// Startup is the only point where an unconditional sweep is safe: no
+	// in-process analysis can own one of these temp workspaces yet.
+	handlers.SweepOrphanedAnalysisWorkspaces(0)
+
 	agenticHandler, err := handlers.NewAgenticAnalyzeHandler(cfg, gitClient, credHandler)
 	if err != nil {
 		// The agentic handler builds its LLM client per request from the

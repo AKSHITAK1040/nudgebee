@@ -23,7 +23,6 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/llms"
 )
 
@@ -484,10 +483,8 @@ func evaluateCodeUsingWorkspace(ctx *security.RequestContext, agentRequest core.
 		// but this external analysis has its own context. Propagate Stop to the
 		// workspace before returning so the remote agent does not keep running.
 		if agentRequest.MessageId != "" {
-			message, messageErr := core.GetConversationDao().GetConversationMessage(
-				agentRequest.MessageId, agentRequest.AccountId, agentRequest.ConversationId,
-			)
-			if messageErr == nil && message.ID != uuid.Nil && message.Status == core.ConversationStatusTerminated {
+			isTerminated, messageErr := core.CheckMessageTerminationStatus(agentRequest.MessageId, agentRequest.AccountId, agentRequest.ConversationId)
+			if messageErr == nil && isTerminated {
 				cancelWorkspaceAnalysis(ctx, agentRequest.AccountId, analysisID)
 				return codeAnalysisResult{}, fmt.Errorf("code analysis cancelled because the conversation was terminated")
 			}

@@ -58,7 +58,6 @@ type AgenticAnalyzeHandler struct {
 }
 
 func NewAgenticAnalyzeHandler(cfg *config.Config, gitClient *git.GitClient, credHandler *credentials.CredentialHandler) (*AgenticAnalyzeHandler, error) {
-	SweepOrphanedAnalysisWorkspaces(0)
 	// The real LLM client + orchestrator are built fresh per request (see
 	// resolveClients), using the per-request llm_config that llm-server forwards.
 	// A bad *startup* config (e.g. an empty env fallback when per-request
@@ -456,6 +455,8 @@ func newAnalysisID() string {
 	return fmt.Sprintf("analysis_%d_%s", time.Now().UnixNano(), uuid.NewString())
 }
 
+var analysisLeaseMinInterval = 5 * time.Second
+
 func (ah *AgenticAnalyzeHandler) HandleAnalyze(c *gin.Context) {
 	var req AgenticAnalyzeRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -528,8 +529,8 @@ func (ah *AgenticAnalyzeHandler) watchAnalysisLease(analysisID string, ctx conte
 		return
 	}
 	interval := ah.config.Analysis.CheckInTimeout / 4
-	if interval < 5*time.Second {
-		interval = 5 * time.Second
+	if interval < analysisLeaseMinInterval {
+		interval = analysisLeaseMinInterval
 	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()

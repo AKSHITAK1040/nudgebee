@@ -105,6 +105,13 @@ const (
 // checkMessageTerminationStatus checks if a conversation message has been terminated,
 // using the project's cache abstraction to debounce database lookups.
 func checkMessageTerminationStatus(messageId, accountId, conversationId string) (bool, error) {
+	return CheckMessageTerminationStatus(messageId, accountId, conversationId)
+}
+
+// CheckMessageTerminationStatus checks if a conversation message has been
+// terminated, using the project's cache abstraction to debounce database
+// lookups.
+func CheckMessageTerminationStatus(messageId, accountId, conversationId string) (bool, error) {
 	// Try to get from cache first
 	if val, ok := common.CacheGet(MessageTerminationCacheNamespace, messageId); ok {
 		return string(val) == "true", nil

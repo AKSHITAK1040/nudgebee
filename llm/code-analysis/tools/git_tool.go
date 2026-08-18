@@ -122,7 +122,7 @@ func (t *GitTool) Execute(ctx context.Context, input map[string]any) core.NBTool
 
 	args, fetchRetargeted := rewriteFetchForTracking(args)
 
-	cmd := exec.Command("git", args...)
+	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = repoDir
 
 	var stdout, stderr bytes.Buffer

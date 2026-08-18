@@ -696,7 +696,9 @@ func buildWorkspaceResources() corev1.ResourceRequirements {
 		resources.Limits[corev1.ResourceMemory] = resource.MustParse(config.Config.LlmServerWorkspaceResourceLimitMemory)
 	}
 	if config.Config.LlmServerWorkspaceResourceLimitStorage != "" {
-		resources.Limits[corev1.ResourceEphemeralStorage] = resource.MustParse(config.Config.LlmServerWorkspaceResourceLimitStorage)
+		storageLimit := resource.MustParse(config.Config.LlmServerWorkspaceResourceLimitStorage)
+		resources.Requests[corev1.ResourceEphemeralStorage] = storageLimit.DeepCopy()
+		resources.Limits[corev1.ResourceEphemeralStorage] = storageLimit
 	}
 	return resources
 }
