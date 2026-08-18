@@ -291,6 +291,29 @@ func evaluateCodeUsingWorkspace(ctx *security.RequestContext, agentRequest core.
 		}
 	}
 
+	// Analyse the revision the workload was actually running, when we know it.
+	//
+	// GitCommit comes from the deployed artifact (workloads.nudgebee.com/git.hash
+	// / CodeRepoCommitHash). Without it the clone lands on the branch tip, so an
+	// incident gets diagnosed against code that shipped after it — which reads as
+	// a confident "already fixed" on a bug that is still live, with nothing
+	// indicating the wrong revision was read.
+	//
+	// Deliberately NOT sent when a PR is wanted. A fix branch cut from an old
+	// commit would revert everything merged since, so code-analysis refuses that
+	// combination outright; raising a PR means fixing against the branch tip.
+	// Explore and propose (raise_pr=false) are where pinning belongs.
+	gitRepository := map[string]any{
+		"url":      request.GitRepo,
+		"branch":   branch,
+		"provider": provider,
+	}
+	if !request.RaisePr && request.GitCommit != "" {
+		gitRepository["commit"] = request.GitCommit
+		logger.Info("code: pinning analysis to the deployed revision",
+			"commit", request.GitCommit, "branch", branch)
+	}
+
 	analyzeRequest := map[string]any{
 		"cloud_account_id":   request.AccountId,
 		"tenant":             tenantId,
@@ -299,19 +322,15 @@ func evaluateCodeUsingWorkspace(ctx *security.RequestContext, agentRequest core.
 		"workload_kind":      "Deployment",
 		"logs":               logs,
 		"prompt":             request.Query,
-		"git_repository": map[string]any{
-			"url":      request.GitRepo,
-			"branch":   branch,
-			"provider": provider,
-		},
-		"mode":              mode,
-		"raise_pr":          request.RaisePr,
-		"event_id":          request.EventId,
-		"recommendation_id": request.RecommendationId,
-		"workflow_id":       request.WorkflowId,
-		"account_id":        request.AccountId,
-		"conversation_id":   agentRequest.SessionId,
-		"message_id":        agentRequest.MessageId,
+		"git_repository":     gitRepository,
+		"mode":               mode,
+		"raise_pr":           request.RaisePr,
+		"event_id":           request.EventId,
+		"recommendation_id":  request.RecommendationId,
+		"workflow_id":        request.WorkflowId,
+		"account_id":         request.AccountId,
+		"conversation_id":    agentRequest.SessionId,
+		"message_id":         agentRequest.MessageId,
 	}
 
 	if request.Agent != "" {

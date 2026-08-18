@@ -67,6 +67,7 @@ func main() {
 		repoURL          = flag.String("repo", "", "Git repository URL")
 		logs             = flag.String("logs", "", "Application logs to analyze")
 		branch           = flag.String("branch", "main", "Git branch to analyze")
+		commit           = flag.String("commit", "", "Git commit SHA to analyze (optional). Pins the checkout to one revision — e.g. the commit that was deployed when an incident fired — instead of the tip of --branch.")
 		token            = flag.String("token", "", "GitHub token (or set GITHUB_TOKEN env var)")
 		prompt           = flag.String("prompt", defaultPrompt, "Analysis prompt")
 		agent            = flag.String("agent", "code_agent", "Agent to use (default: code_agent)")
@@ -143,7 +144,7 @@ func main() {
 		// this CLI analysis's logs carry the caller's trace_id.
 		common.SetGlobalTraceID(traceIDFromContext(traceparentFromEnv(context.Background())))
 
-		runCLIAnalysis(cfg, *repoURL, logsValue, *branch, *token, promptValue, *agent, *eventId, *recommendationId, *workflowId, *accountId, raisePR, *conversationId, *gitProvider, *mode)
+		runCLIAnalysis(cfg, *repoURL, logsValue, *branch, *commit, *token, promptValue, *agent, *eventId, *recommendationId, *workflowId, *accountId, raisePR, *conversationId, *gitProvider, *mode)
 		return
 	}
 
@@ -431,7 +432,7 @@ func redactArgs(args []string) []string {
 	return safe
 }
 
-func runCLIAnalysis(cfg *config.Config, repoURL, logs, branch, token, prompt, agent, eventId, recommendationId, workflowId, accountId string, raisePR bool, conversationId, gitProvider, mode string) {
+func runCLIAnalysis(cfg *config.Config, repoURL, logs, branch, commit, token, prompt, agent, eventId, recommendationId, workflowId, accountId string, raisePR bool, conversationId, gitProvider, mode string) {
 	// Make logs optional for code correlation scenarios
 	if logs == "" && prompt == "Analyze the logs for errors" {
 		log.Fatal("Logs are required (--logs) for log analysis, or provide a specific --prompt for code correlation")
@@ -523,6 +524,7 @@ func runCLIAnalysis(cfg *config.Config, repoURL, logs, branch, token, prompt, ag
 			gitRepo = handlers.GitRepository{
 				URL:      normalizedURL,
 				Branch:   branch,
+				Commit:   commit,
 				Provider: gitProvider,
 			}
 			log.Printf("DEBUG CLI: Created remote GitRepository - URL='%s', Branch='%s', Provider='%s'", gitRepo.URL, gitRepo.Branch, gitRepo.Provider)

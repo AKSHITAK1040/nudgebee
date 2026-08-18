@@ -941,6 +941,9 @@ func (a *OrchestratorAgent) createSessionContext(request NBAgentRequest) (*sessi
 		if branch, ok := request.QueryConfig["branch"].(string); ok {
 			repoCtx.Branch = branch
 		}
+		if commit, ok := request.QueryConfig["commit"].(string); ok {
+			repoCtx.Commit = commit
+		}
 		if repoPath, ok := request.QueryConfig["repository_path"].(string); ok {
 			// Only set LocalPath if it's a real path, not "agent-managed"
 			if repoPath != "agent-managed" {
@@ -1917,6 +1920,10 @@ func (a *OrchestratorAgent) createPullRequest(ctx context.Context, sessionCtx *s
 		branchPointSHA = strings.TrimSpace(out)
 	}
 
+	if err := a.refusePRFromPinnedRevision(ctx, sessionCtx, actualRepoDir, baseBranch, branchPointSHA); err != nil {
+		return nil, err
+	}
+
 	if out, err := a.runGit(ctx, actualRepoDir, "checkout", "-b", branchName); err != nil {
 		return nil, fmt.Errorf("failed to create branch: %s: %w", strings.TrimSpace(out), err)
 	}
@@ -2848,6 +2855,62 @@ func looksLikeGitSHA(s string) bool {
 	return gitSHARegex.MatchString(s)
 }
 
+// refusePRFromPinnedRevision blocks opening a PR whose changes were written
+// against a revision that is not the tip of the base branch.
+//
+// A pinned analysis reads the code as it was — the commit a workload was
+// running when an incident fired. That is the right thing to READ and the wrong
+// thing to BASE A PR ON: the diff is cut from a tree that may be hundreds of
+// commits behind, so the PR either fails to apply or, worse, applies and quietly
+// reverts everything merged since. Failing here is strictly better than opening
+// that PR, because a green PR that reverts history is not visibly wrong.
+//
+// Two independent checks, because a revision can be pinned two ways and each
+// check covers a hole in the other:
+//
+//  1. The request pinned it (git_repository.commit). Deterministic, needs no
+//     remote ref, and works on the single-branch clones these runs use.
+//  2. The agent pinned it by passing `commit` to repo_clone off prompt text, so
+//     nothing upstream knows. Caught by comparing the branch point to the base
+//     tip — but only when that ref is actually present locally.
+//
+// When neither can be established the PR proceeds: this guards a known-bad
+// combination, it is not a general "is this diff still applicable" check.
+func (a *OrchestratorAgent) refusePRFromPinnedRevision(ctx context.Context, sessionCtx *session.SessionContext, repoDir, baseBranch, branchPointSHA string) error {
+	pinned := ""
+	if sessionCtx != nil && sessionCtx.RepoContext != nil {
+		pinned = strings.TrimSpace(sessionCtx.RepoContext.Commit)
+	}
+	if pinned != "" {
+		return fmt.Errorf(
+			"refusing to open a PR from a pinned revision: the analysis ran against commit %s, "+
+				"so a fix branch cut from it would revert everything merged into %s since. "+
+				"Use raise_pr=false to get the diff, or omit the commit to fix at the branch tip",
+			pinned, baseBranch)
+	}
+
+	// The agent may have pinned via repo_clone without the request saying so.
+	// Only meaningful when the base tip is resolvable locally; single-branch
+	// clones often will not have it, and an unresolvable ref is not evidence
+	// of anything.
+	if branchPointSHA == "" || baseBranch == "" {
+		return nil
+	}
+	out, err := a.runGit(ctx, repoDir, "rev-parse", "--verify", "--quiet", "origin/"+baseBranch)
+	if err != nil {
+		return nil
+	}
+	baseTip := strings.TrimSpace(out)
+	if baseTip == "" || baseTip == branchPointSHA {
+		return nil
+	}
+	return fmt.Errorf(
+		"refusing to open a PR from a stale revision: the fix was written against %s but "+
+			"origin/%s is now at %s, so the PR would revert intervening commits. "+
+			"Use raise_pr=false to get the diff, or re-run against the branch tip",
+		branchPointSHA, baseBranch, baseTip)
+}
+
 // seedRepoCloneBranch tells the repo_clone tool which branch to check out when an
 // invocation omits an explicit `branch`. It uses the request's target/base branch
 // (RepoContext.Branch) — the branch the PR will target — so the working tree and any
@@ -2872,6 +2935,16 @@ func seedRepoCloneBranch(tool *tools.RepoCloneTool, sessionCtx *session.SessionC
 		branch = ""
 	}
 	tool.SetDefaultBranch(branch)
+
+	// A pinned commit rides alongside the branch rather than replacing it: the
+	// branch still governs PR targeting (`gh pr create --base` rejects a SHA),
+	// while the commit governs what gets checked out. Reset to "" when absent so
+	// a long-lived tool does not leak the previous request's commit.
+	commit := ""
+	if sessionCtx != nil && sessionCtx.RepoContext != nil {
+		commit = sessionCtx.RepoContext.Commit
+	}
+	tool.SetDefaultCommit(commit)
 }
 
 // instructionsRequireWrite reports whether any entry in

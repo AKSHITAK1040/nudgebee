@@ -77,8 +77,13 @@ func NewAgenticAnalyzeHandler(cfg *config.Config, gitClient *git.GitClient, cred
 }
 
 type GitRepository struct {
-	URL           string `json:"url" binding:"required_without=LocalPath"`
-	Branch        string `json:"branch,omitempty"`
+	URL    string `json:"url" binding:"required_without=LocalPath"`
+	Branch string `json:"branch,omitempty"`
+	// Commit pins the analysis to one revision. Use it when the question is about
+	// the code as it was at a point in time — the commit a workload was actually
+	// running when an incident fired — rather than the current tip of Branch.
+	// Branch still governs PR targeting, which cannot accept a SHA.
+	Commit        string `json:"commit,omitempty"`
 	DefaultBranch string `json:"default_branch,omitempty"`
 	LocalPath     string `json:"local_path,omitempty"` // Path to existing local repository
 	Provider      string `json:"provider,omitempty"`   // Git provider: "github", "gitlab", or auto-detect if empty
@@ -1261,6 +1266,7 @@ func (ah *AgenticAnalyzeHandler) selectAgent(orch *agents.OrchestratorAgent, age
 func (ah *AgenticAnalyzeHandler) createQueryConfigWithPath(req AgenticAnalyzeRequest, resolvedCreds *credentials.ResolvedCredentials, repositoryPath string) map[string]any {
 	config := map[string]any{
 		"branch": req.GitRepository.Branch,
+		"commit": req.GitRepository.Commit,
 		"prompt": req.Prompt,
 		"workload": map[string]string{
 			"name":      req.WorkloadName,

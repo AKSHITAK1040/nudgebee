@@ -692,12 +692,31 @@ func (gc *GitClient) ensureRemoteTracking(ctx context.Context, baseDir string, b
 // conflict needs both sides). They are fetched explicitly rather than by widening the
 // refspec to everything, which would undo the narrowing described below.
 func (gc *GitClient) CloneOrReuseRepository(ctx context.Context, repoURL string, creds *credentials.ResolvedCredentials, branch string, worktreeDir string, extraBranches ...string) (*CloneResult, error) {
+	return gc.CloneOrReuseRepositoryAtCommit(ctx, repoURL, creds, branch, "", worktreeDir, extraBranches...)
+}
+
+// CloneOrReuseRepositoryAtCommit is CloneOrReuseRepository with an optional pinned
+// commit. When commit is non-empty the worktree is checked out at exactly that
+// commit rather than at the tip of a branch.
+//
+// Why this exists separately from `branch`: `git clone --branch` and
+// `git remote set-branches` only accept ref names, so a SHA passed as a branch
+// fails the clone, or worse resolves nowhere and silently falls back to HEAD —
+// which yields an analysis of the wrong code with no error. Pinning is needed
+// whenever the question is "what did this code look like when the incident
+// fired", not "what does it look like now".
+func (gc *GitClient) CloneOrReuseRepositoryAtCommit(ctx context.Context, repoURL string, creds *credentials.ResolvedCredentials, branch string, commit string, worktreeDir string, extraBranches ...string) (*CloneResult, error) {
 	// An empty branch means "clone the default branch" and is supported throughout this
 	// function, so only non-empty names are checked. A name that would be read by git as
 	// an option is refused before it reaches any argv.
 	if branch != "" {
 		if err := ValidateBranchName(branch); err != nil {
 			return nil, fmt.Errorf("invalid branch name: %w", err)
+		}
+	}
+	if commit != "" {
+		if err := ValidateCommitSHA(commit); err != nil {
+			return nil, fmt.Errorf("invalid commit: %w", err)
 		}
 	}
 	for _, extra := range extraBranches {
@@ -833,12 +852,28 @@ func (gc *GitClient) CloneOrReuseRepository(ctx context.Context, repoURL string,
 		}
 	}
 
+	// A pinned commit overrides the branch tip. The single-branch refspec above
+	// will usually not have brought the object down, so fetch it explicitly.
+	if commit != "" {
+		if err := gc.ensureCommitPresent(ctx, baseDir, commit); err != nil {
+			return nil, err
+		}
+		checkoutRef = commit
+	}
+
 	// Create worktree
 	if err := os.MkdirAll(worktreeDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create worktree directory: %w", err)
 	}
 	wtCmd := exec.CommandContext(ctx, "git", "-C", baseDir, "worktree", "add", "--detach", worktreeDir, checkoutRef)
 	if out, err := wtCmd.CombinedOutput(); err != nil {
+		// A pinned commit must never degrade to HEAD. The caller asked about one
+		// specific revision; checking out a different one produces a confident
+		// analysis of the wrong code, which is worse than failing.
+		if commit != "" {
+			_ = os.RemoveAll(worktreeDir)
+			return nil, fmt.Errorf("worktree add at commit %s failed: %s: %w", commit, string(out), err)
+		}
 		// If detach with ref fails, try without ref (use HEAD)
 		gc.logger.Log(common.EventStepFailure, "Worktree add with ref failed, trying HEAD", map[string]any{"error": err.Error(), "output": string(out), "ref": ref})
 		_ = os.RemoveAll(worktreeDir)
@@ -881,6 +916,55 @@ func (gc *GitClient) CloneOrReuseRepository(ctx context.Context, repoURL string,
 		CommitHash:    commitHash,
 		CommitMessage: commitMsg,
 	}, nil
+}
+
+// ensureCommitPresent makes `commit` resolvable inside the bare repo at baseDir.
+//
+// The bare clone is single-branch by construction, so an arbitrary historical
+// commit is usually absent even when the branch it lives on was fetched. Tries
+// the cheap targeted fetch first (GitHub and GitLab both serve arbitrary SHAs
+// via uploadpack.allowAnySHA1InWant); falls back to widening the refspec and
+// fetching everything for servers that refuse SHA requests.
+func (gc *GitClient) ensureCommitPresent(ctx context.Context, baseDir, commit string) error {
+	has := func() bool {
+		return exec.CommandContext(ctx, "git", "-C", baseDir, "cat-file", "-e", commit+"^{commit}").Run() == nil
+	}
+	if has() {
+		return nil
+	}
+
+	gc.logger.Log(common.EventStepStart, "Fetching pinned commit", map[string]any{"base_dir": baseDir, "commit": commit})
+	fetchCtx, cancel := context.WithTimeout(ctx, gc.timeout)
+	defer cancel()
+	if out, err := exec.CommandContext(fetchCtx, "git", "-C", baseDir, "fetch", "--no-tags", "origin", commit).CombinedOutput(); err != nil {
+		gc.logger.Log(common.EventStepFailure, "Targeted commit fetch failed, widening refspec", map[string]any{
+			"commit": commit, "error": err.Error(), "output": string(out),
+		})
+	} else if has() {
+		return nil
+	}
+
+	// Server refused the SHA (or served it without making it reachable). Widen the
+	// refspec to all branches and fetch again — slower, but it is the only option
+	// left before failing.
+	// Bounded even though this only rewrites .git/config and never touches the
+	// network: a stale index.lock is enough to block it indefinitely, and this
+	// path already runs after a failed fetch. Failure stays non-fatal — the
+	// fetch below is the operation that decides the outcome.
+	setBranchesCtx, cancelSetBranches := context.WithTimeout(ctx, gc.timeout)
+	defer cancelSetBranches()
+	if out, err := exec.CommandContext(setBranchesCtx, "git", "-C", baseDir, "remote", "set-branches", "origin", "*").CombinedOutput(); err != nil {
+		gc.logger.Log(common.EventStepFailure, "Failed to widen refspec", map[string]any{"error": err.Error(), "output": string(out)})
+	}
+	wideCtx, wideCancel := context.WithTimeout(ctx, gc.timeout)
+	defer wideCancel()
+	if out, err := exec.CommandContext(wideCtx, "git", "-C", baseDir, "fetch", "--no-tags", "origin").CombinedOutput(); err != nil {
+		return fmt.Errorf("failed to fetch commit %s: %s: %w", commit, string(out), err)
+	}
+	if !has() {
+		return fmt.Errorf("commit %s not found in repository after fetch", commit)
+	}
+	return nil
 }
 
 // CleanupWorktree removes a git worktree cleanly.

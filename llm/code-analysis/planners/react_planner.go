@@ -218,6 +218,7 @@ type ReActPlanner struct {
 type RepositoryContext struct {
 	URL           string   `json:"url"`                      // Git repository URL
 	Branch        string   `json:"branch"`                   // Current branch
+	Commit        string   `json:"commit,omitempty"`         // Pinned commit SHA, when the analysis targets a specific revision
 	DefaultBranch string   `json:"default_branch"`           // Default branch (main/master)
 	LocalPath     string   `json:"local_path"`               // Local repository path
 	GitHubRepo    string   `json:"git_repo,omitempty"`       // Extracted owner/repo for GitHub operations
