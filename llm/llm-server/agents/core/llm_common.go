@@ -512,16 +512,16 @@ func GenerateAndTrackLLMContent(ctx *security.RequestContext, userId string, acc
 
 	// Optimize chunk size to reduce continuation attempts.
 	//
-	// The floor below is a last resort for models we have no ceiling for, and it is
-	// LOWER than most current models support — a model that lands here truncates at
-	// max_tokens and pays the continuation loop on every long response. That is
+	// The floor below is a last resort for models with no ceiling anywhere, and it
+	// is LOWER than most current models support — a model that lands here truncates
+	// at max_tokens and pays the continuation loop on every long response. That is
 	// silent by nature (the loop succeeds), so log it: a Claude 4.x model sat on
 	// this floor unnoticed until a customer investigation was traced call by call.
-	maxOutputTokens := GetLlmMaxOutputTokens(model)
+	maxOutputTokens := ResolveMaxOutputTokens(accountId, provider, model)
 	if maxOutputTokens <= 0 {
 		maxOutputTokens = 4096
-		ctx.GetLogger().Warn("llm: no max-output-token entry for model, applying the conservative floor — "+
-			"long responses will truncate and drive the continuation loop until an entry is added",
+		ctx.GetLogger().Warn("llm: no max-output-token value in config or pricing catalog, applying the conservative floor — "+
+			"long responses will truncate and drive the continuation loop until a catalog row is added",
 			"model", model, "provider", provider, "agentName", agentName, "maxOutputTokens", maxOutputTokens)
 	}
 	options = append(options, llms.WithMaxTokens(maxOutputTokens))

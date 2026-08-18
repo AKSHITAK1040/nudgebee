@@ -1917,6 +1917,7 @@ type LLMConfigResolution struct {
 	AgentName    string            `json:"agent_name,omitempty"`
 	Tier         ModelTier         `json:"tier,omitempty"`        // Category the call opted into (empty when no tier was selected)
 	MaxContext   int               `json:"max_context,omitempty"` // User-configured context window (tokens); 0 = not set → fall back to the model map
+	AccountId    string            `json:"-"`                     // Account the resolution ran for; lets downstream catalog lookups see tenant rows
 	Hierarchy    []LLMConfigLayer  `json:"hierarchy"`             // Full resolution chain
 	dbConfig     map[string]string // unexported cache for optimized downstream lookups
 
@@ -2073,11 +2074,20 @@ func resolveModelContextMap(dbConfig map[string]string) map[string]int {
 }
 
 // ResolveModelMaxContext returns the usable context window (tokens) for a model:
-// the user-configured value (UI/config) if set, else the hardcoded model map /
-// 32k default via GetLlmMaxTokenLength.
+// the user-configured value (UI/config) if set, else the pricing-catalog row
+// (llm_model_pricing.max_context_tokens, tenant row over built-in), else the
+// hardcoded model map / 32k default via GetLlmMaxTokenLength.
 func ResolveModelMaxContext(resolution *LLMConfigResolution, model string) int {
 	if resolution != nil && resolution.MaxContext > 0 {
 		return resolution.MaxContext
+	}
+	provider, accountId := "", ""
+	if resolution != nil {
+		provider = resolution.Provider
+		accountId = resolution.AccountId
+	}
+	if l, ok := lookupModelTokenLimits(accountId, provider, model); ok && l.MaxContext > 0 {
+		return l.MaxContext
 	}
 	return GetLlmMaxTokenLength(model)
 }
@@ -2210,6 +2220,7 @@ func ResolveLLMConfig(ctx *security.RequestContext, accountId, agentName string,
 	result := &LLMConfigResolution{
 		AgentName:    agentName,
 		Tier:         tier,
+		AccountId:    accountId,
 		IsOverridden: false,
 		Hierarchy:    []LLMConfigLayer{},
 	}
@@ -2976,6 +2987,7 @@ func resolveFromPinnedSource(ctx *security.RequestContext, sourceId, accountId, 
 
 	res := &LLMConfigResolution{
 		Source:             "pinned:" + sourceId,
+		AccountId:          accountId,
 		IsOverridden:       true,
 		PinnedConfigSource: sourceId,
 		Hierarchy: []LLMConfigLayer{{

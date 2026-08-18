@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"regexp"
 	"strings"
 	"sync"
 
@@ -10,23 +9,6 @@ import (
 	tiktoken_loader "github.com/pkoukk/tiktoken-go-loader" // embedded BPE vocab (offline)
 	anthropic "github.com/qhenkart/anthropic-tokenizer-go" // Claude
 )
-
-// oSeriesRE matches an OpenAI o-series reasoning model (o1 / o3 / o4 / a future oN)
-// as a whole SEGMENT of the id.
-//
-// Neither a plain prefix nor a substring test works here. normalizeModel strips at
-// most ONE leading vendor segment and only from a fixed list, so ids that arrive
-// with a region or platform qualifier keep it — "azure.openai.o1-mini",
-// "us.openai.o3" and "azure.o3-mini" all survive normalization intact, and a
-// HasPrefix check silently drops them onto the 4096 floor. A plain Contains test
-// has the opposite failure, capturing unrelated ids like "some-o1-lookalike".
-//
-// Anchoring on a segment boundary ("." "/" or start) and requiring the version to
-// end the segment satisfies both. `o\d+` rather than a fixed o1/o3/o4 set, and `+`
-// rather than a single digit, for the same reason Claude is keyed on generation:
-// a new release — including a two-digit one — must not fall through the hole this
-// table exists to close.
-var oSeriesRE = regexp.MustCompile(`(^|[./])o\d+(-|$)`)
 
 var anthropicTokenizer *anthropic.Tokenizer
 var modelEncodingMap = map[string]*tiktoken.Tiktoken{}
@@ -258,77 +240,16 @@ func GetLlmMaxTokenLength(model string) int {
 	return 32_000
 }
 
-// GetLlmMaxOutputTokens returns the maximum output tokens for a given model.
-// This is useful for setting the MaxTokens option to avoid small chunks and excessive looping.
+// GetLlmMaxOutputTokens returns the model's output-token ceiling from the
+// pricing catalog, built-in rows only (no account context, so no tenant rows
+// and no per-account config key). Call sites that know the account/provider
+// should use ResolveMaxOutputTokens instead. Returns 0 when the catalog has
+// no entry — the caller applies its conservative floor.
+//
+// Ceiling values live in llm_model_pricing.max_output_tokens (V878), editable
+// from the Model Pricing tab; they were previously a hardcoded table here.
 func GetLlmMaxOutputTokens(model string) int {
-	n := normalizeModel(model)
-
-	switch {
-	case strings.Contains(n, "gemini-3"):
-		// Gemini 3 Flash/Pro support up to 65k output tokens.
-		return 65536
-	case strings.Contains(n, "gemini-2.5") || strings.Contains(n, "gemini-2-5"):
-		// Gemini 2.5 supports up to 65k output tokens (important for thinking tokens).
-		return 65536
-	case strings.Contains(n, "gemini"):
-		// Gemini 1.5/2.0 standard is ~8k.
-		return 8192
-	case strings.Contains(n, "claude-3-5"):
-		// Claude 3.5 Sonnet specifically supports 8k now.
-		return 8192
-	case strings.Contains(n, "claude-3"):
-		return 4096
-	case strings.Contains(n, "claude"):
-		// Claude 4.x and newer. Keyed on GENERATION rather than individual model
-		// ids so a new point release cannot silently fall through to the caller's
-		// floor — which is exactly how every Claude 4.x model ended up capped at
-		// 4096 while its real ceiling was 128k.
-		return anthropicMaxOutputTokens(n)
-	case strings.Contains(n, "gpt-5"):
-		// GPT-5 family documents a 128k output ceiling; held at half, as for Claude 4.6+.
-		return 65536
-	case oSeriesRE.MatchString(n):
-		// OpenAI o-series reasoning models document a 100k output ceiling.
-		return 65536
-	case strings.Contains(n, "gpt-4o"):
-		// GPT-4o supports up to 16k output tokens.
-		return 16384
-	case strings.Contains(n, "gpt-4"):
-		return 4096
-	case strings.Contains(n, "llama-3") || strings.Contains(n, "llama3"):
-		return 8192
-	case strings.Contains(n, "deepseek"):
-		return 8192
-	}
-
-	return 0 // Unknown or let provider decide default
-}
-
-// anthropicMaxOutputTokens returns the output-token ceiling for a Claude 4.x-or-newer
-// model, reusing the generation parser that already backs the thinking-capability
-// table (anthropicGeneration) so both tables agree on what "4.6" means and neither
-// has to re-learn Anthropic's id conventions.
-//
-// Values are deliberately at or BELOW each generation's documented ceiling:
-// over-requesting max_tokens is a hard 400 from the provider, whereas
-// under-requesting only costs headroom. 65536 is half of the 128k the 4.6+ and 5.x
-// families document — ample for our longest observed response while still bounding
-// a runaway generation.
-//
-// Returns 0 for anything it cannot place, which leaves the caller's existing floor
-// in charge rather than guessing a ceiling for an unknown model.
-func anthropicMaxOutputTokens(normalized string) int {
-	major, minor, ok := anthropicGeneration(normalized)
-	if !ok || major < 4 {
-		return 0
-	}
-	if major > 4 || minor >= 6 {
-		// Opus 4.6/4.7/4.8, Sonnet 4.6, and the 5 family document a 128k ceiling.
-		return 65536
-	}
-	// Opus 4/4.1 cap at 32k — stay at the lowest ceiling in the 4.0-4.5 band so one
-	// value is safe for every model in it.
-	return 32000
+	return ResolveMaxOutputTokens("", "", model)
 }
 
 // GetLlmDefaultThinkingLevel returns the default thinking level for a model.
