@@ -7,6 +7,7 @@ import { panelQueryAccounts, resolvePanelAccounts } from './panelAccounts';
 import { AWS_METRICS_PROVIDER, ES_PROVIDER, isAwsAccount } from './panelProviders';
 import { alignSeries, toRawSeries, type RawSeries } from './panelSeries';
 import { acquirePanelSlot } from './panelQueue';
+import { capSeries, cappedSeriesWarning, MAX_CHART_SERIES, MAX_TABLE_SERIES, PANEL_TIMEOUT_MS, panelStep } from './panelBounds';
 import { convertNumberToTimestamp } from 'src/utils/common';
 import { renderTemplate, type VariableValues } from './templating';
 
@@ -216,39 +217,71 @@ export function usePanelData({
       setData({ labels: [], series: [] });
       return;
     }
+
+    /*
+     * One flag and one deadline for every path below. The flag is set by the
+     * effect's cleanup (scrolled away, range changed, unmounted) and by the
+     * deadline, and every callback checks it before touching state. The
+     * deadline aborts the request and leaves a retryable error: the relay
+     * allows 30s and the query engine 120s, and a panel that waited on either
+     * held its skeleton — and its load slot — for as long as they did.
+     */
+    let cancelled = false;
+    const controller = new AbortController();
+    const deadline = setTimeout(() => {
+      if (cancelled) return;
+      cancelled = true;
+      controller.abort();
+      setError(failure(`No answer after ${PANEL_TIMEOUT_MS / 1000}s. Retry, or narrow the query.`));
+      setData(null);
+      setLoading(false);
+    }, PANEL_TIMEOUT_MS);
+    /** The cleanup: stops the clock and whatever is still in flight. */
+    const stop = () => {
+      cancelled = true;
+      clearTimeout(deadline);
+      controller.abort();
+    };
+    /**
+     * A request has answered, well or badly: the deadline no longer applies.
+     * Without this the clock kept running past a successful answer and, 30s
+     * after the panel had drawn, replaced its data with the timeout error.
+     */
+    const settle = () => {
+      clearTimeout(deadline);
+      if (!cancelled) setLoading(false);
+    };
+
     // Traces are read through the TRACES SERVICE, not the query engine.
     if (panel.datasource === 'traces') {
       const stored = targets[0]?.query;
       if (!stored) {
         setError({ kind: 'config', message: 'This panel has no query' });
-        return;
+        // Nothing was sent, so nothing to wait for: stop the clock too.
+        return stop();
       }
-      let cancelledTraces = false;
       setLoading(true);
       setError(null);
 
       // One account: the traces API takes a single accountId, which is why a
-      // traces panel resolves to exactly one (auto-selected, or picked).
+      // traces panel resolves to exactly one (auto-selected, or picked). The
+      // traces client takes no signal, so the deadline is the only bound here.
       runTracePanel(draftFromQuery(renderEntityQuery(stored, (v) => renderTemplate(v, variables))), resolved[0].value, startTime, endTime)
         .then((result) => {
-          if (cancelledTraces) return;
+          if (cancelled) return;
           if (result.unsupported.length > 0) {
             setWarning(`Ignored filters this trace store cannot apply: ${result.unsupported.join(', ')}.`);
           }
           setData({ labels: [], series: [], table: result });
         })
         .catch((err) => {
-          if (cancelledTraces) return;
+          if (cancelled) return;
           setError(failure(err?.message || 'Could not load traces for this panel.'));
           setData(null);
         })
-        .finally(() => {
-          if (!cancelledTraces) setLoading(false);
-        });
+        .finally(settle);
 
-      return () => {
-        cancelledTraces = true;
-      };
+      return stop;
     }
 
     // `nudgebee` panels read the internal query engine.
@@ -257,23 +290,25 @@ export function usePanelData({
       const query = stored ? renderEntityQuery(stored, (v) => renderTemplate(v, variables)) : undefined;
       if (!query) {
         setError({ kind: 'config', message: 'This panel has no query' });
-        return;
+        return stop();
       }
-      let cancelledEntity = false;
       setLoading(true);
       setError(null);
 
       apiDashboards
-        .executeEntityQuery({
-          account_ids: resolved.map((a) => a.value),
-          datasource: panel.datasource,
-          query,
-          time_column: targets[0]?.time_column,
-          start_time: startTime,
-          end_time: endTime,
-        })
+        .executeEntityQuery(
+          {
+            account_ids: resolved.map((a) => a.value),
+            datasource: panel.datasource,
+            query,
+            time_column: targets[0]?.time_column,
+            start_time: startTime,
+            end_time: endTime,
+          },
+          controller.signal
+        )
         .then((res) => {
-          if (cancelledEntity) return;
+          if (cancelled) return;
           if (res.errors || !res.data) {
             setError(failure(gatewayMessage(res.errors) || 'Could not run this panel’s query.'));
             setData(null);
@@ -283,18 +318,20 @@ export function usePanelData({
           // renderer can use the same Datetime component the listings do.
           setData({ labels: [], series: [], table: labelEntityColumns(res.data, draftFromQuery(query)) });
         })
-        .finally(() => {
-          if (!cancelledEntity) setLoading(false);
-        });
+        // An abort rejects rather than resolving with `errors`; after the
+        // deadline or a cleanup it is already accounted for.
+        .catch((err) => {
+          if (cancelled) return;
+          setError(failure(err?.message || 'Could not run this panel’s query.'));
+          setData(null);
+        })
+        .finally(settle);
 
-      return () => {
-        cancelledEntity = true;
-      };
+      return stop;
     }
 
     // Logs come back as lines, not series.
     if (panel.datasource === 'logs') {
-      let cancelledLogs = false;
       setLoading(true);
       setError(null);
       const query = renderTemplate(targets[0]?.expr || '', variables);
@@ -302,29 +339,32 @@ export function usePanelData({
 
       Promise.allSettled(
         resolved.map((account) =>
-          observability.fetchLogs({
-            account_id: account.value,
-            query,
-            start_time: startTime,
-            end_time: endTime,
-            limit: LOG_LINE_LIMIT,
-            offset: 0,
-            // A panel that names its provider queries THAT provider on every
-            // account, rather than each account's own default — the expression is
-            // written in one query language and only that provider can read it.
-            // The source is left for the server to resolve per account, since the
-            // same provider can be a user integration on one and agent-detected on
-            // another.
-            ...(panel.provider ? { log_provider: panel.provider } : {}),
-            // An ES query names no index, so the index is sent beside it. Omitted
-            // when the panel pins none, which leaves the backend on each account's
-            // own configured default — the pre-existing behaviour.
-            ...(panel.provider === ES_PROVIDER && panel.provider_index ? { request: { index: panel.provider_index } } : {}),
-          })
+          observability.fetchLogs(
+            {
+              account_id: account.value,
+              query,
+              start_time: startTime,
+              end_time: endTime,
+              limit: LOG_LINE_LIMIT,
+              offset: 0,
+              // A panel that names its provider queries THAT provider on every
+              // account, rather than each account's own default — the expression is
+              // written in one query language and only that provider can read it.
+              // The source is left for the server to resolve per account, since the
+              // same provider can be a user integration on one and agent-detected on
+              // another.
+              ...(panel.provider ? { log_provider: panel.provider } : {}),
+              // An ES query names no index, so the index is sent beside it. Omitted
+              // when the panel pins none, which leaves the backend on each account's
+              // own configured default — the pre-existing behaviour.
+              ...(panel.provider === ES_PROVIDER && panel.provider_index ? { request: { index: panel.provider_index } } : {}),
+            },
+            controller.signal
+          )
         )
       )
         .then((settled) => {
-          if (cancelledLogs) return;
+          if (cancelled) return;
           const failures: string[] = [];
           const rows: string[][] = [];
 
@@ -353,27 +393,24 @@ export function usePanelData({
           const kinds: ColumnKind[] = columns.map((c) => (c === 'Time' ? 'time' : 'text'));
           setData({ labels: [], series: [], table: { columns, rows, column_kinds: kinds } });
         })
-        .finally(() => {
-          if (!cancelledLogs) setLoading(false);
-        });
+        .finally(settle);
 
-      return () => {
-        cancelledLogs = true;
-      };
+      return stop;
     }
 
     // redis / rabbitmq run a command through the relay instead of querying a provider.
     if (isCommandDatasource(panel.datasource)) {
-      let cancelledCommand = false;
       setLoading(true);
       setError(null);
       const command = renderTemplate(targets[0]?.expr || '', variables);
 
       Promise.allSettled(
-        resolved.map((account) => apiDashboards.executePanelQuery({ account_id: account.value, datasource: panel.datasource, command }))
+        resolved.map((account) =>
+          apiDashboards.executePanelQuery({ account_id: account.value, datasource: panel.datasource, command }, controller.signal)
+        )
       )
         .then((settled) => {
-          if (cancelledCommand) return;
+          if (cancelled) return;
           const failures: string[] = [];
           const answers: { account: string; result: PanelQueryResult }[] = [];
 
@@ -400,16 +437,11 @@ export function usePanelData({
           }
           setData({ labels: [], series: [], table: mergeQueryResults(answers) });
         })
-        .finally(() => {
-          if (!cancelledCommand) setLoading(false);
-        });
+        .finally(settle);
 
-      return () => {
-        cancelledCommand = true;
-      };
+      return stop;
     }
 
-    let cancelled = false;
     setLoading(true);
     setError(null);
 
@@ -425,12 +457,19 @@ export function usePanelData({
     if (Object.keys(queries).length === 0) {
       setData({ labels: [], series: [] });
       setLoading(false);
-      return;
+      return stop();
     }
 
     // Only prefix when there is more than one account — on a single-account
     // panel the prefix is noise on every series.
     const prefixWithAccount = resolved.length > 1;
+    // A stat, gauge or table shows one value per series, so a single instant
+    // sample is the whole answer. A table used to run the range query and keep
+    // the last point — a 24h increase recomputed at every step, then thrown away.
+    const singleValue = panel.type === 'stat' || panel.type === 'gauge' || panel.type === 'table';
+    // Sized to the panel, not left to the provider: the agent's default is 60s
+    // whatever the range, which made Last 7 days 10k points per series.
+    const step = panelStep(startTime, endTime);
 
     Promise.allSettled(
       resolved.map((account) => {
@@ -440,22 +479,27 @@ export function usePanelData({
         // run PromQL against a backend that cannot read it.
         const provider = panel.provider || (isAwsAccount(account) ? AWS_METRICS_PROVIDER : '');
         const cloudwatch = provider === AWS_METRICS_PROVIDER;
-        return observability.metricsQuery({
-          account_id: account.value,
-          queries,
-          start_time: startTime,
-          end_time: endTime,
-          // CloudWatch has no instant form — it always answers with a range.
-          instant: cloudwatch ? false : panel.type === 'stat' || panel.type === 'gauge',
-          // CloudWatch is never an account's DEFAULT metrics provider: it is not an integration that can
-          // carry that flag, so it must be named — and named with its source, since it resolves only as
-          // `user` and the server would otherwise fall back to `agent` and reject the pair. Every other
-          // provider leaves the source for the server to resolve per account.
-          ...(provider ? { metric_provider: provider, ...(cloudwatch ? { metric_provider_source: 'user' } : {}) } : {}),
-          // The ES metrics path reads its index out of `metric_name` — the slot the
-          // request contract gives it, per resolveESMetricsIndex. Not a mistake here.
-          ...(provider === ES_PROVIDER && panel.provider_index ? { request: { metric_name: panel.provider_index } } : {}),
-        });
+        // CloudWatch has no instant form — it always answers with a range.
+        const instant = !cloudwatch && singleValue;
+        return observability.metricsQuery(
+          {
+            account_id: account.value,
+            queries,
+            start_time: startTime,
+            end_time: endTime,
+            instant,
+            ...(instant ? {} : { step_interval: step }),
+            // CloudWatch is never an account's DEFAULT metrics provider: it is not an integration that can
+            // carry that flag, so it must be named — and named with its source, since it resolves only as
+            // `user` and the server would otherwise fall back to `agent` and reject the pair. Every other
+            // provider leaves the source for the server to resolve per account.
+            ...(provider ? { metric_provider: provider, ...(cloudwatch ? { metric_provider_source: 'user' } : {}) } : {}),
+            // The ES metrics path reads its index out of `metric_name` — the slot the
+            // request contract gives it, per resolveESMetricsIndex. Not a mistake here.
+            ...(provider === ES_PROVIDER && panel.provider_index ? { request: { metric_name: panel.provider_index } } : {}),
+          },
+          controller.signal
+        );
       })
     )
       .then((settled) => {
@@ -483,20 +527,22 @@ export function usePanelData({
           setData(null);
           return;
         }
-        if (failed.length > 0) {
-          setWarning(`No data from ${failed.join(', ')} — showing the rest.`);
-        }
+        // Bounded before anything is aligned or drawn: Chart.js makes a dataset
+        // of every series and the legend a chip of each, and a per-pod query
+        // over a day of ephemeral pods answered with 4,798 of them. The viewer
+        // is told what was left out rather than shown a chart missing lines.
+        const { kept, dropped } = capSeries(raw, panel.type === 'table' ? MAX_TABLE_SERIES : MAX_CHART_SERIES);
+        const notes: string[] = [];
+        if (failed.length > 0) notes.push(`No data from ${failed.join(', ')} — showing the rest.`);
+        if (dropped > 0) notes.push(cappedSeriesWarning(kept.length, raw.length));
+        if (notes.length > 0) setWarning(notes.join(' '));
         // Aligned across ALL accounts at once, so a series that only one account
         // reports still sits at the right point on the shared axis.
-        setData(alignSeries(raw));
+        setData(alignSeries(kept));
       })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+      .finally(settle);
 
-    return () => {
-      cancelled = true;
-    };
+    return stop;
   }, [
     accountsKey,
     filteredOut,

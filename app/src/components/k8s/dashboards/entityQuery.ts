@@ -922,6 +922,17 @@ export function coerceFilterValue(table: EntityTable, filter: EntityFilter): unk
  * Returns the STORED shape rather than `EntityQuery` — it is handed straight to
  * the execute action, whose `query` field is the opaque engine request.
  */
+/**
+ * A `_binary` column's operator map, or an empty one when the stored query does
+ * not hold an object there. Dashboards are stored JSON that predates the current
+ * shape and can be hand-edited on import, so a column carrying `null` — or a
+ * string, or an array — is reachable, and it must not take the render down.
+ */
+function asOperators(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
 export function renderEntityQuery(stored: unknown, render: (value: string) => string): Record<string, unknown> {
   const query = (stored || {}) as EntityQuery;
 
@@ -941,9 +952,12 @@ export function renderEntityQuery(stored: unknown, render: (value: string) => st
       _and: and.map((c: any) => ({
         ...c,
         _binary: Object.fromEntries(
-          Object.entries((c?._binary || {}) as Record<string, Record<string, unknown>>).map(([column, operators]) => [
+          Object.entries((c?._binary || {}) as Record<string, unknown>).map(([column, operators]) => [
             column,
-            Object.fromEntries(Object.entries(operators).map(([operator, value]) => [operator, renderValue(value)])),
+            // Guarded one level deeper than the container: a stored query with
+            // `_binary: { column: null }` would otherwise throw out of
+            // Object.entries and take the whole dashboard's render with it.
+            Object.fromEntries(Object.entries(asOperators(operators)).map(([operator, value]) => [operator, renderValue(value)])),
           ])
         ),
       })),
