@@ -32,6 +32,11 @@ const (
 	finOpsContextFreshFor  = 30 * time.Minute
 	finOpsContextRetainFor = 24 * time.Hour
 
+	// A build whose aggregates errored still caches — a footprint-only block beats
+	// none — but it must not hold the full freshness window, or one slow-metastore
+	// minute costs the account its spend baseline for the next 30.
+	finOpsContextDegradedFreshFor = 5 * time.Minute
+
 	// Ceilings: how long a first build may block a turn, how long a background
 	// build may run, and how long its aggregates get.
 	finOpsContextFirstBuildBudget = 1500 * time.Millisecond
@@ -216,7 +221,7 @@ func (a *FinOpsAgent) fetchFinOpsAccountContext(ctx *security.RequestContext) st
 	// Nothing cached yet. A first build already in flight (marker claimed, content
 	// not written) means waiting would land on the footprint-only block anyway.
 	if _, building := common.CacheGet(finOpsAccountContextCacheNS, finOpsContextFreshKey(a.accountId)); building {
-		return a.renderAccountContext(ctx, false)
+		return a.renderFootprintOnlyContext(ctx)
 	}
 
 	// The build continues in the background whichever branch wins, so the next
@@ -227,16 +232,58 @@ func (a *FinOpsAgent) fetchFinOpsAccountContext(ctx *security.RequestContext) st
 	case rendered := <-built:
 		return rendered
 	case <-ctx.GetContext().Done():
-		return a.renderAccountContext(ctx, false)
+		return a.renderFootprintOnlyContext(ctx)
 	case <-time.After(finOpsContextFirstBuildBudget):
 		ctx.GetLogger().Info("finops: account context build exceeded its budget, using footprint-only context for this turn",
 			"account_id", a.accountId, "budget", finOpsContextFirstBuildBudget.String())
-		return a.renderAccountContext(ctx, false)
+		return a.renderFootprintOnlyContext(ctx)
 	}
+}
+
+// renderFootprintOnlyContext is the block a turn falls back to when it has
+// nothing cached and cannot wait for a build. Never cached — it is missing the
+// spend baseline by construction, not by failure.
+func (a *FinOpsAgent) renderFootprintOnlyContext(ctx *security.RequestContext) string {
+	rendered, _ := a.renderAccountContext(ctx, false)
+	return rendered
 }
 
 func finOpsContextKey(accountId string) string      { return "finops_ctx:" + accountId }
 func finOpsContextFreshKey(accountId string) string { return "finops_ctx_fresh:" + accountId }
+
+// InvalidateFinOpsAccountContext drops an account's cached block so the next
+// FinOps turn rebuilds it. The block freezes the account's cloud footprint —
+// providers, integrations, whether the K8s agent is connected — inside a string
+// cached for up to finOpsContextRetainFor, so without this an integration change
+// stays invisible to the FinOps prompt long after every other cache has been
+// busted, and the agent keeps telling users a connected agent is not connected.
+//
+// Both keys go: dropping only the freshness marker would still serve the stale
+// footprint for one more turn, which is the turn the user takes right after
+// wiring up the integration.
+func InvalidateFinOpsAccountContext(accountId string) {
+	if accountId == "" {
+		return
+	}
+	for _, key := range []string{finOpsContextKey(accountId), finOpsContextFreshKey(accountId)} {
+		// Debug, not Warn: most accounts have never built a FinOps block, and the
+		// in-memory store reports deleting an absent key as an error. A genuine
+		// failure costs staleness until the freshness window lapses, not correctness.
+		if err := common.CacheDelete(finOpsAccountContextCacheNS, key); err != nil {
+			slog.Debug("finops: account context key not invalidated", "error", err, "key", key, "account_id", accountId)
+		}
+	}
+}
+
+// markAccountContextFresh claims (or re-stamps) the freshness marker for the
+// given window. Failing to write it only costs a redundant rebuild next turn,
+// so it logs rather than propagating.
+func (a *FinOpsAgent) markAccountContextFresh(window time.Duration) {
+	if err := common.CacheSet(finOpsAccountContextCacheNS, finOpsContextFreshKey(a.accountId), []byte("1"),
+		common.CacheSetWithExpiration(window)); err != nil {
+		slog.Warn("finops: failed to mark account context fresh", "error", err, "account_id", a.accountId)
+	}
+}
 
 // releaseAccountContextMarker drops the freshness marker after a build that
 // cached nothing, so the next turn retries rather than honouring a guard for
@@ -252,12 +299,13 @@ func (a *FinOpsAgent) releaseAccountContextMarker(reason string) {
 // receives the render — buffered, so a caller that stopped waiting can't block it.
 //
 // The freshness marker is claimed up front rather than on completion so it also
-// guards against concurrent turns each starting their own rebuild.
+// damps concurrent turns each starting their own rebuild. Damps, not prevents:
+// the claim is a read followed by a write, not an atomic one, so two turns
+// arriving together can still both build. Duplicate read-only builds are the
+// acceptable failure here — an atomic claim would need SETNX, which the cache
+// wrapper does not expose and which the in-memory provider has no answer for.
 func (a *FinOpsAgent) refreshAccountContext(ctx *security.RequestContext, built chan<- string) {
-	if err := common.CacheSet(finOpsAccountContextCacheNS, finOpsContextFreshKey(a.accountId), []byte("1"),
-		common.CacheSetWithExpiration(finOpsContextFreshFor)); err != nil {
-		slog.Warn("finops: failed to mark account context fresh", "error", err, "account_id", a.accountId)
-	}
+	a.markAccountContextFresh(finOpsContextFreshFor)
 
 	// WithoutCancel keeps the request's values while dropping its cancellation.
 	goCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx.GetContext()), finOpsContextBuildTimeout)
@@ -272,11 +320,18 @@ func (a *FinOpsAgent) refreshAccountContext(ctx *security.RequestContext, built 
 			}
 		}()
 
-		rendered := a.renderAccountContext(bgCtx, true)
+		rendered, complete := a.renderAccountContext(bgCtx, true)
 		if err := common.CacheSet(finOpsAccountContextCacheNS, finOpsContextKey(a.accountId), []byte(rendered),
 			common.CacheSetWithExpiration(finOpsContextRetainFor)); err != nil {
 			slog.Warn("finops: failed to cache account context", "error", err, "account_id", a.accountId)
 			a.releaseAccountContextMarker("cache write failure")
+		} else if !complete {
+			// Cached, but built from a spend section that errored. Shorten the window
+			// so the next turn past it retries, instead of serving a block missing its
+			// baseline for a full 30 minutes.
+			slog.Info("finops: account context built without its spend baseline, shortening freshness window",
+				"account_id", a.accountId, "fresh_for", finOpsContextDegradedFreshFor.String())
+			a.markAccountContextFresh(finOpsContextDegradedFreshFor)
 		}
 		if built != nil {
 			built <- rendered
@@ -287,8 +342,13 @@ func (a *FinOpsAgent) refreshAccountContext(ctx *security.RequestContext, built 
 // renderAccountContext renders the block. withSpend gates the metastore
 // aggregates; the footprint-only form is cheap because AccountConfigSummary is
 // already cached, and is what a turn falls back to when a first build overruns.
-func (a *FinOpsAgent) renderAccountContext(ctx *security.RequestContext, withSpend bool) string {
+//
+// The second return reports whether the spend section landed in full — false
+// means the block is servable but thinner than it should be, and the caller
+// caches it on a shorter freshness window.
+func (a *FinOpsAgent) renderAccountContext(ctx *security.RequestContext, withSpend bool) (string, bool) {
 	var b strings.Builder
+	complete := false
 	b.WriteString("<account_context>\n")
 
 	// Cloud footprint — sourced from the already-cached AccountConfigSummary, so
@@ -313,7 +373,7 @@ func (a *FinOpsAgent) renderAccountContext(ctx *security.RequestContext, withSpe
 	// Spend baseline + recommendation summary — best-effort. Any failure leaves
 	// the cloud-footprint section intact and is logged, not surfaced.
 	if withSpend {
-		a.appendSpendContext(ctx, &b)
+		complete = a.appendSpendContext(ctx, &b)
 	}
 
 	// Optimize-page deep-link base. Surfaced so the agent can render per-row
@@ -331,23 +391,28 @@ func (a *FinOpsAgent) renderAccountContext(ctx *security.RequestContext, withSpe
 	b.WriteString("As of: " + time.Now().UTC().Format("2006-01-02") + "\n")
 	b.WriteString("</account_context>")
 
-	return b.String()
+	return b.String(), complete
 }
 
 // appendSpendContext writes the 30-day spend, top services, and open
 // recommendation lines. Each query is independent and best-effort: a failure
 // logs and skips only its own line.
-func (a *FinOpsAgent) appendSpendContext(ctx *security.RequestContext, b *strings.Builder) {
+//
+// It reports whether every query answered. An empty result is not a failure —
+// a new account legitimately has no top services and no open recommendations —
+// so only an error, or bailing before the queries run, makes this false.
+func (a *FinOpsAgent) appendSpendContext(ctx *security.RequestContext, b *strings.Builder) bool {
 	tenantId, err := security.GetTenantIdFromAccountId(a.accountId)
 	if err != nil || tenantId == "" {
 		slog.Warn("finops: cannot resolve tenant for account context", "error", err, "account_id", a.accountId)
-		return
+		return false
 	}
 	dbManager, err := common.GetDatabaseManager(common.Metastore)
 	if err != nil {
 		slog.Warn("finops: db manager unavailable for account context", "error", err)
-		return
+		return false
 	}
+	complete := true
 
 	// Shared deadline: each aggregate is best-effort per line already, so a slow
 	// metastore drops what it cannot produce in time.
@@ -365,6 +430,7 @@ func (a *FinOpsAgent) appendSpendContext(ctx *security.RequestContext, b *string
 		 WHERE tenant = $1 AND cloud_account = $2 AND date >= $3 AND date < $4 AND exclude_aggregate = false`,
 		tenantId, a.accountId, windowStart, windowEnd); err != nil {
 		slog.Warn("finops: 30-day spend query failed for account context", "error", err, "account_id", a.accountId)
+		complete = false
 	} else {
 		fmt.Fprintf(b, "30-day spend: $%.2f\n", spend)
 	}
@@ -382,6 +448,7 @@ func (a *FinOpsAgent) appendSpendContext(ctx *security.RequestContext, b *string
 		 LIMIT 3`,
 		tenantId, a.accountId, windowStart, windowEnd); err != nil {
 		slog.Warn("finops: top services query failed for account context", "error", err, "account_id", a.accountId)
+		complete = false
 	} else if len(topServices) > 0 {
 		parts := make([]string, 0, len(topServices))
 		for _, s := range topServices {
@@ -404,10 +471,13 @@ func (a *FinOpsAgent) appendSpendContext(ctx *security.RequestContext, b *string
 		 WHERE cloud_account_id = $1 AND status = 'Open'`,
 		a.accountId); err != nil {
 		slog.Warn("finops: open recommendation query failed for account context", "error", err, "account_id", a.accountId)
+		complete = false
 	} else if rec.Count > 0 {
 		fmt.Fprintf(b, "Open recommendations: %d (savings quantified for %d, total $%.2f/month)\n",
 			rec.Count, rec.Quantified, rec.TotalSavings)
 	}
+
+	return complete
 }
 
 // sortedKeys returns the true-valued keys of a string-keyed bool set, sorted for
