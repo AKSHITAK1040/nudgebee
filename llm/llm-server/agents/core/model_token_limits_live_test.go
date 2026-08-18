@@ -27,6 +27,11 @@ func TestModelTokenLimits_Live(t *testing.T) {
 	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "anthropic", "claude-opus-4.6"))
 	assert.Equal(t, 64000, ResolveMaxOutputTokens("", "anthropic", "claude-sonnet-4.5"))
 	assert.Equal(t, 32000, ResolveMaxOutputTokens("", "anthropic", "claude-opus-4"))
+	// The #36449 customer id: Bedrock cross-region, hyphenated version — must
+	// resolve against the bare dotted catalog row via canonicalization.
+	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "bedrock", "us.anthropic.claude-sonnet-4-6"))
+	// Seeded by V880 after live traffic on it was found unpriced and floored.
+	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "googleai", "gemini-3.7-flash"))
 	assert.Equal(t, 4096, ResolveMaxOutputTokens("", "anthropic", "claude-opus-3"))
 	// Unseeded (embedding) rows stay on the caller's floor.
 	assert.Equal(t, 0, ResolveMaxOutputTokens("", "googleai", "text-embedding-004"))

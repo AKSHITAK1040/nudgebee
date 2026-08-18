@@ -51,6 +51,72 @@ func TestResolveMaxOutputTokens_CatalogResolution(t *testing.T) {
 	assert.Equal(t, 8192, GetLlmMaxOutputTokens("nemotron-nano"))
 }
 
+// Bedrock cross-region ids stack a region segment, a vendor segment, hyphenated
+// version numbers and an invocation suffix — none of which appear on the bare
+// dotted catalog rows the seed writes. Any one of them missing canonicalization
+// re-creates #36449's floor regression for the exact customer id that motivated
+// it, so each decoration is pinned here.
+func TestResolveMaxOutputTokens_BedrockCrossRegionIds(t *testing.T) {
+	withFakeModelLimitsCatalog(t, map[string]modelTokenLimits{
+		"anthropic:claude-sonnet-4.6": {MaxOutput: 65536},
+		"anthropic:claude-opus-4.8":   {MaxOutput: 65536},
+	})
+
+	// The id from the #36449 customer trace: region + vendor + hyphenated version.
+	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "bedrock", "us.anthropic.claude-sonnet-4-6"))
+	// Vendor-prefixed without a region segment.
+	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "bedrock", "anthropic.claude-sonnet-4-6"))
+	// Full Bedrock form: region + vendor + version + date + invocation suffix.
+	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "bedrock", "us.anthropic.claude-sonnet-4-6-20260115-v1:0"))
+	// EU region profile.
+	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "bedrock", "eu.anthropic.claude-opus-4-8-v1:0"))
+	// Dotted-but-prefixed (Vertex-style) id resolves too.
+	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "vertexai", "anthropic.claude-sonnet-4.6"))
+}
+
+// The canonical alias is indexed at catalog load as well, so a tenant row
+// stored under a full Bedrock id serves lookups made with the bare form.
+func TestModelLimitsCatalog_IndexesCanonicalAlias(t *testing.T) {
+	orig := fetchModelTokenLimits
+	// Simulate the fetch layer by feeding rows through the same aliasing the
+	// real loader applies.
+	fetchModelTokenLimits = func(string) (map[string]modelTokenLimits, error) {
+		out := map[string]modelTokenLimits{}
+		raw := "us.anthropic.claude-sonnet-4-6-v1:0"
+		out["bedrock:"+raw] = modelTokenLimits{MaxOutput: 65536}
+		if c := canonicalModelID(raw); c != raw {
+			out["bedrock:"+c] = modelTokenLimits{MaxOutput: 65536}
+		}
+		return out, nil
+	}
+	modelLimitsMu.Lock()
+	modelLimitsCache = map[string]modelLimitsEntry{}
+	modelLimitsMu.Unlock()
+	t.Cleanup(func() {
+		fetchModelTokenLimits = orig
+		modelLimitsMu.Lock()
+		modelLimitsCache = map[string]modelLimitsEntry{}
+		modelLimitsMu.Unlock()
+	})
+
+	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "bedrock", "claude-sonnet-4.6"))
+}
+
+func TestCanonicalModelID(t *testing.T) {
+	cases := map[string]string{
+		"us.anthropic.claude-sonnet-4-6":               "claude-sonnet-4.6",
+		"us.anthropic.claude-sonnet-4-6-20260115-v1:0": "claude-sonnet-4.6-20260115",
+		"anthropic.claude-opus-4-8":                    "claude-opus-4.8",
+		"eu.meta.llama3-1-70b-instruct-v1:0":           "llama3.1-70b-instruct",
+		"models/gemini-embedding-001":                  "gemini-embedding-001",
+		"gpt-4o":                                       "gpt-4o",
+		"claude-sonnet-4.6":                            "claude-sonnet-4.6",
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, canonicalModelID(in), in)
+	}
+}
+
 func TestResolveMaxOutputTokens_FetchFailure(t *testing.T) {
 	orig := fetchModelTokenLimits
 	fetchModelTokenLimits = func(string) (map[string]modelTokenLimits, error) {

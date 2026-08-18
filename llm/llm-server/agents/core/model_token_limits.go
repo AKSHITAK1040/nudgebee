@@ -2,6 +2,7 @@ package core
 
 import (
 	"log/slog"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -75,8 +76,19 @@ var fetchModelTokenLimits = func(tenantId string) (map[string]modelTokenLimits, 
 		if err := rows.Scan(&provider, &model, &maxOut, &maxCtx); err != nil {
 			return nil, err
 		}
-		key := strings.ToLower(strings.TrimSpace(provider)) + ":" + strings.ToLower(strings.TrimSpace(model))
-		out[key] = modelTokenLimits{MaxOutput: maxOut, MaxContext: maxCtx}
+		prov := strings.ToLower(strings.TrimSpace(provider))
+		m := strings.ToLower(strings.TrimSpace(model))
+		out[prov+":"+m] = modelTokenLimits{MaxOutput: maxOut, MaxContext: maxCtx}
+		// Also index the canonical form so provider-qualified ids (Bedrock
+		// "us.anthropic.claude-sonnet-4-6-...-v1:0") can meet the bare dotted
+		// rows the seed uses. A raw key always wins over an alias, and the
+		// first alias wins over later ones — rows arrive sorted, so this is
+		// deterministic.
+		if c := canonicalModelID(m); c != m {
+			if _, exists := out[prov+":"+c]; !exists {
+				out[prov+":"+c] = modelTokenLimits{MaxOutput: maxOut, MaxContext: maxCtx}
+			}
+		}
 	}
 	// Never hand back a partially populated catalog: on an iteration error the
 	// caller must keep serving its stale entry instead of caching this one.
@@ -116,10 +128,52 @@ func loadModelLimitsCatalog(tenantId string) map[string]modelTokenLimits {
 	return byKey
 }
 
+var (
+	// "…-v1" / "-v2" invocation suffix left after cutting a Bedrock ":0" tail.
+	trailingInvocationVersionRE = regexp.MustCompile(`-v\d+$`)
+	// "-20250929"-style date suffix on point-release ids.
+	trailingDateRE = regexp.MustCompile(`-\d{8}$`)
+	// digit-hyphen-digit → digit-dot-digit, so Bedrock's "claude-sonnet-4-6"
+	// meets the catalog's "claude-sonnet-4.6".
+	versionSeparatorRE = regexp.MustCompile(`(\d)-(\d)`)
+)
+
+// canonicalModelID reduces a provider-qualified model id to the bare dotted
+// form the built-in catalog rows use. Bedrock cross-region ids stack several
+// decorations the fixed-list normalizeModel cannot remove — a region segment
+// ("us." / "eu."), the vendor segment, an invocation suffix ("-v1:0") and
+// hyphenated version numbers — and any one of them alone was enough to miss
+// the catalog and land the model back on the 4096 floor (#36449's original
+// customer id, "us.anthropic.claude-sonnet-4-6"). Applied to BOTH catalog keys
+// and lookup probes, so both sides meet in the same space regardless of which
+// convention a row or caller uses.
+func canonicalModelID(model string) string {
+	m := strings.ToLower(strings.TrimSpace(model))
+	if i := strings.IndexByte(m, ':'); i >= 0 {
+		m = m[:i]
+	}
+	for _, p := range []string{"us.", "eu.", "apac.", "jp.", "au.", "ca.", "global."} {
+		if strings.HasPrefix(m, p) {
+			m = strings.TrimPrefix(m, p)
+			break
+		}
+	}
+	for _, p := range []string{"anthropic.", "amazon.", "meta.", "google.", "vertex.", "openai.", "azure.", "mistral.", "cohere.", "ai21.", "models/"} {
+		if strings.HasPrefix(m, p) {
+			m = strings.TrimPrefix(m, p)
+			break
+		}
+	}
+	m = trailingInvocationVersionRE.ReplaceAllString(m, "")
+	m = versionSeparatorRE.ReplaceAllString(m, "$1.$2")
+	return m
+}
+
 // lookupModelTokenLimits finds a catalog row for (provider, model): exact
-// provider:model first, then the model under any provider, then the same two
-// probes with the vendor-prefix-normalized model id. Model-only matches pick
-// the lexicographically smallest provider so repeat lookups are deterministic.
+// provider:model first, then the model under any provider, repeated for the
+// legacy-normalized, canonical and date-stripped-canonical forms of the id.
+// Model-only matches pick the lexicographically smallest provider so repeat
+// lookups are deterministic.
 func lookupModelTokenLimits(accountId, provider, model string) (modelTokenLimits, bool) {
 	tenantId := ""
 	if accountId != "" {
@@ -132,9 +186,20 @@ func lookupModelTokenLimits(accountId, provider, model string) (modelTokenLimits
 	prov := strings.ToLower(strings.TrimSpace(provider))
 	trimmed := strings.ToLower(strings.TrimSpace(model))
 	probes := []string{trimmed}
-	if normalized := strings.ToLower(normalizeModel(model)); normalized != trimmed {
-		probes = append(probes, normalized)
+	addProbe := func(p string) {
+		for _, existing := range probes {
+			if existing == p {
+				return
+			}
+		}
+		probes = append(probes, p)
 	}
+	addProbe(strings.ToLower(normalizeModel(model)))
+	canonical := canonicalModelID(model)
+	addProbe(canonical)
+	// A dated point release ("claude-sonnet-4.6-20260115") falls back to its
+	// family row when no dated row exists.
+	addProbe(trailingDateRE.ReplaceAllString(canonical, ""))
 	for _, m := range probes {
 		if m == "" {
 			continue
