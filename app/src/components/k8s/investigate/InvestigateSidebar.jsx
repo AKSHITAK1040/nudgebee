@@ -18,7 +18,7 @@ import InvestigateDropdown from '@components/k8s/investigate/InvestigateDropdown
 import k8sApi from '@api1/kubernetes';
 import { hasWriteAccess } from '@lib/auth';
 import { exitCodeMapping, snakeToTitleCase } from 'src/utils/common';
-import { SUBJECT_TYPE, AGGREGATION_KEY } from '@data/investigateConstants';
+import { hasEventSubjectLink } from 'src/utils/eventSubjectLink';
 import TroubleShootIcon from '@assets/home/node-errors-icon.svg';
 import CubeIcon from '@assets/kubernetes/cube-icon.svg';
 import { BarsBlueOutlineIcon, ErrorFillIcon, FileOutlineIcon, GraphOutlineIcon, infoIcon, LastStateIcon } from '@assets';
@@ -214,10 +214,7 @@ function InvestigateSidebar({
                   secondaryText
                   showAutoEllipsis
                   sx={{
-                    color:
-                      (row?.subject_type === SUBJECT_TYPE.POD && row?.cloud_resource_id) || row?.aggregation_key === AGGREGATION_KEY.ANOMALY
-                        ? ds.blue[600]
-                        : ds.gray[700],
+                    color: hasEventSubjectLink(row) ? ds.blue[600] : ds.gray[700],
                     lineHeight: '1.4',
                   }}
                 />

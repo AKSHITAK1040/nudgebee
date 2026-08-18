@@ -7,6 +7,7 @@ import apiKubernetes from '@api1/kubernetes';
 import CollapsableCard from '@shared/widgets/CollapsableCard';
 import InvestigateSidebar from '@components/k8s/investigate/InvestigateSidebar';
 import { safeJSONParse } from 'src/utils/common';
+import { buildEventSubjectHref } from 'src/utils/eventSubjectLink';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import TicketIcon from '@assets/TicketIcon';
 import Text from '@shared/format/Text';
@@ -71,7 +72,7 @@ import FeedbackVote from '@ui/FeedbackVote';
 import apiAskNudgebee from '@api1/ask-nudgebee';
 import SignozDatadogLogCard from '@components/k8s/investigate/cards/SignozDatadogLogCard';
 import apiKubernetes1 from '@api1/kubernetes1';
-import { SUBJECT_STATUS, SUBJECT_TYPE, AGGREGATION_KEY, RESOLVABLE_ALERT_KEYS, RCA_STATUS } from '@data/investigateConstants';
+import { SUBJECT_STATUS, SUBJECT_TYPE, RESOLVABLE_ALERT_KEYS, RCA_STATUS } from '@data/investigateConstants';
 import { List } from '@ui/List';
 import ExecutePrometheus from '@components/k8s/investigate/cards/ExecutePrometheus';
 import GithubReview from '@components/k8s/investigate/cards/GithubReview';
@@ -1497,13 +1498,22 @@ const Investigate = () => {
     }
   };
 
-  const handlePodClick = () => {
-    if (row?.subject_type === SUBJECT_TYPE.POD && row?.cloud_resource_id) {
-      router.push(`podDetails/${row?.cloud_resource_id}`);
-    } else if (row?.aggregation_key === AGGREGATION_KEY.ANOMALY) {
-      router.push(
-        `/kubernetes/details/${row?.cloud_account_id}?namespace=${row?.subject_namespace}&workloadName=${row?.subject_name}#kubernetes/applications`
-      );
+  const handlePodClick = async () => {
+    const accountId = row?.cloud_account_id || router.query.accountId;
+    let resources = [];
+    if (row?.cloud_resource_id || row?.subject_type === SUBJECT_TYPE.POD) {
+      resources = await apiKubernetes.getEventSubjectResources({
+        resourceId: row?.cloud_resource_id,
+        // Only a pod subject needs the by-name lookup; a workload subject is
+        // already the resource the event is linked to.
+        podName: row?.subject_type === SUBJECT_TYPE.POD ? row?.subject_name : undefined,
+        namespace: row?.subject_namespace,
+        accountId,
+      });
+    }
+    const href = buildEventSubjectHref(row, resources, router.query.accountId);
+    if (href) {
+      router.push(href);
     }
   };
 

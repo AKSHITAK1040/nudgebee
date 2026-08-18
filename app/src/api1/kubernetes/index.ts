@@ -475,6 +475,18 @@ query getPodDetails {
 }
 `;
 
+export const K8S_EVENT_SUBJECT_RESOURCES = `
+query getEventSubjectResources {
+  cloud_resourses: cloud_resource_v2(where: __WHERE__, limit: 5) {
+    rows {
+      id
+      name
+      type
+    }
+  }
+}
+`;
+
 export const K8S_METRICS_GROUPINGS = `
 query MetricsGroupings($limit:Int!, $dateUnit: String!) {
   cloud_resource_metrics_groupings: metric_groupings_v2(where:__WHERE__, column_transformations: [{name: "timestamp", expr: "date_unit", args:[$dateUnit]}], limit: $limit){
@@ -3201,6 +3213,44 @@ query k8s_event_groupings($limit:Int,$offset:Int){
     } catch (error) {
       console.log('Your Error is', error);
       return error;
+    }
+  },
+  // Candidate targets for an event's subject link: the resource the event is
+  // linked to (api-server points a pod event at its OWNING WORKLOAD, see
+  // event/service.go linkK8sCloudResource) and the subject pod itself, which the
+  // event never carries an id for. Fetched in one round trip via _or.
+  async getEventSubjectResources({
+    resourceId,
+    podName,
+    namespace,
+    accountId,
+  }: {
+    resourceId?: string;
+    podName?: string;
+    namespace?: string;
+    accountId?: string;
+  }) {
+    const or: any[] = [];
+    if (resourceId) {
+      or.push({ id: { _eq: resourceId } });
+    }
+    if (podName && accountId) {
+      const podMatch: any = { name: { _eq: podName }, type: { _eq: 'Pod' }, account: { _eq: accountId } };
+      if (namespace) {
+        podMatch.namespace = { _eq: namespace };
+      }
+      or.push(podMatch);
+    }
+    if (or.length === 0) {
+      return [];
+    }
+    try {
+      const formattedQuery = K8S_EVENT_SUBJECT_RESOURCES.replaceAll('__WHERE__', gqlStringify({ _or: or }));
+      const response = await queryGraphQL(formattedQuery, 'getEventSubjectResources', {});
+      return response?.data?.data?.cloud_resourses?.rows || [];
+    } catch (error) {
+      console.error(error);
+      return [];
     }
   },
   async getClusterMetrices2({
