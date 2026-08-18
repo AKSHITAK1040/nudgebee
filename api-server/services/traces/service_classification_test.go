@@ -189,6 +189,12 @@ func TestIsInternalDomain(t *testing.T) {
 // e.g. an ordinary webhook/backend service that also drains a RabbitMQ queue
 // as one of several duties must not become a MessageQueue node just because
 // one of its many spans is named "rabbitmq.consume".
+//
+// It also covers the case where span.kind isn't populated at all (observed in
+// live data for a real service's "rabbitmq.consume" spans): an operation-verb
+// suffix (consume/process/receive/send/produce/publish) in the span name is
+// still treated as describing an interaction rather than an identity, unless
+// span.kind is definitively SERVER.
 func TestDetectApplicationType_SpanNameFallbackRequiresInboundSpan(t *testing.T) {
 	builder := &TraceServiceMapBuilder{}
 
@@ -228,11 +234,25 @@ func TestDetectApplicationType_SpanNameFallbackRequiresInboundSpan(t *testing.T)
 			expectedType: "rabbitmq",
 		},
 		{
-			description:  "unrecognized/missing span kind falls back to trusting the span name, unchanged from pre-fix behavior",
+			description:  "missing span kind with a bare technology name (no operation verb) still classifies",
 			workloadName: "worker-4",
 			spanKind:     "",
-			spanName:     "kafka.process",
+			spanName:     "kafka",
 			expectedType: "kafka",
+		},
+		{
+			description:  "missing span kind with an operation-verb span name must not reclassify — the real recurring case (services-server's rabbitmq.consume spans carry no span.kind)",
+			workloadName: "services-server",
+			spanKind:     "",
+			spanName:     "rabbitmq.consume",
+			expectedType: "",
+		},
+		{
+			description:  "missing span kind with a producer-verb span name must not reclassify either",
+			workloadName: "services-server",
+			spanKind:     "",
+			spanName:     "kafka.produce",
+			expectedType: "",
 		},
 		{
 			description:  "a service self-named after the broker is still classified regardless of span kind",

@@ -956,8 +956,25 @@ func (t *TraceServiceMapBuilder) detectApplicationType(span TraceSpan, attrs *Sp
 	// alongside CLIENT/PRODUCER because consuming from a queue is just as much
 	// an outbound interaction with an external system as producing to one —
 	// neither describes the consuming service's own identity.
+	//
+	// span.kind isn't always populated (observed in live data: a real service's
+	// "rabbitmq.consume" spans carried no span.kind at all, so the check above
+	// never excluded them). When kind is absent, a span name still carrying an
+	// operation verb (consume/process/receive/send/produce/publish — the same
+	// vocabulary isConsumerOperation uses to infer message-flow direction) is
+	// self-describing an interaction, not an identity, and must not be trusted
+	// either — unless kind is definitively SERVER, meaning this service really
+	// is the one being addressed as the destination.
 	spanName := strings.ToLower(span.SpanName)
-	if !strings.EqualFold(attrs.SpanKind, "CLIENT") && !strings.EqualFold(attrs.SpanKind, "PRODUCER") && !strings.EqualFold(attrs.SpanKind, "CONSUMER") {
+	isOutboundKind := strings.EqualFold(attrs.SpanKind, "CLIENT") ||
+		strings.EqualFold(attrs.SpanKind, "PRODUCER") ||
+		strings.EqualFold(attrs.SpanKind, "CONSUMER")
+	isServerKind := strings.EqualFold(attrs.SpanKind, "SERVER")
+	looksLikeOperation := strings.Contains(spanName, "consume") || strings.Contains(spanName, "process") ||
+		strings.Contains(spanName, "receive") || strings.Contains(spanName, "send") ||
+		strings.Contains(spanName, "produce") || strings.Contains(spanName, "publish")
+
+	if !isOutboundKind && (isServerKind || !looksLikeOperation) {
 		for pattern, appType := range patterns {
 			if strings.Contains(spanName, pattern) {
 				return appType, evidence("span_name", pattern)
