@@ -76,6 +76,7 @@ mypy = "2.3.0"
 flake8 = "7.3.0"
 ipython = "9.16.1"
 ipdb = "0.13.13"
+pytest = "^9.1.1"
 
 [tool.black]
 line-length = 120

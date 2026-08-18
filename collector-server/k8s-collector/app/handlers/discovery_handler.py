@@ -144,6 +144,51 @@ def _safe_insert_cloud_resources(resources, on_conflict):
             raise
 
 
+def _collect_replicaset_owners(data):
+    """Map (namespace, replicaset_name) -> (owner_name, owner_kind) from the
+    batch's own ReplicaSet entries. ReplicaSets are skipped as resources, but
+    their ownerReferences name the real controller (Deployment or Rollout) —
+    exactly what pods whose owner stops at the RS need."""
+    owners = {}
+    for k8s_data in data:
+        if not (k8s_data.get("type") and k8s_data.get("type").lower() == "replicaset"):
+            continue
+        rs_owner = (k8s_data.get("config") or {}).get("owner") or []
+        if rs_owner and rs_owner[0] is not None and rs_owner[0].get("name"):
+            owners[(k8s_data.get("namespace") or "", k8s_data.get("name") or "")] = (
+                rs_owner[0].get("name") or "",
+                rs_owner[0].get("kind") or "",
+            )
+    return owners
+
+
+def _resolve_pod_owner(k8s_data, rs_owners):
+    """Resolve a pod's owner past an intermediate ReplicaSet.
+
+    The agent reports the pod's direct ownerReference; ~7% of pods arrive
+    still naming the RS ("postgres-78d9cffd68"), which fragments every
+    consumer keyed on workload_name. Tier 1: the batch's RS entries carry the
+    true controller (name AND kind — Rollouts stay Rollouts). Tier 2: strip
+    the pod-template-hash label suffix — set by the controller itself, so the
+    strip is exact, not a guess; kind defaults to Deployment (the only
+    mislabel risk is a Rollout RS split across batches, rare and cosmetic).
+    """
+    config_owner = (k8s_data.get("config") or {}).get("owner") or []
+    if not (config_owner and len(config_owner) > 0 and config_owner[0] is not None):
+        return None, None
+    owner_name = config_owner[0].get("name") or ""
+    owner_kind = config_owner[0].get("kind") or ""
+    if owner_kind.lower() != "replicaset" or not owner_name:
+        return owner_name, owner_kind
+    mapped = rs_owners.get((k8s_data.get("namespace") or "", owner_name))
+    if mapped and mapped[0]:
+        return mapped
+    template_hash = ((k8s_data.get("config") or {}).get("labels") or {}).get("pod-template-hash") or ""
+    if template_hash and owner_name.endswith("-" + template_hash):
+        return owner_name[: -(len(template_hash) + 1)], "Deployment"
+    return owner_name, owner_kind
+
+
 def _deduplicate_workloads_by_identity(workloads):
     """Deduplicate workloads by (cloud_account_id, namespace, name, kind), keeping last occurrence."""
     unique = {}
@@ -340,6 +385,9 @@ def run_service_discovery(
     workloads = []
     deleted_resources = {}
     seen_ids = set()
+    # Harvest RS -> controller owners before ReplicaSets are skipped below, so
+    # pods whose ownerReference stops at the RS resolve to the real workload.
+    rs_owners = _collect_replicaset_owners(data)
     for k8s_data in data:
         if k8s_data.get("type") and k8s_data.get("type").lower() == "replicaset":
             continue
@@ -354,7 +402,9 @@ def run_service_discovery(
         if k8s_data["deleted"]:
             deleted_resources[_id] = service_key
             continue
-        process_service_discovery(_id, cloud_account_id, k8s_data, pods, resources, service_key, tenant, workloads)
+        process_service_discovery(
+            _id, cloud_account_id, k8s_data, pods, resources, service_key, tenant, workloads, rs_owners
+        )
 
     # Stage this batch and decide whether to reconcile. For batched snapshots the
     # reconcile is gated on full-sequence completeness (order-independent, once per
@@ -396,7 +446,9 @@ def run_service_discovery(
     )
 
 
-def process_service_discovery(_id, cloud_account_id, k8s_data, pods, resources, service_key, tenant, workloads):
+def process_service_discovery(
+    _id, cloud_account_id, k8s_data, pods, resources, service_key, tenant, workloads, rs_owners=None
+):
     cloud_resource = {
         "id": _id,
         "region": "global",
@@ -467,10 +519,10 @@ def process_service_discovery(_id, cloud_account_id, k8s_data, pods, resources, 
             "restart_count": k8s_data.get("restart_count", 0),
             "status": k8s_data.get("status") or "UNKNOWN",
         }
-        config_owner = k8s_data.get("config", {}).get("owner", [])
-        if config_owner and len(config_owner) > 0 and config_owner[0] is not None:
-            pod_details["workload_name"] = config_owner[0].get("name", "")
-            pod_details["workload_type"] = config_owner[0].get("kind", "")
+        owner_name, owner_kind = _resolve_pod_owner(k8s_data, rs_owners or {})
+        if owner_name is not None:
+            pod_details["workload_name"] = owner_name
+            pod_details["workload_type"] = owner_kind
         pods.append(PodDetails(**pod_details))
     else:
         workload_details = {
