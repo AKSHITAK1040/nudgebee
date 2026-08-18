@@ -70,10 +70,10 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.group.dev.dependencies]
-pre-commit = "4.6.1"
+pre-commit = "4.6.2"
 black = "^26.3.1"
 mypy = "2.3.0"
 flake8 = "7.3.0"
-sqlglot = "30.15.0"
+sqlglot = "30.17.0"
 pytest = ">=8.3,<10.0"
 pypdf = "^6.15.0"
