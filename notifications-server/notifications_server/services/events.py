@@ -181,7 +181,9 @@ class Events:
         return blocks
 
     @staticmethod
-    def build_llm_payload(cached_entry, query_override=None, channel_context=None, channel_context_refs=None):
+    def build_llm_payload(
+        cached_entry, thread_ts, query_override=None, channel_context=None, channel_context_refs=None
+    ):
         payload = {
             "query": query_override or cached_entry["text"],
             "account_id": cached_entry["account_id"],
@@ -190,6 +192,19 @@ class Events:
             "source": "InstantNotification",
             "async": True,
         }
+        # Per-question correlator, always this exact physical thread — unlike
+        # session_id, which a bound incident channel deliberately reuses across
+        # every future @mention so they share one LLM conversation (see
+        # CommonService._persist_channel_account_mapping). llm-server echoes
+        # this back unchanged on its /llm/response webhook so
+        # llm_callbacks.py:_handle_event_conversation can reply into the thread
+        # a question actually came from instead of guessing from session_id
+        # alone. team_id/account_id ride along separately via
+        # get_channel_and_ts_from_sent_notifications there, not through this
+        # field. Older cached entries predate channel_id, so guard with .get().
+        channel_id = cached_entry.get("channel_id")
+        if channel_id and thread_ts:
+            payload["reply_ref"] = f"{channel_id}-{thread_ts}"
         # Deliberately its own field: channel conversation is third-party text and
         # must stay distinguishable from what the user actually asked. Never fold
         # it into `query`.
@@ -821,14 +836,14 @@ class Events:
             self.reply(channel_id, team_id, thread_ts, get_session_expired_message())
             return
 
-        payload, headers = self._get_llm_request_payload(cached_entry, channel_id, thread_ts)
+        payload = self.build_llm_payload(cached_entry, thread_ts, query_override=response_option)
         payload.update(
             {
-                "query": response_option,
                 "agent_id": cached_entry.get("agent_id"),
                 "message_id": cached_entry.get("message_id"),
             }
         )
+        headers = {"x-tenant-id": cached_entry["tenant_id"], "x-user-id": cached_entry["user_id"]}
 
         followup_msg_ts = cached_entry.get("followup_msg_ts") if cached_entry else None
         followup_question = cached_entry.get("followup_question") if cached_entry else None
@@ -967,6 +982,7 @@ class Events:
         )
         payload = self.build_llm_payload(
             cached_entry,
+            thread_ts,
             query_override=cleaned_string,
             channel_context=channel_context,
             channel_context_refs=channel_context_refs,
@@ -996,19 +1012,6 @@ class Events:
             LOG.debug(f"Query to LLM failed: {e}")
             slack_progress.stop_progress_stream(self.common_service, cached_entry, channel_id, team_id, thread_ts)
             self.common_service.slack_reply_in_thread(channel_id, team_id, thread_ts, get_llm_offline_message())
-
-    @staticmethod
-    def _get_llm_request_payload(cached_entry, channel_id, thread_ts):
-        payload = {
-            "query": cached_entry["text"],
-            "account_id": cached_entry["account_id"],
-            "user_id": cached_entry["user_id"],
-            "session_id": f"{channel_id}-{thread_ts}",
-            "source": "InstantNotification",
-            "async": True,
-        }
-        headers = {"x-tenant-id": cached_entry["tenant_id"], "x-user-id": cached_entry["user_id"]}
-        return payload, headers
 
     @staticmethod
     def _with_llm_auth(headers):

@@ -329,6 +329,7 @@ type additionalConversationSessionRequestConfig struct {
 	images                []ImageAttachment
 	channelContext        string
 	channelContextRefs    map[string]any
+	replyRef              string
 }
 
 type ConversationSessionRequestConfig interface {
@@ -605,6 +606,23 @@ func ConversationSessionRequestWithChannelContextRefs(refs map[string]any) Conve
 	}
 }
 
+type sessionRequestWithReplyRef struct {
+	replyRef string
+}
+
+func (h sessionRequestWithReplyRef) apply(c *additionalConversationSessionRequestConfig) {
+	c.replyRef = h.replyRef
+}
+
+// ConversationSessionRequestWithReplyRef carries an opaque per-question
+// correlator through to NBAgentRequest.ReplyRef — see its doc comment on
+// ConversationApiRequest.ReplyRef for why SessionId alone isn't enough.
+func ConversationSessionRequestWithReplyRef(replyRef string) ConversationSessionRequestConfig {
+	return sessionRequestWithReplyRef{
+		replyRef: replyRef,
+	}
+}
+
 func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgent, userId string, accountId string, sessionId string, query string, configs ...ConversationSessionRequestConfig) (NBAgentResponse, error) {
 
 	defaultConfig := additionalConversationSessionRequestConfig{
@@ -670,6 +688,7 @@ func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgen
 		Images:                defaultConfig.images,
 		ChannelContext:        defaultConfig.channelContext,
 		ChannelContextRefs:    defaultConfig.channelContextRefs,
+		ReplyRef:              defaultConfig.replyRef,
 	}
 
 	response, err := handleConversationRequest(ctx, agentRequest, agent, sessionId, defaultConfig.source)

@@ -160,6 +160,10 @@ type NBAgentRequest struct {
 	// patterns, decisions, collective, plus the <memory_index> audit footer).
 	// Rendered as a reference-framed <user_memory> block in the human message.
 	MemoryContext string `json:"memory_context,omitempty"`
+	// ReplyRef is an opaque per-question correlator echoed back unchanged on
+	// the /llm/response webhook — see ConversationApiRequest.ReplyRef. Never
+	// read by any agent; carried only for sendReplyToNotificationServer.
+	ReplyRef string `json:"reply_ref,omitempty"`
 }
 
 // DO not use for API calls
