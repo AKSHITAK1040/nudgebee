@@ -295,8 +295,21 @@ func ApplyRecommendation(ctx *security.RequestContext, query RecommendationApply
 		}
 	}
 
+	// A caller that omits data (a raw RPC call, an agent tool whose model left
+	// it out) used to panic on an unchecked assertion here. Fail fast with a
+	// clear error instead; the payload is caller-built by design — the @finops
+	// apply tool constructs it so the human approval card shows the exact
+	// values being applied.
+	applyData, ok := query.Data.(map[string]any)
+	if !ok {
+		if query.Data != nil {
+			return RecommendationApplyResponse{}, fmt.Errorf("recommendation: apply payload (data) must be an object")
+		}
+		return RecommendationApplyResponse{}, fmt.Errorf("recommendation: apply payload (data) is required for rule %s", r.RuleName)
+	}
+
 	recommendationRequest := adapter.ApplyRecommendationRequest{
-		Data:           query.Data.(map[string]any),
+		Data:           applyData,
 		Recommendation: r,
 		Resource:       cr,
 		ProviderConfig: query.ProviderConfig,
