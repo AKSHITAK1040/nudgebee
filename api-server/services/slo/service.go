@@ -291,7 +291,11 @@ func executeSlo(config DBSLOConfig, accountId string) ([]SLOReport, error) {
 		},
 	})
 	if err != nil {
-		slog.Error("slo: failed to execute slo task", "error", resp["response"], "accountId", accountId)
+		if strings.Contains(err.Error(), "agent not connected") {
+			slog.Warn("slo: agent not connected, skipping slo task", "accountId", accountId)
+			return nil, nil
+		}
+		slog.Error("slo: failed to execute slo task", "error", err, "accountId", accountId)
 		return nil, err
 	}
 	if resp["status_code"] == 500 {
