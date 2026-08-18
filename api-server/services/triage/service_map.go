@@ -44,6 +44,28 @@ var nodeAliasPriority = map[string]int{
 // nodeAliasPriority. Set above any known priority so known types win.
 const nodeAliasPriorityDefault = 100
 
+// dependencyRelationshipTypes are the KG edge relationship types that express a
+// directional runtime dependency, i.e. the ones that may produce a
+// dependency_distance greater than 0.
+//
+// CALLS is what k8s/traces/ebpf emit and was previously the only accepted type.
+// ROUTES_TO carries traffic the same way but is emitted by the infrastructure
+// enrichers instead: load balancer -> backend pool / instance target / K8s
+// service (aws, gcp), SQS queue -> dead-letter queue (aws), and workload ->
+// ingress (k8s). It is the ONLY dependency type AWS cloud resources ever emit,
+// so rejecting it meant no AWS event could resolve a dependency hop and AWS
+// produced zero upstream_dependency / downstream_impact / likely_root_cause
+// correlations. Admitting it also connects the GCP and k8s-ingress routing
+// paths, which is the same class of real dependency.
+//
+// Containment and plumbing relations stay out: EXPOSES (Service -> Workload)
+// would put a hop between a Service and its own Workload, and MOUNTS,
+// RUNS_ON, BELONGS_TO and friends are not traffic paths at all.
+var dependencyRelationshipTypes = map[string]bool{
+	"CALLS":     true,
+	"ROUTES_TO": true,
+}
+
 // aliasPriorityFor returns the registration priority for a node type.
 func aliasPriorityFor(nodeType string) int {
 	if p, ok := nodeAliasPriority[nodeType]; ok {
@@ -354,7 +376,16 @@ func parseServiceMapFromEvent(event *models.Event) (*DependencyGraph, error) {
 
 	evidences := event.Evidences.Array()
 
-	// Find service_map evidence (supports multiple formats)
+	// Collect both evidence shapes before choosing one. Returning on the first
+	// match made the result depend on array order, and AWS cloud events are the
+	// only source that carries both: their cloud_service_map card (a single
+	// isolated node, empty Upstreams/Downstreams) is written BEFORE the
+	// knowledge_graph card, so every AWS event built its graph from the empty one
+	// and could never score a dependency hop. Sources that emit only one of the
+	// two are unaffected.
+	var kgGraph, serviceMapGraph *DependencyGraph
+	var serviceMapErr error
+
 	for _, ev := range evidences {
 		evidence, ok := ev.(map[string]interface{})
 		if !ok {
@@ -365,8 +396,8 @@ func parseServiceMapFromEvent(event *models.Event) (*DependencyGraph, error) {
 
 		// Knowledge graph format (from knowledge_graph_service_map action)
 		if evidenceType == "knowledge_graph" {
-			if graph := parseKnowledgeGraphEvidence(evidence); graph != nil {
-				return graph, nil
+			if kgGraph == nil {
+				kgGraph = parseKnowledgeGraphEvidence(evidence)
 			}
 			continue
 		}
@@ -380,25 +411,55 @@ func parseServiceMapFromEvent(event *models.Event) (*DependencyGraph, error) {
 			isServiceMap = actionName == "service_map_enricher"
 		}
 
-		if isServiceMap {
-			dataStr, ok := evidence["data"].(string)
-			if !ok {
-				continue
-			}
-
-			var serviceMapData struct {
-				Data []ServiceNode `json:"data"`
-			}
-
-			if err := json.Unmarshal([]byte(dataStr), &serviceMapData); err != nil {
-				return nil, fmt.Errorf("failed to unmarshal service map: %w", err)
-			}
-
-			return buildDependencyGraph(serviceMapData.Data), nil
+		if !isServiceMap || serviceMapGraph != nil {
+			continue
 		}
+
+		dataStr, ok := evidence["data"].(string)
+		if !ok {
+			continue
+		}
+
+		var serviceMapData struct {
+			Data []ServiceNode `json:"data"`
+		}
+
+		if err := json.Unmarshal([]byte(dataStr), &serviceMapData); err != nil {
+			// Keep scanning: a malformed service_map must not hide a usable
+			// knowledge_graph card later in the array. The error is only
+			// returned when no graph could be built at all.
+			serviceMapErr = fmt.Errorf("failed to unmarshal service map: %w", err)
+			continue
+		}
+
+		serviceMapGraph = buildDependencyGraph(serviceMapData.Data)
+	}
+
+	// Prefer whichever graph actually carries edges. An edgeless graph can only
+	// ever yield dependency_distance 0, which is exactly what the AWS
+	// cloud_service_map card produces. A node-only graph is still returned as a
+	// fallback so same-service / same-resource scoring keeps resolving keys
+	// through its aliases.
+	switch {
+	case graphHasEdges(kgGraph):
+		return kgGraph, nil
+	case graphHasEdges(serviceMapGraph):
+		return serviceMapGraph, nil
+	case kgGraph != nil:
+		return kgGraph, nil
+	case serviceMapGraph != nil:
+		return serviceMapGraph, nil
+	case serviceMapErr != nil:
+		return nil, serviceMapErr
 	}
 
 	return nil, fmt.Errorf("service_map evidence not found")
+}
+
+// graphHasEdges reports whether the graph carries at least one dependency edge,
+// i.e. whether it can produce a dependency_distance greater than 0.
+func graphHasEdges(g *DependencyGraph) bool {
+	return g != nil && len(g.Edges) > 0
 }
 
 // buildDependencyGraph constructs a dependency graph from service nodes
@@ -676,7 +737,7 @@ func parseKnowledgeGraphEvidence(evidence map[string]interface{}) *DependencyGra
 		graph.registerCloudResourceAliases(p.key, p.kind, p.name)
 	}
 
-	// Build edges from KG edges (only CALLS relationships)
+	// Build edges from KG edges (directional dependency relationships only)
 	for _, edgeRaw := range edgesRaw {
 		edge, ok := edgeRaw.(map[string]interface{})
 		if !ok {
@@ -684,7 +745,7 @@ func parseKnowledgeGraphEvidence(evidence map[string]interface{}) *DependencyGra
 		}
 
 		relType, _ := edge["relationship_type"].(string)
-		if relType != "CALLS" {
+		if !dependencyRelationshipTypes[relType] {
 			continue
 		}
 
