@@ -1262,7 +1262,13 @@ const Investigate = () => {
             const card = new CloudLog(d, i);
             if (await card.canRenderContent()) pushCard(card);
           }
-          if (actionType == 'cloud_traces') {
+          // 'traces' as well as 'cloud_traces': the GCP enricher writes its span
+          // evidence under the plain 'traces' action (Cloud SQL, GKE), and that
+          // name was only mapped inside the isK8s branch above. A GCP account
+          // resolves to source 'cloud', so every one of those events carried a
+          // full trace payload the UI then dropped. Only Cloud Run rendered,
+          // because it happens to use the 'cloud_traces' name.
+          if (actionType == 'cloud_traces' || actionType == 'traces') {
             const card = new TracesCard(d, row, i);
             if (await card.canRenderContent()) pushCard(card);
           }
