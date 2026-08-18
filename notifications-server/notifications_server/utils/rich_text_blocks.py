@@ -116,6 +116,9 @@ def batch_slack_groups(
     return messages
 
 
+_FENCE_OVERHEAD = len("```\n\n```")
+
+
 def fallback_slack_block(block: SlackBlock) -> List[SlackBlock]:
     """Best-effort plain-text substitute for one Slack block that Slack
     rejected outright (e.g. a data_visualization/table payload shape it
@@ -129,7 +132,9 @@ def fallback_slack_block(block: SlackBlock) -> List[SlackBlock]:
         raw = json.dumps(block.get("chart", {}), indent=2)
     elif block_type == "table":
         notice = "_This table couldn't be displayed here._"
-        raw = json.dumps(block.get("rows", []), indent=2)
+        raw, truncated = _dump_rows_within_budget(block.get("rows", []), MAX_BLOCK_CHARS - _FENCE_OVERHEAD)
+        if truncated:
+            notice += " _(further truncated to fit)_"
     else:
         return [
             {
@@ -143,6 +148,32 @@ def fallback_slack_block(block: SlackBlock) -> List[SlackBlock]:
         {"type": "section", "text": {"type": "mrkdwn", "text": notice}},
         {"type": "section", "text": {"type": "mrkdwn", "text": fenced}},
     ]
+
+
+def _dump_rows_within_budget(rows: List[Any], max_chars: int) -> tuple[str, bool]:
+    """json.dumps `rows`, dropping rows from the tail (keeping the header)
+    until it fits max_chars, so a fallback dump that's still too big ends on
+    a clean row boundary instead of Transformer.apply_length_limit slicing
+    the JSON string mid-token into something unparseable.
+
+    Binary search over the prefix length: dumped length only grows as more
+    rows are kept, so this finds the longest fitting prefix in O(log N)
+    json.dumps calls instead of shrinking one row at a time."""
+    dumped = json.dumps(rows, indent=2)
+    if len(dumped) <= max_chars or len(rows) <= 1:
+        return dumped, False
+
+    best_dumped = json.dumps(rows[:1], indent=2)
+    low, high = 1, len(rows) - 1
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = json.dumps(rows[:mid], indent=2)
+        if len(candidate) <= max_chars:
+            best_dumped = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best_dumped, True
 
 
 def send_blocks_with_fallback(blocks: List[SlackBlock], send_fn: Callable[[List[SlackBlock]], Any]) -> None:

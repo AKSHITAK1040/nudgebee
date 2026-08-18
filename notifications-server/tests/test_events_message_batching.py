@@ -18,6 +18,8 @@ What these pin:
     mangled plain mrkdwn
 """
 
+import json
+
 import pytest
 from slack_sdk.errors import SlackApiError
 
@@ -130,6 +132,23 @@ class TestFallbackSlackBlock:
         assert fallback_slack_block({"type": "unknown_type"}) == [
             {"type": "section", "text": {"type": "mrkdwn", "text": "_Part of this response couldn't be displayed._"}}
         ]
+
+    def test_oversized_table_drops_rows_instead_of_cutting_json_mid_string(self):
+        # A table whose full row dump would blow MAX_BLOCK_CHARS must be
+        # trimmed by dropping whole rows (keeping the header), not by
+        # slicing the serialized JSON string wherever it happens to land -
+        # the real regression this guards: a 3000-char slice cut a cell's
+        # "text" value mid-string, so what Slack showed wasn't even valid
+        # JSON.
+        header = [{"type": "raw_text", "text": "Col"}]
+        rows = [header] + [[{"type": "raw_text", "text": f"row-{i:04d}-{'x' * 30}"}] for i in range(200)]
+
+        fallback = fallback_slack_block({"type": "table", "rows": rows})
+        dumped = fallback[1]["text"]["text"].removeprefix("```\n").removesuffix("\n```")
+        parsed = json.loads(dumped)  # must not raise - proves it's not cut mid-token
+        assert parsed[0] == header
+        assert len(parsed) < len(rows)
+        assert "further truncated" in fallback[0]["text"]["text"]
 
 
 class TestSendMessageWithFallback:
