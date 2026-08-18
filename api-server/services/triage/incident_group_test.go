@@ -380,3 +380,14 @@ func TestAttachTopologyIncident_E2E(t *testing.T) {
 		WHERE event_id = $1 AND correlation_type = $2`, lonely.Id, SameIncidentCorrelationType).Scan(&n))
 	assert.Equal(t, 0, n, "no map, no same-subject members — stays lone")
 }
+
+func TestSubjectKey_OwnerHashStripped(t *testing.T) {
+	// Collectors disagree on the owner form for one workload: some report the
+	// Deployment ("postgres"), some the ReplicaSet ("postgres-78d9cffd68").
+	// Both must key to the same subject or same-incident attach misses
+	// (observed live: a Pods-Restarting alert 6 minutes inside an open window
+	// stayed unlinked because its owner carried the RS name).
+	deployment := AlertIdentity{SubjectNamespace: "namespace-104a", SubjectOwner: "postgres"}
+	replicaSet := AlertIdentity{SubjectNamespace: "namespace-104a", SubjectOwner: "postgres-78d9cffd68"}
+	assert.Equal(t, SubjectKey(deployment), SubjectKey(replicaSet))
+}

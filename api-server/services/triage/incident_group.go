@@ -282,10 +282,10 @@ func attachSameSubjectIncident(ctx context.Context, db sqlx.ExtContext, event *m
 	// the window (last_seen), so re-fires keep the attach timer alive.
 	var rows []candidateRow
 	err = sqlx.SelectContext(ctx, db, &rows, `
-		SELECT DISTINCT ON (fingerprint)
+		SELECT DISTINCT ON (fingerprint, lower(coalesce(btrim(subject_namespace), '')), lower(coalesce(nullif(btrim(subject_owner), ''), btrim(subject_name))))
 		       id, subject_type, subject_name, subject_namespace, subject_owner,
 		       aggregation_key, starts_at,
-		       max(starts_at) OVER (PARTITION BY fingerprint) AS last_seen
+		       max(starts_at) OVER (PARTITION BY fingerprint, lower(coalesce(btrim(subject_namespace), '')), lower(coalesce(nullif(btrim(subject_owner), ''), btrim(subject_name)))) AS last_seen
 		FROM events
 		WHERE tenant = $1
 		  AND cloud_account_id = $2
@@ -294,7 +294,7 @@ func attachSameSubjectIncident(ctx context.Context, db sqlx.ExtContext, event *m
 		  AND id != $6
 		  AND fingerprint IS DISTINCT FROM $7
 		  AND lower(coalesce(finding_type, '')) NOT IN ('slo', 'anomaly')
-		ORDER BY fingerprint, starts_at ASC
+		ORDER BY fingerprint, lower(coalesce(btrim(subject_namespace), '')), lower(coalesce(nullif(btrim(subject_owner), ''), btrim(subject_name))), starts_at ASC
 		LIMIT `+fmt.Sprint(incidentCandidateLimit),
 		*event.Tenant, *event.CloudAccountId, ns,
 		start.Add(-IncidentAbsorptionCap), start, event.Id, event.Fingerprint,
@@ -495,10 +495,10 @@ func tryTopologyAttach(
 	}
 	var rows []candidateRow
 	err = sqlx.SelectContext(ctx, db, &rows, `
-		SELECT DISTINCT ON (fingerprint)
+		SELECT DISTINCT ON (fingerprint, lower(coalesce(btrim(subject_namespace), '')), lower(coalesce(nullif(btrim(subject_owner), ''), btrim(subject_name))))
 		       id, subject_type, subject_name, subject_namespace, subject_owner, subject_owner_kind,
 		       service_key, aggregation_key, starts_at,
-		       max(starts_at) OVER (PARTITION BY fingerprint) AS last_seen
+		       max(starts_at) OVER (PARTITION BY fingerprint, lower(coalesce(btrim(subject_namespace), '')), lower(coalesce(nullif(btrim(subject_owner), ''), btrim(subject_name)))) AS last_seen
 		FROM events
 		WHERE tenant = $1
 		  AND cloud_account_id = $2
@@ -506,7 +506,7 @@ func tryTopologyAttach(
 		  AND id != $5
 		  AND fingerprint IS DISTINCT FROM $6
 		  AND lower(coalesce(finding_type, '')) NOT IN ('slo', 'anomaly')
-		ORDER BY fingerprint, starts_at ASC
+		ORDER BY fingerprint, lower(coalesce(btrim(subject_namespace), '')), lower(coalesce(nullif(btrim(subject_owner), ''), btrim(subject_name))), starts_at ASC
 		LIMIT `+fmt.Sprint(incidentCandidateLimit),
 		*event.Tenant, *event.CloudAccountId,
 		start.Add(-IncidentAbsorptionCap), start, event.Id, event.Fingerprint,
