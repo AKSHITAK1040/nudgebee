@@ -117,6 +117,13 @@ type MetricSeriesSource interface {
 	FetchMetricSeries(ctx *security.RequestContext, fetchMetricSeriesRequest FetchMetricSeriesRequest) (MetricSeriesResult, error)
 }
 
+// MetricAggregateWrapper is an OPTIONAL capability for sources whose GetQuery does
+// not return a PromQL expression: the default wrap produces `sum(<expr>)`, which
+// corrupts e.g. Elasticsearch's JSON _search body.
+type MetricAggregateWrapper interface {
+	WrapAggregate(expr string, aggregateOperator string) (string, error)
+}
+
 func escapePromQLString(s string) string {
 	s = strings.ReplaceAll(s, `\`, `\\`)
 	s = strings.ReplaceAll(s, `"`, `\"`)
@@ -2331,11 +2338,15 @@ func FetchMetricsQuery(ctx *security.RequestContext, fetchMetricsRequest FetchMe
 	return source.FetchMetricsQuery(ctx, fetchMetricsRequest)
 }
 
-// GetMetricsQuery renders BUILDER chips into PromQL strings. Input carries a
-// QueryItems map (key → {metric, label_matchers}); output is a Results map
-// (same keys → rendered PromQL). Each item is rendered independently so
-// matchers from one block never leak into another. Returns the first
-// per-item error to surface the offending key clearly.
+// GetMetricsQuery renders BUILDER chips into provider-native query strings. Input
+// carries a QueryItems map (key → {metric, label_matchers}); output is a Results map
+// (same keys → rendered query). Each item is rendered independently so matchers from
+// one block never leak into another. Returns the first per-item error to surface the
+// offending key clearly.
+//
+// perItem keeps a single-entry QueryItems so a source can tell a BUILDER render from
+// the legacy Queries path — ES needs it, since its Queries entry is a where-clause,
+// not a metric name.
 func GetMetricsQuery(ctx *security.RequestContext, req FetchMetricsRequest) (FetchMetricQueryOutput, error) {
 	source, err := getMetricsSourceForAccount(ctx, req.AccountId, req.MetricProvider, req.MetricProviderSource)
 	if err != nil {
@@ -2346,19 +2357,28 @@ func GetMetricsQuery(ctx *security.RequestContext, req FetchMetricsRequest) (Fet
 		perItem := req
 		perItem.Queries = map[string]string{key: item.Metric}
 		perItem.LabelMatchers = item.LabelMatchers
-		perItem.QueryItems = nil
+		perItem.QueryItems = map[string]QueryItem{key: item}
 		perItem.Labels = nil
 		query, qerr := source.GetQuery(ctx, perItem)
 		if qerr != nil {
 			return FetchMetricQueryOutput{}, fmt.Errorf("query %q: %w", key, qerr)
 		}
-		wrapped, werr := wrapPromQLAggregator(query, item.AggregateOperator)
+		wrapped, werr := wrapAggregator(source, query, item.AggregateOperator)
 		if werr != nil {
 			return FetchMetricQueryOutput{}, fmt.Errorf("query %q: %w", key, werr)
 		}
 		results[key] = wrapped
 	}
 	return FetchMetricQueryOutput{Results: results}, nil
+}
+
+// wrapAggregator defers to the source's own query language when it implements
+// MetricAggregateWrapper, else falls back to the PromQL wrap.
+func wrapAggregator(source MetricSource, expr string, aggregateOperator string) (string, error) {
+	if wrapper, ok := source.(MetricAggregateWrapper); ok {
+		return wrapper.WrapAggregate(expr, aggregateOperator)
+	}
+	return wrapPromQLAggregator(expr, aggregateOperator)
 }
 
 func FetchMetricsList(ctx *security.RequestContext, fetchMetricsListRequest FetchMetricsListRequest) ([]OutputMetrics, error) {

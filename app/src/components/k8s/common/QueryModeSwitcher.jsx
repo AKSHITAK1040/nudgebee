@@ -252,8 +252,14 @@ const QueryModeSwitcher = ({
         .join(';');
       if (formattedQuery) {
         setQuery(formattedQuery);
+        if (logProvider === 'ES') {
+          // The backend renders the builder chips as a DSL body, so a KQL
+          // selection left over from a previous Code-tab visit would send this
+          // JSON to the KQL parser. Pin the language to what was just seeded.
+          setEsQueryType('dsl');
+        }
         if (onQueryChange) {
-          onQueryChange({ query: formattedQuery, queryKeys });
+          onQueryChange({ query: formattedQuery, queryKeys, ...(logProvider === 'ES' ? { queryType: 'dsl' } : {}) });
         }
       }
     } catch (err) {

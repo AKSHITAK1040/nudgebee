@@ -93,6 +93,9 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
   const [queryKeys, setQueryKeys] = useState(['']);
   const [solarwindsRequest, setSolarwindsRequest] = useState<any>(null);
   const [esIndex, setEsIndex] = useState<string>('');
+  // ES Code-tab query language ('dsl' | 'kql'), mirrored from QueryModeSwitcher.
+  // Builder mode ignores it — that path sends the cross-provider builder shape.
+  const [esQueryType, setEsQueryType] = useState<string>('dsl');
   const [llmQueryResponse, setLlmQueryResponse] = useState('');
   const [instant, setInstant] = useState(false);
   const [promqlItems, setPromqlItems] = useState<Array<{ key: string; query: string; title?: string }>>([]);
@@ -591,7 +594,14 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
   ) => {
     if (!query && (!queriesToExecute || queriesToExecute.length === 0)) {
       if (fromOnSubmit) {
-        snackbar.error('Please enter a query before submitting');
+        // In Builder mode there is no query box to type into — the query is empty
+        // because no label filter was added. Match the logs builder's wording and
+        // severity (KubernetesLogs) rather than telling the user to type a query.
+        if (qLEditor === 'build') {
+          snackbar.warning('Please select at least one label filter');
+        } else {
+          snackbar.error('Please enter a query before submitting');
+        }
       }
       return;
     }
@@ -623,16 +633,32 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     setQueryKeys(newQueryKeys);
     setLlmQueryResponse(llmQueryResponse);
 
+    // The provider-native query the backend actually executed, keyed like `promqls`.
+    // ES sends the cross-provider builder shape and the backend renders it into an
+    // _search body, so echoing what we sent showed a query that never ran.
+    const executedQueries: Record<string, string> = {};
+
+    // KQL is translated to DSL server-side, so the executed query is unreadable
+    // next to what was typed. Surface the source too — but only for KQL: in
+    // Builder mode the sent string is the internal `_binary` shape, which is
+    // exactly what this chip stopped showing.
+    const showSourceQuery = metricsProvider === 'ES' && qLEditor === 'code' && esQueryType === 'kql';
+
     const getQueryByKey = (key: string) => {
-      const entry: any = promqls[key];
+      // `||`, not `??`: Datadog/Splunk-O11y/Chronosphere/CloudWatch never set Query,
+      // so the value arrives as '' and must still fall back to the string we sent.
+      const entry: any = executedQueries[key] || promqls[key];
+      const sourceQuery = showSourceQuery && promqls[key] !== entry ? promqls[key] : '';
       return entry
         ? {
             query: entry,
+            sourceQuery,
             title: '',
             query_key: key,
           }
         : {
             query: '',
+            sourceQuery: '',
             title: '',
             query_key: key,
           };
@@ -646,7 +672,9 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
       instant: instant,
       ...(metricsProvider !== null && metricsProvider !== undefined ? { metric_provider: metricsProvider } : {}),
       ...(metricsProvider === 'solarwinds' && solarwindsRequest ? { request: solarwindsRequest } : {}),
-      ...(metricsProvider === 'ES' && esIndex ? { request: { metric_name: esIndex, ...(qLEditor === 'code' ? { query_type: 'dsl' } : {}) } } : {}),
+      ...(metricsProvider === 'ES' && esIndex
+        ? { request: { metric_name: esIndex, ...(qLEditor === 'code' ? { query_type: esQueryType || 'dsl' } : {}) } }
+        : {}),
       // The backend records query history; this flag distinguishes a real submit
       // from the date-range/instant-toggle re-runs that reuse this same path.
       // See FetchMetricsRequest.RecordHistory.
@@ -657,6 +685,12 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
       .metricsQuery(requestBody)
       .then((res) => {
         const results = res?.data?.data?.metrics_list?.results || [];
+
+        results.forEach((result: any) => {
+          if (result?.query_key && result?.query) {
+            executedQueries[result.query_key] = result.query;
+          }
+        });
 
         const resultsWithErrors = results.filter((result: any) => result.error);
 
@@ -931,6 +965,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
                 setQueryKeys(e.queryKeys);
                 setSolarwindsRequest(e.solarwindsRequest || null);
                 if (e.index !== undefined) setEsIndex(e.index);
+                if (e.queryType !== undefined) setEsQueryType(e.queryType);
               }}
               queryItems={promqlItems as any}
               setQueryItems={setPromqlItems}
@@ -1017,6 +1052,12 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
                           wordBreak: 'break-word',
                         }}
                       >
+                        {cd.sourceQuery && (
+                          <>
+                            KQL: {cd.sourceQuery}
+                            <br />
+                          </>
+                        )}
                         Query: {cd.query}
                       </Typography>
                     </Box>
@@ -1086,6 +1127,12 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
                           wordBreak: 'break-word',
                         }}
                       >
+                        {cd.sourceQuery && (
+                          <>
+                            KQL: {cd.sourceQuery}
+                            <br />
+                          </>
+                        )}
                         Query: {cd.query}
                       </Typography>
                     </Box>
