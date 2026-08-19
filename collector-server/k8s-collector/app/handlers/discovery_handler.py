@@ -1629,13 +1629,22 @@ def run_job_discovery(
         if k8s_data["deleted"]:
             deleted_resources.append(_id)
             continue
+        # The agent names this value `updated_at` for Jobs and CronJobs but
+        # `update_time` for Deployments/StatefulSets/DaemonSets (jobDict vs
+        # serviceDict). Resolve it once, accept either name, and use it for both
+        # halves of the record -- they used to read different keys, so the
+        # cloud_resourses row was correct while the k8s_workloads row fell through
+        # to `or 0` and landed at 1970-01-01. On dev that was every Job (82) and
+        # every CronJob (4), while no other kind was affected. Accepting either
+        # name fixes agents that are already deployed.
+        seen_at_ms = k8s_data.get("update_time") or k8s_data.get("updated_at") or 0
         cloud_resource = {
             "id": _id,
             "region": "global",
             "arn": "k8s://" + k8s_data["service_key"],
             "tenant": tenant,
             "first_seen": k8s_data["created_at"],
-            "last_seen": utc_from_epoch_millis(k8s_data["updated_at"]).isoformat(),
+            "last_seen": utc_from_epoch_millis(seen_at_ms).isoformat(),
             "resourse_id": k8s_data["service_key"],
             "name": k8s_data["name"],
             "account": cloud_account_id,
@@ -1676,7 +1685,7 @@ def run_job_discovery(
             "labels": k8s_data.get("config", {}).get("labels", {}),
             "meta": meta,
             "name": k8s_data.get("name", ""),
-            "last_seen": utc_from_epoch_millis(k8s_data.get("update_time") or 0).isoformat(),
+            "last_seen": utc_from_epoch_millis(seen_at_ms).isoformat(),
             "kind": k8s_data.get("type", ""),
         }
         if _id not in resources:
