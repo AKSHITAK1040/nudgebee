@@ -4289,6 +4289,22 @@ var table_metadata = map[string]TableDefinition{
 				Type: ColumnDefinitionTypeString,
 				Def:  "status",
 			},
+			// The status a human recognises, mirroring what kubectl prints. `status`
+			// above is only the pod PHASE, which is "Running" for a pod stuck in
+			// CrashLoopBackOff and "Pending" for one stuck in ImagePullBackOff -- so
+			// on its own it cannot distinguish a broken pod from a healthy one. The
+			// reason kubectl shows lives in the container statuses, which the agent
+			// ships in meta.status_info.
+			//
+			// Precedence follows kubectl: an init container that is not done blocks
+			// the pod, so its reason wins; then the app containers; falling back to
+			// NULL so callers can use `status` when there is nothing more specific.
+			// Computed rather than stored: it changes with every container
+			// transition, and a column would need a migration plus a writer.
+			"container_status": {
+				Type: ColumnDefinitionTypeString,
+				Def:  podContainerStatusExpr,
+			},
 			"node_name": {
 				Type: ColumnDefinitionTypeString,
 				Def:  "node_name",
@@ -10344,3 +10360,71 @@ func init() {
 		}()
 	}
 }
+
+// podContainerStatusExpr renders the pod status a human recognises -- the one
+// kubectl prints in its STATUS column -- from the container statuses the agent
+// ships in meta.status_info.
+//
+// It exists because k8s_pods.status holds the pod PHASE, and the phase cannot
+// express "running but broken": a pod in CrashLoopBackOff has phase Running and
+// one in ImagePullBackOff has phase Pending. Measured on a dev cluster, 402
+// active pods carried just two distinct phases, so the phase alone tells a
+// reader nothing about health.
+//
+// Init containers take precedence over app containers, matching kubectl: while
+// an init container is stuck the app containers have not started, and their
+// generic "PodInitializing" would mask the real reason. Within each group a
+// waiting reason wins over a terminated one, since waiting is the current state
+// and terminated is the last one. NULL when nothing is waiting or terminated --
+// i.e. a healthy pod -- so callers fall back to the phase.
+//
+// A container that exited 0 is not a problem and is skipped in BOTH groups. A
+// long-running pod alongside a completed sidecar or helper would otherwise read
+// "Completed" while its main container is happily running. The consequence is
+// that a finished Job pod reports its phase, "Succeeded", where kubectl says
+// "Completed" -- the same fact in the vocabulary the rest of this table uses.
+//
+// exitCode is compared as text rather than cast to int. Every value Go writes
+// here comes from an int32 field so it is always numeric, but meta is free-form
+// jsonb and a cast raises on anything else, which would fail the whole query
+// rather than one row. This is the same reasoning as the jsonb_typeof guards.
+//
+// jsonb_typeof guards every array: status_info is null for pods last reported by
+// an agent that predates it being sent, and jsonb_array_elements errors on a
+// non-array rather than returning no rows.
+//
+// WITH ORDINALITY + ORDER BY ord makes the pick deterministic. jsonb_array_elements
+// emits in array order in practice, but nothing guarantees it, and a pod whose
+// containers are broken in two different ways (one CrashLoopBackOff, one
+// ImagePullBackOff) would otherwise report whichever the executor happened to
+// return first, and could report a different one on the next refresh. Ordering by
+// position means it always reports the first such container, matching the order the
+// pod spec lists them in.
+const podContainerStatusExpr = `COALESCE(
+	(SELECT cs.value->'state'->'waiting'->>'reason'
+	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'initContainerStatuses') = 'array'
+	                                  THEN meta->'status_info'->'initContainerStatuses' ELSE '[]'::jsonb END)
+	        WITH ORDINALITY AS cs(value, ord)
+	  WHERE cs.value->'state'->'waiting'->>'reason' IS NOT NULL
+	  ORDER BY cs.ord LIMIT 1),
+	(SELECT cs.value->'state'->'terminated'->>'reason'
+	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'initContainerStatuses') = 'array'
+	                                  THEN meta->'status_info'->'initContainerStatuses' ELSE '[]'::jsonb END)
+	        WITH ORDINALITY AS cs(value, ord)
+	  WHERE cs.value->'state'->'terminated'->>'reason' IS NOT NULL
+	    AND COALESCE(cs.value->'state'->'terminated'->>'exitCode', '') <> '0'
+	  ORDER BY cs.ord LIMIT 1),
+	(SELECT cs.value->'state'->'waiting'->>'reason'
+	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'containerStatuses') = 'array'
+	                                  THEN meta->'status_info'->'containerStatuses' ELSE '[]'::jsonb END)
+	        WITH ORDINALITY AS cs(value, ord)
+	  WHERE cs.value->'state'->'waiting'->>'reason' IS NOT NULL
+	  ORDER BY cs.ord LIMIT 1),
+	(SELECT cs.value->'state'->'terminated'->>'reason'
+	   FROM jsonb_array_elements(CASE WHEN jsonb_typeof(meta->'status_info'->'containerStatuses') = 'array'
+	                                  THEN meta->'status_info'->'containerStatuses' ELSE '[]'::jsonb END)
+	        WITH ORDINALITY AS cs(value, ord)
+	  WHERE cs.value->'state'->'terminated'->>'reason' IS NOT NULL
+	    AND COALESCE(cs.value->'state'->'terminated'->>'exitCode', '') <> '0'
+	  ORDER BY cs.ord LIMIT 1)
+)`

@@ -309,6 +309,7 @@ query k8s_pods_list($limit:Int, $offset:Int) {
       namespace
       name
       status
+      container_status
       is_active
       node_name
       workload_name
@@ -2329,6 +2330,7 @@ query k8s_event_groupings($limit:Int,$offset:Int){
             namespace
             name
             status
+            container_status
             is_active
             node_name
             workload_name
