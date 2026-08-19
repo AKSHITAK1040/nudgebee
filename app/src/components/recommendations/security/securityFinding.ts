@@ -65,6 +65,19 @@ export interface SecurityFinding {
   resolution?: any;
 }
 
+/**
+ * Canonical severity casing. The scanners already write Capitalized values —
+ * `trivySeverity` maps Trivy's UPPERCASE at ingest for both image and CIS scans
+ * — but the payload preserves the raw UPPERCASE alongside, and the adapters
+ * fall back to it when the column is absent. Normalizing here keeps the label
+ * text and its tone consistent whichever source supplied the value.
+ */
+export const normalizeSeverity = (v: any): string => {
+  const s = String(v ?? '').trim();
+  if (!s) return 'Unknown';
+  return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+};
+
 const asArray = (v: any): string[] => {
   if (Array.isArray(v)) return v.filter(Boolean).map(String);
   if (typeof v === 'string' && v.trim()) return [v];
@@ -107,7 +120,7 @@ export const fromImageScanRow = (row: any): SecurityFinding => {
     vulnId: payload.VulnerabilityID || row?.vulnerability_id || '',
     title: payload.Title,
     description: payload.Description,
-    severity: row?.severity || payload.Severity || 'Unknown',
+    severity: normalizeSeverity(row?.severity || payload.Severity),
     status: row?.status,
 
     installedVersion: payload.InstalledVersion,
@@ -144,7 +157,7 @@ export const fromVmRow = (row: any): SecurityFinding => {
     accountId: row?.account_id,
     vulnId: payload.vuln_id || '',
     description: payload.description,
-    severity: row?.severity || 'Unknown',
+    severity: normalizeSeverity(row?.severity),
     status: row?.status,
 
     installedVersion: payload.package?.version,

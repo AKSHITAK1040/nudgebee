@@ -16,7 +16,8 @@ import { ds } from '@utils/colors';
 import recommendationApi from '@api1/recommendation';
 import apiVm from '@api1/vm';
 import { useLatestRequest } from '@components/vm/common';
-import { type SecurityFinding, findingHeadline, findingLocation } from './securityFinding';
+import { type SecurityFinding, findingHeadline, findingLocation, normalizeSeverity } from './securityFinding';
+import { EmptyNote, Field, FieldList, Mono, PanelActions, Section, SectionHeading } from './panelPrimitives';
 
 const SEVERITY_TONE: Record<string, LabelTone> = {
   Critical: 'critical',
@@ -28,7 +29,7 @@ const SEVERITY_TONE: Record<string, LabelTone> = {
   Unknown: 'neutral',
 };
 
-const severityTone = (s: string): LabelTone => SEVERITY_TONE[s] ?? 'neutral';
+const severityTone = (s: string): LabelTone => SEVERITY_TONE[normalizeSeverity(s)] ?? 'neutral';
 
 /** One row of an occurrence elsewhere in the fleet. */
 interface AffectedRow {
@@ -37,57 +38,6 @@ interface AffectedRow {
   secondary?: string;
   count?: number;
 }
-
-const SectionHeading = ({ children }: { children: React.ReactNode }) => (
-  <Typography
-    sx={{
-      fontSize: ds.text.caption,
-      fontWeight: ds.weight.medium,
-      color: ds.gray[500],
-      textTransform: 'uppercase',
-      letterSpacing: '0.08em',
-      pb: ds.space[1],
-      mb: ds.space[2],
-      borderBottom: `1px solid ${ds.gray[200]}`,
-    }}
-  >
-    {children}
-  </Typography>
-);
-
-const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
-  <>
-    <Typography component='dt' sx={{ fontSize: ds.text.small, color: ds.gray[600] }}>
-      {label}
-    </Typography>
-    <Box component='dd' sx={{ m: 0, fontSize: ds.text.small, color: ds.gray[700], wordBreak: 'break-word' }}>
-      {children}
-    </Box>
-  </>
-);
-
-const FieldList = ({ children }: { children: React.ReactNode }) => (
-  <Box component='dl' sx={{ display: 'grid', gridTemplateColumns: '132px 1fr', gap: `${ds.space[1]} ${ds.space[3]}`, m: 0 }}>
-    {children}
-  </Box>
-);
-
-const Mono = ({ children }: { children: React.ReactNode }) => (
-  <Box component='span' sx={{ fontFamily: 'var(--ds-font-mono)', fontSize: ds.text.small }}>
-    {children}
-  </Box>
-);
-
-const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
-  <Box sx={{ mb: ds.space[5] }}>
-    <SectionHeading>{title}</SectionHeading>
-    {children}
-  </Box>
-);
-
-const EmptyNote = ({ children }: { children: React.ReactNode }) => (
-  <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500] }}>{children}</Typography>
-);
 
 interface SecurityFindingPanelProps {
   open: boolean;
@@ -527,20 +477,7 @@ const SecurityFindingPanel = ({
 
         {/* Actions — pinned to the bottom, matching the cost panel's action bar */}
         {(onCreatePR || onCreateTicket) && (
-          <Box
-            data-testid='security-finding-actions'
-            sx={{
-              borderTop: `1px solid ${ds.gray[200]}`,
-              backgroundColor: ds.background[100],
-              flexShrink: 0,
-              px: ds.space[4],
-              py: ds.space.mul(0, 6),
-              display: 'flex',
-              alignItems: 'center',
-              gap: ds.space[2],
-              flexWrap: 'wrap',
-            }}
-          >
+          <PanelActions testId='security-finding-actions'>
             {onCreatePR && (
               <Button
                 id='security-finding-create-pr'
@@ -565,7 +502,7 @@ const SecurityFindingPanel = ({
                 Create ticket
               </Button>
             )}
-          </Box>
+          </PanelActions>
         )}
       </Box>
     </CustomDrawer>
