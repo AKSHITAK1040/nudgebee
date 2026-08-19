@@ -900,7 +900,7 @@ class VolumeRightsizingService:
             UPDATE recommendation SET status = 'Archive'
             WHERE tenant_id = :tenant_id AND cloud_account_id = :account_id
             AND category = 'RightSizing' AND rule_name = 'pv_rightsize'
-            AND status NOT IN ('Closed', 'InProgress', 'Archive')
+            AND status = 'Open'
             {scope_clause}
         """)
 

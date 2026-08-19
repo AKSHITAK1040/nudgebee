@@ -447,6 +447,15 @@ def archive_existing_krr_recommendations(
             span.set_attribute("krr.scanned_resources", len(scanned_object_ids))
             span.set_attribute("krr.archive_scope", scope_label)
 
+            # Archive the one status the scanner owns, rather than excluding the
+            # ones it does not. Leaving the keep-set does not prove a workload was
+            # deleted: a scan can cover one and still emit no row for it because
+            # nothing needs changing (see kept_object_ids above). Tombstoning a
+            # user-set status on that pass meant the next pass that did emit a row
+            # found it reading 'Archive', treated it as scanner-owned, and reopened
+            # a finding the user had already triaged. Naming 'Open' keeps that true
+            # for triage states added later; an exclusion list silently stops
+            # covering each new one (it already missed 'Assigned').
             update_query = text(f"""
                 UPDATE recommendation
                 SET status = 'Archive'
@@ -454,7 +463,7 @@ def archive_existing_krr_recommendations(
                 AND cloud_account_id = :account_id
                 AND category IN ('RightSizing', 'Configuration')
                 AND rule_name = 'pod_right_sizing'
-                AND status NOT IN ('Closed', 'InProgress', 'Archive')
+                AND status = 'Open'
                 {scope_clause}
             """)
 
@@ -482,7 +491,7 @@ def archive_existing_krr_recommendations(
                     AND r.cloud_account_id = :account_id
                     AND r.rule_name = 'pod_right_sizing'
                     AND r.category IN ('RightSizing', 'Configuration')
-                    AND r.status NOT IN ('Closed', 'InProgress', 'Archive')
+                    AND r.status = 'Open'
                     AND r.account_object_id = k.object_id
                     AND r.category <> k.category
                 """)
