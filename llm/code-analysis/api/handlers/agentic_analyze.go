@@ -445,7 +445,7 @@ func (ah *AgenticAnalyzeHandler) HandleAgenticAnalyze(ctx context.Context, req A
 // (common.InitAnalysis / common.GetAnalysisState / common.CleanupAnalysis).
 //
 // Why this MUST NOT be derived from req.ConversationId or any other client
-// field: a single conversation can issue multiple agent_code_2 calls
+// field: a single conversation can issue multiple code_analyzer calls
 // back-to-back (e.g. an explore call followed by a fix call). When call #1
 // completes, it schedules a 5-minute deferred CleanupAnalysis(id). If call #2
 // reuses the same id, the deferred cleanup from #1 wipes #2's still-running
