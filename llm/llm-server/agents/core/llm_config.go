@@ -2777,13 +2777,7 @@ func GetAllConfiguredModels(accountId string) ([]ModelConfig, error) {
 // IsOpenAIModelWithoutStopSupport checks if the model doesn't support the 'stop' parameter
 // OpenAI's reasoning models (o1, o3) and newer GPT-5 series don't support stop words
 func IsOpenAIModelWithoutStopSupport(provider, model string) bool {
-	// The o1/o3/gpt-5 families reject `stop` whoever serves them: OpenAI direct,
-	// or an OpenAI-compatible gateway on the custom provider. Both route through
-	// the same client, so gating on provider identity alone silently re-enables
-	// stop words for gateway-served models.
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "openai", "custom":
-	default:
+	if provider != "openai" {
 		return false
 	}
 
@@ -2806,6 +2800,54 @@ func IsOpenAIModelWithoutStopSupport(provider, model string) bool {
 	}
 
 	return false
+}
+
+// ModelSupportsTemperature checks if the model supports the 'temperature' parameter.
+// Anthropic reasoning models (claude-sonnet-5, claude-opus-5, claude-5 series) and OpenAI
+// reasoning model families (o1, o3, gpt-5) reject explicit / non-default temperature on the wire.
+func ModelSupportsTemperature(provider, model string) bool {
+	modelLower := strings.ToLower(strings.TrimSpace(model))
+	pLower := strings.ToLower(strings.TrimSpace(provider))
+
+	// Check Anthropic reasoning models
+	if pLower == "anthropic" || strings.Contains(modelLower, "claude") {
+		if strings.Contains(modelLower, "claude-sonnet-5") ||
+			strings.Contains(modelLower, "claude-opus-5") ||
+			strings.Contains(modelLower, "claude-5") {
+			return false
+		}
+	}
+
+	// Check OpenAI reasoning models across any provider, including namespaced proxy/deployment IDs.
+	if isOpenAIReasoningModel(modelLower) {
+		return false
+	}
+
+	return true
+}
+
+func isOpenAIReasoningModel(model string) bool {
+	for _, family := range []string{"o1", "o3", "gpt-5"} {
+		for offset := 0; offset < len(model); {
+			index := strings.Index(model[offset:], family)
+			if index < 0 {
+				break
+			}
+			index += offset
+			beforeFamily := index == 0 || isModelNamespaceSeparator(model[index-1])
+			afterIndex := index + len(family)
+			afterFamily := afterIndex == len(model) || isModelNamespaceSeparator(model[afterIndex])
+			if beforeFamily && afterFamily {
+				return true
+			}
+			offset = index + len(family)
+		}
+	}
+	return false
+}
+
+func isModelNamespaceSeparator(char byte) bool {
+	return char == ':' || char == '/' || char == '.' || char == '_' || char == '-'
 }
 
 // ─── Pinned-source resolution ──────────────────────────────────────────────
@@ -3130,50 +3172,6 @@ func containsString(xs []string, s string) bool {
 	for _, x := range xs {
 		if x == s {
 			return true
-		}
-	}
-	return false
-}
-
-// ModelSupportsTemperature checks if the model supports the 'temperature' parameter.
-// Anthropic reasoning models (claude-sonnet-5, claude-opus-5, claude-5 series) and OpenAI
-// reasoning model families (o1, o3, gpt-5) reject explicit / non-default temperature on the wire.
-func ModelSupportsTemperature(provider, model string) bool {
-	modelLower := strings.ToLower(strings.TrimSpace(model))
-	pLower := strings.ToLower(strings.TrimSpace(provider))
-
-	// Check Anthropic reasoning models
-	if pLower == "anthropic" || strings.Contains(modelLower, "claude") {
-		if strings.Contains(modelLower, "claude-sonnet-5") ||
-			strings.Contains(modelLower, "claude-opus-5") ||
-			strings.Contains(modelLower, "claude-5") {
-			return false
-		}
-	}
-
-	// Check OpenAI reasoning models across any provider, including namespaced proxy/deployment IDs.
-	if isOpenAIReasoningModel(modelLower) {
-		return false
-	}
-
-	return true
-}
-
-func isOpenAIReasoningModel(model string) bool {
-	for _, family := range []string{"o1", "o3", "gpt-5"} {
-		for offset := 0; offset < len(model); {
-			index := strings.Index(model[offset:], family)
-			if index < 0 {
-				break
-			}
-			index += offset
-			beforeFamily := index == 0 || isModelNamespaceSeparator(model[index-1])
-			afterIndex := index + len(family)
-			afterFamily := afterIndex == len(model) || isModelNamespaceSeparator(model[afterIndex])
-			if beforeFamily && afterFamily {
-				return true
-			}
-			offset = index + len(family)
 		}
 	}
 	return false
@@ -3615,10 +3613,6 @@ func ConfigNameFor(sourceId, integrationName string) string {
 		return fmt.Sprintf("%s · Agent: %s", owner, p.Name)
 	}
 	return sourceId
-}
-
-func isModelNamespaceSeparator(char byte) bool {
-	return char == ':' || char == '/' || char == '.' || char == '_' || char == '-'
 }
 
 // Azure-shaped gateway support for the custom provider (#36556).

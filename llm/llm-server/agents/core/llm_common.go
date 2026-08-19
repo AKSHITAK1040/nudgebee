@@ -519,7 +519,7 @@ func GenerateAndTrackLLMContent(ctx *security.RequestContext, userId string, acc
 	// this floor unnoticed until a customer investigation was traced call by call.
 	maxOutputTokens := ResolveMaxOutputTokens(accountId, provider, model)
 	if maxOutputTokens <= 0 {
-		maxOutputTokens = 4096
+		maxOutputTokens = DefaultMaxOutputTokensFloor
 		ctx.GetLogger().Warn("llm: no max-output-token value in config or pricing catalog, applying the conservative floor — "+
 			"long responses will truncate and drive the continuation loop until a catalog row is added",
 			"model", model, "provider", provider, "agentName", agentName, "maxOutputTokens", maxOutputTokens)
@@ -1258,6 +1258,7 @@ const SentinelOmitTemperature = -1.0
 
 // withoutTemperature returns a CallOption that clears Temperature from CallOptions
 // by setting it to SentinelOmitTemperature (-1.0).
+//
 // The sentinel is the whole signal. Do NOT also record this in
 // CallOptions.Metadata: the OpenAI-compatible client forwards that map verbatim
 // as the request's `metadata` field, which only accepts string values, so a
