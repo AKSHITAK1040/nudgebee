@@ -2539,7 +2539,9 @@ def handle_certificate_scanner_report(content, tenant, cloud_account_id, account
 
         on_conflict = (
             "ON CONFLICT (cloud_account_id, rule_name, resource_id, category, account_object_id) DO UPDATE SET "
-            "recommendation = EXCLUDED.recommendation, status=EXCLUDED.status"
+            "recommendation = EXCLUDED.recommendation, "
+            "status = CASE WHEN recommendation.status NOT IN ('Open', 'Archive') "
+            "THEN recommendation.status ELSE EXCLUDED.status END"
         )
 
         try:
@@ -2594,7 +2596,9 @@ def handle_helm_chart_upgrade_report(content, tenant, cloud_account_id, account_
 
         on_conflict = (
             "ON CONFLICT (cloud_account_id, rule_name, resource_id, category, account_object_id) DO UPDATE SET "
-            "recommendation = EXCLUDED.recommendation, status=EXCLUDED.status"
+            "recommendation = EXCLUDED.recommendation, "
+            "status = CASE WHEN recommendation.status NOT IN ('Open', 'Archive') "
+            "THEN recommendation.status ELSE EXCLUDED.status END"
         )
 
         try:
@@ -2697,7 +2701,9 @@ def handle_k8s_helm_compatibility_report(content, tenant, cloud_account_id, acco
 
         on_conflict = (
             "ON CONFLICT (cloud_account_id, rule_name, resource_id, category, account_object_id) DO UPDATE SET "
-            "recommendation = EXCLUDED.recommendation, status=EXCLUDED.status"
+            "recommendation = EXCLUDED.recommendation, "
+            "status = CASE WHEN recommendation.status NOT IN ('Open', 'Archive') "
+            "THEN recommendation.status ELSE EXCLUDED.status END"
         )
 
         try:
