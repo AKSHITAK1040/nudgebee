@@ -668,3 +668,33 @@ func TestRequestInvalidGuidance_TellsTheCallerItIsNotAbsence(t *testing.T) {
 	assert.Contains(t, joined, "_ilike", "the original backend error must be preserved")
 	assert.Equal(t, core.ConversationStatusFailed, out.Status, "it is still a failure")
 }
+
+// Elasticsearch rejects `_ilike` outright ("unsupported operator \"_ilike\" for field
+// ..."), and a rejected query costs a whole agent iteration to discover. The fallback
+// list is used precisely when the backend did not tell us what it supports, so it must
+// be the portable intersection.
+func TestDefaultLogQueryOperators_ExcludesILike(t *testing.T) {
+	assert.NotContains(t, defaultLogQueryOperators, "_ilike",
+		"the unknown-backend fallback must not advertise an operator Elasticsearch rejects")
+	assert.Contains(t, defaultLogQueryOperators, "_like", "the portable spelling must stay")
+}
+
+// The few-shots are a stronger signal than the operator list, so hardcoding `_ilike`
+// in them made the model emit it even when the advertised list correctly omitted it.
+func TestCanonicalQueryExamples_FollowTheAdvertisedOperators(t *testing.T) {
+	render := func(ops []string) string {
+		var sb strings.Builder
+		for _, ex := range canonicalQueryExamples(ops) {
+			sb.WriteString(ex.Answer)
+		}
+		return sb.String()
+	}
+
+	es := render([]string{"_eq", "_neq", "_like", "_nlike", "_is_null"})
+	assert.NotContains(t, es, "_ilike", "must not demonstrate an operator this backend rejects")
+	assert.Contains(t, es, "_like", "text matching must still be demonstrated")
+
+	supported := render([]string{"_eq", "_like", "_ilike"})
+	assert.Contains(t, supported, "_ilike",
+		"case-insensitive matching must still be used where the backend supports it")
+}

@@ -245,6 +245,9 @@ func TestReadResponse(t *testing.T) {
 func TestElasticSaasSource_LabelMappingAndOperators(t *testing.T) {
 	var e ElasticSaasSource
 	assert.Equal(t, map[string]string{}, e.GetLabelMapping())
+	// _ilike is advertised because ES executes it natively via a case-insensitive
+	// wildcard. It used to be omitted while the query generator emitted it anyway,
+	// so the whole query was refused with `unsupported operator "_ilike"`.
 	assert.Equal(t,
 		[]string{"_eq", "_neq", "_contains", "_like", "_ilike", "_nlike", "_gt", "_lt", "_is_null"},
 		e.GetSupportedOperators(),

@@ -510,7 +510,7 @@ func buildCanonicalLogQueryPromptV3(provider services_server.ObservabilityProvid
 	b.WriteString("- Read the caller's ORIGINAL user question (when provided) to classify intent.\n")
 
 	b.WriteString("\n**Examples:**\n")
-	examples := canonicalQueryExamples()
+	examples := canonicalQueryExamples(supportedOperators)
 	if !useCanonical {
 		if pe := providerSpecificQueryExamples(providerName); len(pe) > 0 {
 			examples = pe
