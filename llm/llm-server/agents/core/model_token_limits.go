@@ -158,7 +158,7 @@ func canonicalModelID(model string) string {
 			break
 		}
 	}
-	for _, p := range []string{"anthropic.", "amazon.", "meta.", "google.", "vertex.", "openai.", "azure.", "mistral.", "cohere.", "ai21.", "models/"} {
+	for _, p := range []string{"anthropic.", "amazon.", "meta.", "google.", "vertex.", "vertex/", "openai.", "azure.", "mistral.", "cohere.", "ai21.", "models/"} {
 		if strings.HasPrefix(m, p) {
 			m = strings.TrimPrefix(m, p)
 			break

@@ -255,6 +255,13 @@ func resolveOrchestratorThinkingLevel(model string) string {
 	return orch
 }
 
+func reactPlannerStopWords(provider, model string) []string {
+	if IsOpenAIModelWithoutStopSupport(provider, model) {
+		return nil
+	}
+	return []string{"<observation"}
+}
+
 // notebookStaleInfo returns whether the notebook is stale and how many
 // turns have elapsed since the last update (-1 if never updated).
 func (o *NBReActPlanner3) notebookStaleInfo(turnIdx int) (stale bool, turnsSinceUpdate int) {
@@ -1758,8 +1765,8 @@ func (o *NBReActPlanner3) Plan(
 				}
 			}
 
-			if !IsOpenAIModelWithoutStopSupport(provider, model) {
-				callOptions = append(callOptions, llms.WithStopWords([]string{"<observation>"}))
+			if stopWords := reactPlannerStopWords(provider, model); len(stopWords) > 0 {
+				callOptions = append(callOptions, llms.WithStopWords(stopWords))
 			}
 
 			llmCallStart := time.Now()

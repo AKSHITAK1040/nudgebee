@@ -588,6 +588,17 @@ func buildLogToolResponse(nbRequestContext toolcore.NbToolContext, agent core.NB
 	// tool boundary, since this wrapper bypasses factory_agent's generic path.
 	subAgentEvidence := core.BuildSubAgentEvidenceForTool(nbRequestContext.Ctx, LogsAgentName, resp.AgentStepResponse)
 
+	if _, ok := agent.(*LogAgent); ok && resp.Status == core.ConversationStatusCompleted {
+		return toolcore.NBToolResponse{
+			Data:              logData,
+			Type:              toolcore.NBToolResponseTypeText,
+			Status:            toolcore.NBToolResponseStatusSuccess,
+			References:        references,
+			SubAgentEvidence:  subAgentEvidence,
+			AdditionalDetails: additionalDetails,
+		}, nil
+	}
+
 	if _, ok := agent.(core.NBAgentReActPlannerSummaryToolProvider); ok {
 		return toolcore.NBToolResponse{
 			Data:              logData,

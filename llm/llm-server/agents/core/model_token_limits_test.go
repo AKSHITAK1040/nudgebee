@@ -72,6 +72,8 @@ func TestResolveMaxOutputTokens_BedrockCrossRegionIds(t *testing.T) {
 	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "bedrock", "eu.anthropic.claude-opus-4-8-v1:0"))
 	// Dotted-but-prefixed (Vertex-style) id resolves too.
 	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "vertexai", "anthropic.claude-sonnet-4.6"))
+	// Vertex's custom endpoint form uses a slash rather than a dotted vendor prefix.
+	assert.Equal(t, 65536, ResolveMaxOutputTokens("", "custom", "vertex/claude-sonnet-4-6"))
 }
 
 // The canonical alias is indexed at catalog load as well, so a tenant row
@@ -109,6 +111,7 @@ func TestCanonicalModelID(t *testing.T) {
 		"anthropic.claude-opus-4-8":                    "claude-opus-4.8",
 		"eu.meta.llama3-1-70b-instruct-v1:0":           "llama3.1-70b-instruct",
 		"models/gemini-embedding-001":                  "gemini-embedding-001",
+		"vertex/claude-sonnet-4-6":                     "claude-sonnet-4.6",
 		"gpt-4o":                                       "gpt-4o",
 		"claude-sonnet-4.6":                            "claude-sonnet-4.6",
 	}

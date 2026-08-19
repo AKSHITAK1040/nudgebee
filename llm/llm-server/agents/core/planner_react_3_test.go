@@ -12,6 +12,7 @@ import (
 	toolcore "nudgebee/llm/tools/core"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/prompts"
 )
@@ -102,6 +103,36 @@ func TestReAct3HypothesisModeFence(t *testing.T) {
 		assert.NotContains(t, out, notebookHeader)
 		assert.NotContains(t, out, hypothesisHeader)
 	})
+}
+
+func TestReActPlannerStopWordsCoverAttributedObservations(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		provider string
+		model    string
+		want     []string
+	}{
+		{
+			name:     "Bedrock Claude",
+			provider: "bedrock",
+			model:    "us.anthropic.claude-sonnet-4-6",
+			want:     []string{"<observation"},
+		},
+		{
+			name:     "custom Vertex endpoint",
+			provider: ProviderCustom,
+			model:    "vertex/claude-sonnet-4-6",
+			want:     []string{"<observation"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stopWords := reactPlannerStopWords(tc.provider, tc.model)
+			require.Equal(t, tc.want, stopWords)
+			for _, observation := range []string{"<observation>", `<observation step="E1">`} {
+				assert.True(t, strings.HasPrefix(observation, stopWords[0]))
+			}
+		})
+	}
 }
 
 // TestReAct3RoleOverlayFence verifies the orchestrator/executor role overlays

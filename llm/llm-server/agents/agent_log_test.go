@@ -576,6 +576,23 @@ func TestBuildLogToolResponse_AdditionalDetails(t *testing.T) {
 		assertAdditionalDetails(t, resp)
 	})
 
+	t.Run("unified LogAgent returns its completed analysis instead of raw step output", func(t *testing.T) {
+		agentResp := core.NBAgentResponse{
+			AgentId:   wantAgentId,
+			MessageId: wantMessageId,
+			Status:    core.ConversationStatusCompleted,
+			Response:  []string{"synthesized analysis"},
+			AgentStepResponse: []core.ToolInvocation{
+				{Response: llms.ToolCallResponse{Content: "raw shell output"}},
+			},
+		}
+		resp, err := buildLogToolResponse(nbCtx, &LogAgent{}, input, agentResp, nil)
+		require.NoError(t, err)
+		assert.Equal(t, "synthesized analysis", resp.Data)
+		assert.Equal(t, toolcore.NBToolResponseTypeText, resp.Type)
+		assertAdditionalDetails(t, resp)
+	})
+
 	t.Run("non-summary agent, matching step-response path carries agent_id/message_id", func(t *testing.T) {
 		agentResp := core.NBAgentResponse{
 			AgentId:   wantAgentId,
