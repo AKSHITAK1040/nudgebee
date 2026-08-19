@@ -8,6 +8,8 @@ import (
 	"nudgebee/services/internal/database"
 	"nudgebee/services/relay"
 	"nudgebee/services/security"
+
+	"github.com/lib/pq"
 )
 
 // RunUnusedPVCScan is the direct-K8s-API counterpart that lists PVs, PVCs,
@@ -137,13 +139,23 @@ func persistUnusedPVCs(ctx *security.RequestContext, account ScanAccount, recs [
 
 	now := time.Now()
 
-	// Archive — transition all currently-open unused_pvc rows for this
-	// account to Archive so dropped PVs disappear from the UI.
+	// Retire only the PVs that vanished from this scan, keyed on the scan's
+	// keep-set rather than every row for the rule. A PV that is still present
+	// must keep whatever status its user gave it, and the upsert's CASE guard
+	// below can only preserve that if the archive has not already overwritten it.
+	// Closed rows are left as a terminal record. A failed scan returns before this
+	// point, so an empty keep-set really does mean no unused PVs remain.
+	keepObjectIDs := make([]string, 0, len(recs))
+	for _, r := range recs {
+		keepObjectIDs = append(keepObjectIDs, r.AccountObjectID)
+	}
 	if _, err := dbms.Db.Exec(
 		`UPDATE recommendation SET status = 'Archive', updated_at = $1
 		 WHERE tenant_id = $2 AND cloud_account_id = $3
-		   AND category = 'RightSizing' AND rule_name = $4 AND status != 'Archive'`,
-		now, account.TenantID, account.AccountID, UnusedPVCRuleName,
+		   AND category = 'RightSizing' AND rule_name = $4
+		   AND status NOT IN ('Archive', 'Closed')
+		   AND NOT (account_object_id = ANY($5))`,
+		now, account.TenantID, account.AccountID, UnusedPVCRuleName, pq.Array(keepObjectIDs),
 	); err != nil {
 		return fmt.Errorf("unused_pvc: archive: %w", err)
 	}
@@ -187,7 +199,8 @@ func persistUnusedPVCs(ctx *security.RequestContext, account ScanAccount, recs [
 		    :finops_score, :finops_band, :finops_score_breakdown)
 		 ON CONFLICT (rule_name, cloud_account_id, resource_id, category, account_object_id)
 		 DO UPDATE SET recommendation = EXCLUDED.recommendation,
-		               status = EXCLUDED.status,
+		               status = CASE WHEN recommendation.status NOT IN ('Open', 'Archive')
+		                             THEN recommendation.status ELSE EXCLUDED.status END,
 		               updated_at = EXCLUDED.updated_at,
 		               severity = EXCLUDED.severity,
 		               estimated_savings = EXCLUDED.estimated_savings,
