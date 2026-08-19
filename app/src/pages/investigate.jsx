@@ -359,6 +359,18 @@ const Investigate = () => {
   const isK8s = source === 'kubernetes';
   const isCloud = source === 'cloud';
 
+  // Whether `source` above is an answer or its fallback. It defaults to 'kubernetes'
+  // until the account list loads, so a cloud investigation reports isK8s on its first
+  // renders. Consumers that would ask a backend the wrong question in the meantime --
+  // ownership resolves the k8s or the cloud chain, and they are not interchangeable --
+  // should wait for this rather than act on the default.
+  const sourceKnown = useMemo(() => {
+    if (selectedCluster?.cloud_provider) return true;
+    const accountId = router.query.accountId;
+    if (accountId && allCluster?.length > 0 && allCluster.find((c) => c.value === accountId)?.cloud_provider) return true;
+    return ['cloud', 'cloud-account', 'kubernetes'].includes(router.query.source);
+  }, [selectedCluster?.cloud_provider, allCluster, router.query.accountId, router.query.source]);
+
   const [row, setRow] = useState({});
   const [queryParam, setQueryParam] = useState({
     aggregationKey: '',
@@ -1939,6 +1951,7 @@ const Investigate = () => {
             queryParam={queryParam}
             isK8s={isK8s}
             isCloud={isCloud}
+            sourceKnown={sourceKnown}
             onPodClick={handlePodClick}
             onCreateTicket={(r) => {
               setTicketData(r);

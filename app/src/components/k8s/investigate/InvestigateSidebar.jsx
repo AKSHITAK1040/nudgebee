@@ -3,6 +3,9 @@ import { Box, Typography, Tooltip } from '@mui/material';
 import KeyboardDoubleArrowLeftIcon from '@mui/icons-material/KeyboardDoubleArrowLeft';
 import KeyboardDoubleArrowRightIcon from '@mui/icons-material/KeyboardDoubleArrowRight';
 import { useRouter } from 'next/router';
+import PersonOutlineOutlinedIcon from '@mui/icons-material/PersonOutlineOutlined';
+import OwnerBadge from '@components/ownership/OwnerBadge';
+import useResourceOwner, { sourceText } from '@hooks/useResourceOwner';
 import PropTypes from 'prop-types';
 import { ds } from 'src/utils/colors';
 import Datetime from '@shared/format/Datetime';
@@ -23,6 +26,36 @@ import TroubleShootIcon from '@assets/home/node-errors-icon.svg';
 import CubeIcon from '@assets/kubernetes/cube-icon.svg';
 import { BarsBlueOutlineIcon, ErrorFillIcon, FileOutlineIcon, GraphOutlineIcon, infoIcon, LastStateIcon } from '@assets';
 
+// buildOwnershipLevels returns the ownership chain to resolve for the investigated
+// resource, most specific rung first, skipping any rung whose key is unavailable.
+//
+// The k8s/cloud split is taken from the caller's own isK8s flag and NOT inferred from
+// whether a namespace is present: cloud events carry a `subject_namespace` too, but it
+// holds the cloud service name (`EC2`, `RDS`) rather than a namespace, so inferring
+// would build a nonsense `<account>/EC2` namespace rung.
+//
+// `cloud_resource_id` is best-effort on both variants — the collectors only set it when
+// the event matched a known resource — so the resource rung is frequently absent and the
+// chain falls back to namespace/account. `cloud_account_id` is always present, so there
+// is always at least one rung to resolve.
+export function buildOwnershipLevels({ isK8s, cloudResourceId, cloudAccountId, namespace }) {
+  const levels = [];
+  if (isK8s) {
+    if (cloudResourceId) {
+      levels.push({ level: 'Workload', resourceType: 'workload', resourceKey: cloudResourceId, own: null });
+    }
+    if (cloudAccountId && namespace) {
+      levels.push({ level: 'Namespace', resourceType: 'namespace', resourceKey: `${cloudAccountId}/${namespace}`, own: null });
+    }
+  } else if (cloudResourceId) {
+    levels.push({ level: 'Resource', resourceType: 'cloud_resource', resourceKey: cloudResourceId, own: null });
+  }
+  if (cloudAccountId) {
+    levels.push({ level: 'Cloud account', resourceType: 'cloud_account', resourceKey: cloudAccountId, own: null });
+  }
+  return levels;
+}
+
 function InvestigateSidebar({
   row,
   podDetails,
@@ -34,6 +67,7 @@ function InvestigateSidebar({
   queryParam,
   isK8s,
   isCloud,
+  sourceKnown = true,
   onPodClick,
   onRowChange,
   onCreateTicket,
@@ -43,6 +77,30 @@ function InvestigateSidebar({
 }) {
   const router = useRouter();
   const [showAll, setShowAll] = useState(false);
+  const [showChain, setShowChain] = useState(false);
+
+  const {
+    effective: owner,
+    levels: ownerLevels,
+    effectiveIndex: ownerEffectiveIndex,
+    loading: ownerLoading,
+    unresolvable: ownerUnresolvable,
+  } = useResourceOwner(
+    // Wait for the page to actually know k8s-vs-cloud. It defaults to k8s until the
+    // account list loads, and resolving the wrong chain would ask for a namespace rung
+    // keyed on a cloud service name (`<account>/AmazonEC2`).
+    sourceKnown
+      ? buildOwnershipLevels({
+          isK8s,
+          cloudResourceId: row?.cloud_resource_id,
+          cloudAccountId: row?.cloud_account_id,
+          namespace: row?.subject_namespace,
+        })
+      : []
+  );
+  // Nothing to resolve (no account), the source isn't known yet, or the resolve failed
+  // — drop the section rather than claim the resource is unowned.
+  const showOwner = sourceKnown && !ownerUnresolvable && !!row?.cloud_account_id;
   const [incidentMembers, setIncidentMembers] = useState([]);
 
   // Members of this event's incident group (#34655) — fetched only when the
@@ -684,6 +742,112 @@ function InvestigateSidebar({
             )}
           </Box>
 
+          {/* Ownership section — who is accountable for the affected resource, and how
+              that was derived. Deliberately narrower than the recommendation drawer's
+              card: no chain, because at this width the repeated owner name and the rung
+              labels read as competing values rather than a hierarchy. Hidden entirely
+              when there is nothing to resolve or the resolve failed. */}
+          {showOwner && (
+            <>
+              <Box
+                sx={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  background: ds.background[100],
+                  gap: 'var(--ds-space-1)',
+                  mb: 'var(--ds-space-4)',
+                  mt: 'var(--ds-space-5)',
+                  '&::after': { content: '""', height: '0.5px', width: '100%', backgroundColor: ds.gray[200] },
+                }}
+              >
+                <PersonOutlineOutlinedIcon sx={{ width: '16px', height: '16px', color: ds.gray[700] }} />
+                <Typography
+                  sx={{
+                    color: ds.gray[700],
+                    fontSize: 'var(--ds-text-body-lg)',
+                    fontWeight: 'var(--ds-font-weight-medium)',
+                    lineHeight: 'normal',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  Ownership
+                </Typography>
+              </Box>
+
+              <Box
+                sx={{
+                  display: 'grid',
+                  flexDirection: 'column',
+                  alignItems: 'flex-start',
+                  gridTemplateColumns: `${ds.space.mul(1, 25)} 1fr`,
+                  gap: 'var(--ds-space-1)',
+                }}
+              >
+                <Text value={'Owner'} secondaryText />
+                {/* No hint on the chip — the Source row below spells the derivation out,
+                    and a trailing "rule" next to a name reads as a second value. */}
+                {ownerLoading ? (
+                  <Text value={'Resolving…'} secondaryText />
+                ) : owner ? (
+                  <OwnerBadge owner={owner} hideHint />
+                ) : (
+                  <Text value={'— Unassigned'} secondaryText sx={{ color: ds.gray[700] }} />
+                )}
+
+                {!ownerLoading && (
+                  <>
+                    <Text value={'Source'} secondaryText />
+                    <Text value={sourceText(ownerLevels, ownerEffectiveIndex)} secondaryText sx={{ color: ds.gray[700] }} />
+                  </>
+                )}
+
+                {/* The chain, behind a disclosure. Closed by default so the two-line
+                    answer above stays the whole visible block — at this width an
+                    always-open tree competes with it. Only offered when there is more
+                    than one rung to distinguish. */}
+                {!ownerLoading && ownerLevels.length > 1 && (
+                  <Box sx={{ gridColumn: '1 / -1', mt: 'var(--ds-space-1)' }}>
+                    <Button
+                      tone='link'
+                      size='xs'
+                      onClick={() => setShowChain((prev) => !prev)}
+                      data-testid='ownership-chain-toggle'
+                      aria-expanded={showChain}
+                    >
+                      {showChain ? 'Hide chain' : 'Show chain'}
+                    </Button>
+
+                    {showChain && (
+                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-1)', mt: 'var(--ds-space-1)' }}>
+                        {ownerLevels.map((l, i) => (
+                          <Box
+                            key={l.level}
+                            sx={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              gap: 'var(--ds-space-1)',
+                              minWidth: 0,
+                              pl: `calc(var(--ds-space-2) * ${i})`,
+                            }}
+                          >
+                            {i > 0 && <Text value={'└'} secondaryText />}
+                            <Text value={l.level} secondaryText />
+                            {l.own ? <OwnerBadge owner={l.own} hideHint /> : <Text value={'—'} secondaryText />}
+                            {i === ownerEffectiveIndex && (
+                              <Label size='sm' tone='info'>
+                                effective
+                              </Label>
+                            )}
+                          </Box>
+                        ))}
+                      </Box>
+                    )}
+                  </Box>
+                )}
+              </Box>
+            </>
+          )}
+
           {/* Others section */}
           {(row?.subject_name || row?.subject_type || podDetails?.data?.qosClass || podDetails?.data?.containers?.[0]?.imageName) && (
             <Box
@@ -862,6 +1026,7 @@ InvestigateSidebar.propTypes = {
   alertRules: PropTypes.array,
   queryParam: PropTypes.object,
   isK8s: PropTypes.bool,
+  sourceKnown: PropTypes.bool,
   isCloud: PropTypes.bool,
   onPodClick: PropTypes.func,
   onRowChange: PropTypes.func,
