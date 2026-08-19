@@ -122,11 +122,11 @@ func generateConversationTitleAsync(ctx *security.RequestContext, conversationId
 	err := conversationAsyncTaskWorkerPool.Submit(submissionCtx, func() {
 		title, err := generateConversationTitle(bgCtx, accountId, conversationId, messageId, query, userId)
 		if err != nil {
-			bgCtx.GetLogger().Warn("conversation: unable to generate title via LLM in background task", "conversation_id", conversationId, "query", query, "error", err)
+			bgCtx.GetLogger().Warn("conversation: unable to generate title via LLM in background task", "conversation_id", conversationId, "error", err)
 			bgCtx.GetLogger().Info("conversation: title generation task completed with error")
 			return
 		}
-		bgCtx.GetLogger().Info("conversation: generated title via LLM in background task", "conversation_id", conversationId, "query", query, "title", title)
+		bgCtx.GetLogger().Info("conversation: generated title via LLM in background task", "conversation_id", conversationId, "title", title)
 		err = GetConversationDao().UpdateConversationTitle(conversationId, title)
 		if err != nil {
 			bgCtx.GetLogger().Error("conversation: unable to update conversation title in background task", "conversation_id", conversationId, "error", err)
