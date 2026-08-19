@@ -501,7 +501,7 @@ class VolumeRightsizingService:
                 inject(headers_with_context, current_context)
 
             # Prepare action parameters for get_resource action.
-            # The post-Robusta Go agent (nudgebee-agent#34) requires `version`
+            # The Go agent (nudgebee-agent#34) requires `version`
             # for every get_resource call — without it the agent rejects with
             # 500 `kube: version and resource_type are required`, the response
             # has no `findings`, and we silently fall through to "No PVC data
@@ -934,7 +934,7 @@ class VolumeRightsizingService:
         no-op: the upsert immediately re-opened those same rows, leaving deleted PVCs (and rows
         written by the retired collector-side producer, which keyed on PV name) Open forever.
 
-        Mirrors archive_existing_krr_recommendations in vertical_rightsizing/__init__.py, which
+        Mirrors archive_existing_rightsizing_recommendations in vertical_rightsizing/__init__.py, which
         fixed this same bug for pod_right_sizing.
 
         Scope rules ensure we only reconcile what the scan was exhaustive over:

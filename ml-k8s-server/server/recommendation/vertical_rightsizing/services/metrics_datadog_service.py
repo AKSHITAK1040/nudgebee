@@ -15,7 +15,7 @@ from server.recommendation.vertical_rightsizing.strategy.strategies import BaseS
 from server.recommendation.vertical_rightsizing.models.result import PodsTimeData
 from server.recommendation.vertical_rightsizing.services.metric_base_service import MetricsService
 
-logger = logging.getLogger("krr")
+logger = logging.getLogger("rightsizing")
 
 
 def pods_from_series(data: Dict[str, Any], live_cutoff: float) -> list[PodData]:
