@@ -700,6 +700,18 @@ func TestMakeFetchResponse_PreviewsLogsWhenFileRefPresent(t *testing.T) {
 		assert.Equal(t, sig, str(env, "bundle_signal"),
 			"bundle_signal must appear verbatim in the envelope so the LLM can read it without a follow-up tool call")
 	})
+
+	t.Run("loki envelope: inline preview is flattened JSONL, not raw escaped JSON", func(t *testing.T) {
+		raw := `{"logs":[` +
+			`{"labels":{"app":"x"},"timestamp":"2026-05-06T03:00:10Z","message":"{\"level\":\"ERROR\",\"error\":\"ConnectionError\"}"},` +
+			`{"labels":{"app":"x"},"timestamp":"2026-05-06T03:00:20Z","message":"{\"level\":\"INFO\",\"message\":\"Job ok\"}"}` +
+			`]}`
+		env := decode(makeFetchResponse("fetch_logs", "q", raw, flattenLogsToJSONL(raw), "logs_loki_4.txt", "", nil))
+		assert.True(t, strings.HasPrefix(str(env, "logs"), flattenLogsToJSONL(raw)),
+			"inline preview must match the same one-entry-per-line form saved to file_ref")
+		assert.NotContains(t, env["logs"], `"logs":[`,
+			"inline preview must not be the raw Loki envelope — that's what pushed the model to a follow-up shell_execute peek")
+	})
 }
 
 // TestBuildLogIntentMessages_AccountPromptPropagation pins the contract for

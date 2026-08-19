@@ -81,6 +81,14 @@ const llmModelFallbackFormat = "llm_model_fallbacks_%s"
 const llmProviderTTFTTimeoutEnabledFormat = "llm_provider_ttft_timeout_enabled_%s"
 const llmProviderTTFTTimeoutSecondsFormat = "llm_provider_ttft_timeout_seconds_%s"
 
+// Per-provider sustained-generation timeout controls — same enable/override
+// shape as the TTFT keys above, but this watchdog bounds TOTAL call duration
+// (armed for the whole call, not just the pre-first-token gap), so it catches
+// a call that starts streaming normally and then keeps generating far past
+// what a ReAct decision step should ever take.
+const llmProviderSustainedGenTimeoutEnabledFormat = "llm_provider_sustained_gen_timeout_enabled_%s"
+const llmProviderSustainedGenTimeoutSecondsFormat = "llm_provider_sustained_gen_timeout_seconds_%s"
+
 // Category-tier config keys. A tier (reasoning / retrieval / summary)
 // is configured like an agent but in its own namespace so it cannot collide
 // with an agent that happens to share the name.
@@ -1239,8 +1247,42 @@ func getLLMTTFTTimeout(provider string) (enabled bool, seconds int) {
 	if !config.Config.GetBool(fmt.Sprintf(llmProviderTTFTTimeoutEnabledFormat, p), ttftTimeoutDefaultEnabled(p)) {
 		return false, 0
 	}
-	seconds = config.Config.LlmProviderTTFTTimeoutSeconds
+	return true, resolveTTFTFlatSeconds(provider)
+}
+
+// resolveTTFTFlatSeconds returns the flat (pre-thinking-adjustment) TTFT
+// deadline configured for a provider — the per-provider override
+// (LLM_PROVIDER_TTFT_TIMEOUT_SECONDS_<PROVIDER>) if set, otherwise the global
+// default (LlmProviderTTFTTimeoutSeconds). Split out from getLLMTTFTTimeout so
+// the sustained-gen watchdog can derive its own deadline from this value (see
+// sustainedGenDeadlineSeconds in llm_common.go) even on a call where TTFT
+// itself is not armed for the provider.
+func resolveTTFTFlatSeconds(provider string) int {
+	p := strings.ToLower(provider)
+	seconds := config.Config.LlmProviderTTFTTimeoutSeconds
 	if v := config.Config.GetInt(fmt.Sprintf(llmProviderTTFTTimeoutSecondsFormat, p), 0); v > 0 {
+		seconds = v
+	}
+	return seconds
+}
+
+// getLLMSustainedGenTimeout returns whether the sustained-generation timeout
+// should fire for calls to the given provider, and the deadline in seconds.
+// Enable is per-provider — callers get (false, 0) unless
+// LLM_PROVIDER_SUSTAINED_GEN_TIMEOUT_ENABLED_<PROVIDER>=true is explicitly
+// set. When enabled, the seconds value is the provider-specific override
+// (LLM_PROVIDER_SUSTAINED_GEN_TIMEOUT_SECONDS_<PROVIDER>) if set, otherwise
+// the global default (config.Config.LlmProviderSustainedGenTimeoutSeconds).
+func getLLMSustainedGenTimeout(provider string) (enabled bool, seconds int) {
+	if provider == "" {
+		return false, 0
+	}
+	p := strings.ToLower(provider)
+	if !config.Config.GetBool(fmt.Sprintf(llmProviderSustainedGenTimeoutEnabledFormat, p), false) {
+		return false, 0
+	}
+	seconds = config.Config.LlmProviderSustainedGenTimeoutSeconds
+	if v := config.Config.GetInt(fmt.Sprintf(llmProviderSustainedGenTimeoutSecondsFormat, p), 0); v > 0 {
 		seconds = v
 	}
 	return true, seconds

@@ -1199,6 +1199,26 @@ func ttftDeadlineSeconds(flatSeconds int, opts llms.CallOptions) int {
 	return min(flatSeconds+budget/rate, maxSeconds)
 }
 
+// sustainedGenDeadlineSeconds layers the sustained-generation deadline on top
+// of the TTFT deadline calculation instead of using a flat constant. A
+// thinking-aware TTFT deadline (ttftDeadlineSeconds) can exceed a flat
+// sustained-gen constant at higher thinking levels — e.g. ~193s TTFT vs a flat
+// 60s sustained-gen on "high" — which would silently make sustained-gen fire
+// first on every such call and turn TTFT's thinking-budget calculation into
+// dead code (PR #36332 review). Deriving sustained-gen from the same
+// calculation, plus a fixed safety headroom, guarantees TTFT always gets its
+// full configured chance to fire first, while sustained-gen still catches the
+// failure mode TTFT structurally cannot see: a stream that starts and never
+// stops.
+//
+// floorSeconds (the resolved LlmProviderSustainedGenTimeoutSeconds) remains
+// the lower bound — for a call with no thinking budget, or a low thinking
+// level, the TTFT deadline alone would be too short a sustained-gen budget.
+func sustainedGenDeadlineSeconds(floorSeconds int, provider string, opts llms.CallOptions) int {
+	ttft := ttftDeadlineSeconds(resolveTTFTFlatSeconds(provider), opts)
+	return max(ttft, floorSeconds) + config.Config.LlmProviderSustainedGenHeadroomSeconds
+}
+
 // thinkingBudgetFromOptions reads the thinking allowance a call was dispatched with.
 // Prefers the numeric budget; falls back to the qualitative level's own ceiling so
 // providers using the string ThinkingLevel API are covered too.
@@ -1485,6 +1505,42 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 		}
 	}()
 
+	// Sustained-generation timeout: cancel and retry same-model if TOTAL call
+	// duration exceeds the deadline, regardless of streaming state — unlike the
+	// TTFT watchdog above, which only guards the gap before the first token and
+	// has zero visibility into what happens after streaming starts. Catches a
+	// call that streams normally for a few seconds and then keeps generating far
+	// longer than any ReAct decision step should (observed: up to 188s on a
+	// single call, well past the point a legitimate "pick next tool" response
+	// would ever need). Enable is per-provider (see getLLMSustainedGenTimeout),
+	// same opt-in-after-validation shape as the TTFT watchdog.
+	var sustainedGenFired atomic.Bool
+	var sustainedGenTimer *time.Timer
+	sustainedGenSeconds := 0
+	// armSustainedGenWatchdog starts the deadline. Like armTTFTWatchdog above, it is
+	// called immediately before GenerateContent rather than here, for the same reason:
+	// everything between this point and the send — the cache round-trip and, most
+	// importantly, waiting for a concurrency permit — is queue time, not generation
+	// time. Arming early would let a call merely queued behind
+	// LLMServerMaxConcurrentLlmCalls burn its whole budget waiting for a permit, then
+	// get cancelled and retried as if the model itself were running away.
+	armSustainedGenWatchdog := func() {
+		if enabled, s := getLLMSustainedGenTimeout(rc.currentProvider); enabled && s > 0 {
+			sustainedGenSeconds = sustainedGenDeadlineSeconds(s, rc.currentProvider, watchdogOpts)
+			sustainedGenTimer = time.AfterFunc(time.Duration(sustainedGenSeconds)*time.Second, func() {
+				if !done.Load() {
+					sustainedGenFired.Store(true)
+					cancel()
+				}
+			})
+		}
+	}
+	defer func() {
+		if sustainedGenTimer != nil {
+			sustainedGenTimer.Stop()
+		}
+	}()
+
 	if rc.conversationId != "" && rc.enableCaching {
 		rc.ctx.GetLogger().Debug("Applying cache for current model",
 			"model", rc.currentModel,
@@ -1597,19 +1653,25 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 		}
 	}
 
-	// Arm the TTFT deadline only now: the request is about to go on the wire, so from
-	// here on silence really is the model failing to respond. tracker.started is
-	// deliberately left at the call start so the persisted ttft_ms keeps its existing
-	// meaning and stays comparable with historical rows; only the watchdog's own clock
-	// starts here. The deadlines are calibrated against that (larger) recorded TTFT,
-	// so measuring from the send point can only leave more headroom, never less.
+	// Arm the TTFT and sustained-generation deadlines only now: the request is about to
+	// go on the wire, so from here on silence (or a runaway) really is the model, not
+	// queue time. tracker.started is deliberately left at the call start so the
+	// persisted ttft_ms keeps its existing meaning and stays comparable with historical
+	// rows; only the watchdogs' own clocks start here. The TTFT deadline is calibrated
+	// against that (larger) recorded TTFT, so measuring from the send point can only
+	// leave more headroom, never less.
 	armTTFTWatchdog()
+	armSustainedGenWatchdog()
 
+	rc.ctx.GetLogger().Info("LLM GenerateContent call starting", "model", rc.currentModel, "provider", rc.currentProvider, "conversationId", rc.conversationId, "messages", len(messagesToSend), "ttft_watchdog_seconds", watchdogSeconds, "sustained_gen_watchdog_seconds", sustainedGenSeconds)
 	completion, err := rc.llm.GenerateContent(ctx, messagesToSend, optionsToSend...)
 	// done must be set before Stop(), which doesn't wait for an in-flight callback.
 	done.Store(true)
 	if watchdogTimer != nil {
 		watchdogTimer.Stop()
+	}
+	if sustainedGenTimer != nil {
+		sustainedGenTimer.Stop()
 	}
 	// Record latency for EVERY outcome, before any error branch returns. The failure
 	// paths below return early, so assigning this only on success would leave
@@ -1642,6 +1704,15 @@ func tryWithModel(rc *retryContext) (*llms.ContentResponse, error) {
 		// end-of-sequence failure row — skip it via alreadyRecordedAtSource, or the
 		// one abandoned attempt is counted two or three times.
 		recordAbandonedAttempt(rc, rc.currentModel, rc.currentProvider, err)
+	}
+	if err != nil && sustainedGenFired.Load() {
+		// Same retry-classification requirement as the TTFT branch above: must
+		// contain "timeout" (isTransientError) and must NOT contain "deadline
+		// exceeded" (isDeadlineExceededError), so this retries the same model
+		// instead of routing to fallbacks — a runaway single call is not evidence
+		// the model/provider itself is unhealthy.
+		err = fmt.Errorf("sustained generation timeout: model exceeded %ds total call duration, timeout — retrying same model: %w",
+			sustainedGenSeconds, err)
 	}
 	if err == nil && (completion == nil || len(completion.Choices) == 0 || completion.Choices[0].Content == "") {
 		stopReason := ""

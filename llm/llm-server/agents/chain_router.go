@@ -321,6 +321,8 @@ func getAgent(ctx *security.RequestContext, agent string, accountId string) (cor
 		// route all legacy docs/KB agent aliases AND the unified search name (as
 		// surfaced by the router prompt) to the unified search agent.
 		agentName = WebSearchAgentName
+	case LogsAgentV3Name:
+		agentName = LogsAgentV3Name
 	case "general", "generalchain", "generalagent", "help":
 		return HelpAgent{}, false
 	default:

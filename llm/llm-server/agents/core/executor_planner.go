@@ -408,6 +408,7 @@ func (e *plannerExecutor) Call(ctx context.Context, inputValues map[string]any, 
 
 		var finish *NBAgentPlannerFinishAction
 		iterStart := time.Now()
+		e.ctx.GetLogger().Info("plannerexecutor: iteration starting", "agent", e.agent.GetName(), "iteration", i)
 		prevStepCount := len(e.steps)
 		steps, finish, err := e.doIteration(ctx, e.steps, nameToTool, inputs)
 		e.ctx.GetLogger().Info("plannerexecutor: iteration complete", "iteration", i, "duration", time.Since(iterStart).String(), "steps", len(steps), "hasFinish", finish != nil)
@@ -2252,6 +2253,7 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 	var observation toolcore.NBToolResponse
 	var err error
 	toolExecStart := time.Now()
+	e.ctx.GetLogger().Info("plannerexecutor: tool execution starting", "tool", action.Tool, "toolId", action.ToolID)
 
 	// Optimization: If the tool is LLM (summarizer), use a direct optimized path
 	if strings.EqualFold(action.Tool, "LLM") {

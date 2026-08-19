@@ -659,11 +659,32 @@ func providerFromLogs(logs string) string {
 // labelMappings is empty (backend not yet enriched for this provider/account),
 // it falls back to advertising the provider-native fields — identical to v1 —
 // so the canonical path keeps working before enrichment lands.
+// generateCanonicalLogQuery translates the user's NL log question into the
+// canonical query JSON. Runs on ModelTierSummary — same treatment as the
+// other small, single-shot, mechanical translation calls in this codebase
+// (generateConversationTitle, generateAsyncAgentSummary, session_extractor):
+// this call's own context previously carried no tier override, so it
+// inherited the calling agent's Retrieval tier and paid a full reasoning-tier
+// LLM call (~4.2s observed) to produce a small JSON translation. Unlike those
+// other calls, this one is on the fetch's correctness-critical path — a wrong
+// canonical query silently returns the wrong or empty log set rather than
+// failing loudly — so the downgrade needs the same validation those callers'
+// own tasks don't: confirm real canonical-query output stays correct across
+// providers before trusting this in production (see
+// TestGenerateCanonicalLogQuery_SummaryTier_StillProducesValidQuery and the
+// logs-v3-agent-investigation doc for the manual validation run).
 func generateCanonicalLogQuery(ctx *security.RequestContext, request core.NBAgentRequest, provider services_server.ObservabilityProvider, fields []string, indices map[string]string) (string, error) {
 	prompt := buildCanonicalLogQueryPrompt(provider, fields, indices)
 	messages := buildLogIntentMessages(prompt, request)
 
-	res, err := core.GenerateAndTrackLLMContent(ctx, request.UserId, request.AccountId, request.ConversationId, request.MessageId, request.AgentId, false, messages, true)
+	summaryCtx := security.NewRequestContext(
+		context.WithValue(ctx.GetContext(), core.ContextKeyModelTier, core.ModelTierSummary),
+		ctx.GetSecurityContext(),
+		ctx.GetLogger(),
+		ctx.GetTracer(),
+		ctx.GetMeter(),
+	)
+	res, err := core.GenerateAndTrackLLMContent(summaryCtx, request.UserId, request.AccountId, request.ConversationId, request.MessageId, request.AgentId, false, messages, true)
 	if err != nil {
 		return "", err
 	}

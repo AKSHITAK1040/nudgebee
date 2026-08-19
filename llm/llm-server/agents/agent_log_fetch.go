@@ -774,11 +774,14 @@ func saveLogsToWorkspace(ctx *security.RequestContext, accountId, conversationId
 	body := flattenLogsToJSONL(logs)
 	filename := fmt.Sprintf("logs_%s_%d.txt", label, time.Now().UnixNano())
 	wm := workspace.NewWorkspaceManager()
-	if err := wm.SaveFile(ctx, accountId, conversationId, filename, body); err != nil {
-		ctx.GetLogger().Warn("fetch_logs: failed to save logs to workspace", "error", err, "file", filename)
+	saveStart := time.Now()
+	err := wm.SaveFile(ctx, accountId, conversationId, filename, body)
+	saveDuration := time.Since(saveStart)
+	if err != nil {
+		ctx.GetLogger().Warn("fetch_logs: failed to save logs to workspace", "error", err, "file", filename, "duration", saveDuration.String())
 		return "", body, nil
 	}
-	ctx.GetLogger().Info("fetch_logs: logs saved", "file", filename, "bytes", len(body), "raw_bytes", len(logs), "format", logsLayout(logs, body))
+	ctx.GetLogger().Info("fetch_logs: logs saved", "file", filename, "bytes", len(body), "raw_bytes", len(logs), "format", logsLayout(logs, body), "duration", saveDuration.String())
 	return filename, body, []toolcore.NBToolResponseReference{
 		{
 			Text:        filename,

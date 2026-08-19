@@ -898,7 +898,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	if status == "" {
 		status = guessAgentStatusFromResponse(response)
 	}
-	ctx.GetLogger().Info("agentexecutor: operation metrics", "agent", agent.GetName(), "status", status)
+	ctx.GetLogger().Info("agentexecutor: operation metrics", "agent", agent.GetName(), "status", status, "duration_seconds", time.Since(start).Seconds())
 	switch status {
 	case AgentExecutionStatusFail:
 		common.MetricsAgentOperationsTotal(agentName, "fail", accountID)

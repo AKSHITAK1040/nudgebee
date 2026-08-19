@@ -296,6 +296,32 @@ type appConfig struct {
 	// uncapped thinking (budget -1), where there is no budget to derive a deadline from.
 	LlmProviderTTFTTimeoutMaxSeconds int `mapstructure:"llm_provider_ttft_timeout_max_seconds"`
 
+	// Global default sustained-generation timeout in seconds. Applies only when a
+	// provider is explicitly enabled via
+	// LLM_PROVIDER_SUSTAINED_GEN_TIMEOUT_ENABLED_<PROVIDER>=true and does NOT have
+	// its own LLM_PROVIDER_SUSTAINED_GEN_TIMEOUT_SECONDS_<PROVIDER> override. See
+	// getLLMSustainedGenTimeout in agents/core/llm_config.go. Unlike the TTFT
+	// watchdog above (which only guards the gap before the first streamed token),
+	// this watchdog cancels and retries the same model if TOTAL call duration
+	// exceeds this deadline regardless of whether streaming already started —
+	// guards against a call that starts streaming normally and then keeps
+	// generating far longer than a ReAct decision step ever should.
+	//
+	// This is a FLOOR, not the literal deadline used at runtime: a thinking-aware
+	// TTFT deadline can exceed this flat value on higher thinking levels, which
+	// would silently make TTFT unreachable for those calls. sustainedGenDeadlineSeconds
+	// (agents/core/llm_common.go) layers the actual deadline on top of both this
+	// floor and the TTFT deadline — see LlmProviderSustainedGenHeadroomSeconds below.
+	LlmProviderSustainedGenTimeoutSeconds int `mapstructure:"llm_provider_sustained_gen_timeout_seconds"`
+
+	// Fixed safety margin added on top of max(TTFT deadline, LlmProviderSustainedGenTimeoutSeconds)
+	// when computing the actual sustained-gen deadline for a call (see
+	// sustainedGenDeadlineSeconds in agents/core/llm_common.go). Guarantees the TTFT
+	// watchdog always gets its full configured chance to fire before sustained-gen
+	// can, so the two watchdogs are explicitly layered rather than racing on two
+	// independently-configured values (PR #36332 review).
+	LlmProviderSustainedGenHeadroomSeconds int `mapstructure:"llm_provider_sustained_gen_headroom_seconds"`
+
 	// LlmServerGlobalRetryBudgetMinutes caps the total time spent on a single agent step,
 	// including the initial call and all subsequent retries/continuations.
 	// This ensures a single step doesn't consume the entire request budget.
@@ -584,6 +610,21 @@ type appConfig struct {
 	// LogAgentV2Enabled gates the canonical, provider-independent fetch_logs
 	// agent (FetchLogsAgentV2). Global per-deploy toggle; default false.
 	LogAgentV2Enabled bool `mapstructure:"llm_server_log_agent_v2_enabled"`
+	// LogsV3CanonicalFastPathEnabled gates logs_v3's ROUTINE-mode canonical-JSON
+	// fast path (canonicalQueryAuthoringForRoutine / preBuiltCanonicalQuery /
+	// FetchLogsAgentV2.ExecuteV3, all in agent_log_v3.go): when the ReAct loop
+	// already knows namespace + app/pod, it builds the canonical `{"where": ...}`
+	// query itself and calls fetch_logs_v3 with it directly, skipping the
+	// tool's internal NL-translation LLM call. Global per-deploy toggle,
+	// default true — logs_v3 itself is already the safety gate (a distinct,
+	// opt-in agent name not wired into production routing), so this exists for
+	// a clean on/off A/B and instant rollback of just this sub-feature without
+	// reverting the whole agent. When false: the prompt never advertises the
+	// canonical-JSON option (fastPathAppAnchor and the tool description fall
+	// back to their NL-only phrasing) and fetchLogsV3Tool.Call never inspects
+	// tool_input shape — every fetch goes through the original NL →
+	// generateCanonicalLogQuery path unchanged.
+	LogsV3CanonicalFastPathEnabled bool `mapstructure:"llm_server_logs_v3_canonical_fast_path_enabled"`
 	// K8sOrchestratorMode selects which K8s orchestrator implementation the
 	// router-selected k8s_orchestrator runs. Boot-time, per-deploy (rollback =
 	// change + redeploy). Post-#32503 Phase 1 only two modes remain:
@@ -1207,6 +1248,8 @@ func init() {
 	viper.SetDefault("llm_provider_ttft_timeout_seconds", 30)
 	viper.SetDefault("llm_provider_ttft_thinking_tokens_per_sec", 100) // 0 disables the thinking adjustment
 	viper.SetDefault("llm_provider_ttft_timeout_max_seconds", 240)
+	viper.SetDefault("llm_provider_sustained_gen_timeout_seconds", 60)
+	viper.SetDefault("llm_provider_sustained_gen_headroom_seconds", 30)
 
 	// SLM specific configs for agents
 	viper.SetDefault("llm_provider_promql_query", "")
@@ -1306,6 +1349,7 @@ func init() {
 	viper.SetDefault("llm_server_workspace_command_timeout", (WorkspaceHTTPClientTimeout - workspaceCommandTimeoutBuffer).String())
 	viper.SetDefault("llm_server_fs_evidence_recall_enabled", true)
 	viper.SetDefault("llm_server_log_agent_v2_enabled", true)
+	viper.SetDefault("llm_server_logs_v3_canonical_fast_path_enabled", true)
 	viper.SetDefault("llm_server_log_validate_request_enabled", true)
 	viper.SetDefault("llm_server_drop_extra_agent_mentions", false)
 	viper.SetDefault("llm_server_trace_agent_v2_enabled", false)
