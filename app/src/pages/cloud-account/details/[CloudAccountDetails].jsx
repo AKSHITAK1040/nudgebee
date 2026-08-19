@@ -774,7 +774,7 @@ const CloudAccounts = () => {
                   )}
                 </>
               )}
-              {selectedSubTab === 2 && <RdsInstances accountId={accountId} serviceName={getServiceName()} stickyColumnIndex={'7'} />}
+              {selectedSubTab === 2 && <RdsInstances accountId={accountId} serviceName={getServiceName()} stickyColumnIndex={'8'} />}
               {selectedSubTab === 3 && <CloudAccountEvents accountId={accountId} serviceName={getServiceName()} stickyColumnIndex={'8'} />}
             </>
           )}
