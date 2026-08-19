@@ -38,6 +38,7 @@ class RecommendationData:
     container: str
     priority: int
     content: List[Dict[str, Any]]
+    pods_count: int = 1
 
 
 @dataclass
@@ -264,6 +265,12 @@ def finalize_workload_rows(
     workload's category and severity. Severity takes the worst container by
     severity rank, which is not the same as the highest priority number.
 
+    Savings are floored at zero here, once every container has been merged, so a
+    workload that is over-provisioned on one resource and under-provisioned on
+    another still reports its true net. A workload whose net is negative costs
+    more to apply, so it is a reliability finding worth no savings rather than a
+    negative number to subtract from the tenant's savings headline.
+
     Dropped workloads must also leave the archive keep-set the caller builds from
     this dict, otherwise the rows already stored for them stay Open forever.
 
@@ -272,6 +279,7 @@ def finalize_workload_rows(
     for resource_id, row in recommendations_to_insert.items():
         row["category"] = classify_pod_right_sizing_category(json.loads(row["recommendation"]))
         row["severity"] = get_severity(worst_priority(priorities_by_resource[resource_id]))
+        row["estimated_savings"] = max(row["estimated_savings"], 0.0)
 
     no_change_resource_ids = [
         resource_id
@@ -285,19 +293,29 @@ def finalize_workload_rows(
 
 
 def calculate_container_savings(
-    content: List[Dict[str, Any]], cpu_cost_per_hour: float, memory_cost_per_hour: float
+    content: List[Dict[str, Any]],
+    cpu_cost_per_hour: float,
+    memory_cost_per_hour: float,
+    pods_count: int = 1,
 ) -> float:
     """Calculate estimated monthly savings for a container based on CPU and memory recommendations.
+
+    Requests are per pod, so the per-pod delta is multiplied by the number of running
+    pods to get what the workload actually saves. Without it a 20-replica Deployment
+    reports a twentieth of its real saving.
 
     Args:
         content: List of resource recommendations (CPU and memory)
         cpu_cost_per_hour: Cost per CPU core per hour
         memory_cost_per_hour: Cost per GB of memory per hour
+        pods_count: Running pods for the workload; the per-pod saving is scaled by this
 
     Returns:
-        Estimated monthly savings in dollars
+        Estimated monthly savings in dollars, which may be negative when the
+        recommendation raises requests
     """
     saving = 0.0
+    replicas = max(pods_count, 1)
 
     for rec in content:
         # Skip if insufficient data
@@ -319,7 +337,7 @@ def calculate_container_savings(
             # CPU costs are per core
             original_hourly_cost = allocated_request * cpu_cost_per_hour
             new_hourly_cost = recommended_request * cpu_cost_per_hour
-            saving += (original_hourly_cost - new_hourly_cost) * 24 * 30  # Monthly savings
+            saving += (original_hourly_cost - new_hourly_cost) * 24 * 30 * replicas  # Monthly savings
 
         elif resource_type == "memory":
             # Memory costs are per GB (values in bytes, convert to GB)
@@ -327,7 +345,7 @@ def calculate_container_savings(
             recommended_gb = recommended_request / (1024 * 1024 * 1024)
             original_hourly_cost = original_gb * memory_cost_per_hour
             new_hourly_cost = recommended_gb * memory_cost_per_hour
-            saving += (original_hourly_cost - new_hourly_cost) * 24 * 30  # Monthly savings
+            saving += (original_hourly_cost - new_hourly_cost) * 24 * 30 * replicas  # Monthly savings
 
     return saving
 
@@ -829,7 +847,9 @@ def store_krr_recommendations_to_db(
                     memory_cost_per_hour = resource_id_row["memory_cost_per_gb"]
 
                 # Calculate savings using the helper function
-                estimated_savings = calculate_container_savings(rec.content, cpu_cost_per_hour, memory_cost_per_hour)
+                estimated_savings = calculate_container_savings(
+                    rec.content, cpu_cost_per_hour, memory_cost_per_hour, rec.pods_count
+                )
 
                 # Create recommendation record same as collector-server
                 recommendation = {
@@ -1015,6 +1035,7 @@ def build_recommendation_data_from_scans(rightsizing_recommendations, ctx_logger
                     container=scan.object.container,
                     priority=scan.priority,
                     content=content,
+                    pods_count=scan.object.current_pods_count,
                 )
                 recommendations.append(recommendation)
 
