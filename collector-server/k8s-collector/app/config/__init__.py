@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     ACTION_API_SERVER_TOKEN: str
     SERVICE_API_SERVER_URL: str = "http://services-server:8000"
     COLLECTOR_MESSAGE_SIZE_THRESHOLD_MB: int = 100
+    # Close the agent's open events for a workload once all of its pods are ready
+    # again. Off = the agent's findings (crashloop, OOM, ...) have no resolve path
+    # at all and stay open until their resource is deleted.
+    EVENT_CLOSE_ON_WORKLOAD_RECOVERY: bool = True
     K8S_COLLECTOR_CONSUMER_MAX_WORKERS: int = 2
     K8S_COLLECTOR_CONSUMER_HEARTBEAT: int = 120
     LLM_SERVER_ENDPOINT: str = "http://llm-server:8000"
