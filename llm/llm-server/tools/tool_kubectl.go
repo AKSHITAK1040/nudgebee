@@ -9,10 +9,37 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/google/shlex"
 	"github.com/pkg/errors"
 )
 
 const ToolExecuteKubectlCommand = "kubectl_execute"
+
+var kubectlGlobalFlagsWithValue = map[string]bool{
+	"--as": true, "--as-group": true, "--as-uid": true,
+	"--cache-dir": true, "--certificate-authority": true,
+	"--client-certificate": true, "--client-key": true,
+	"--cluster": true, "--context": true, "--kubeconfig": true,
+	"--namespace": true, "-n": true, "--request-timeout": true,
+	"--server": true, "--tls-server-name": true, "--token": true,
+	"--user": true, "-v": true,
+}
+
+var kubectlReadVerbs = map[string]bool{
+	"api-resources": true, "api-versions": true, "cluster-info": true,
+	"describe": true, "diff": true, "explain": true, "get": true,
+	"logs": true, "options": true, "top": true, "version": true,
+	"wait": true,
+}
+
+var kubectlCreateVerbs = map[string]bool{"create": true, "expose": true, "run": true}
+
+var kubectlUpdateVerbs = map[string]bool{
+	"annotate": true, "apply": true, "autoscale": true, "cordon": true,
+	"drain": true, "edit": true, "label": true, "patch": true,
+	"replace": true, "scale": true, "set": true, "taint": true,
+	"uncordon": true,
+}
 
 func init() {
 	// Phase 3d (#32503): the retired KubectlAgent used the short handle "kubectl".
@@ -949,6 +976,120 @@ func (m KubectlExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestCont
 
 	`
 	return prompt, nil
+}
+
+// inferKubectlVerbType handles kubectl's unambiguous top-level verbs without
+// paying for an LLM classification. Unknown and context-dependent verbs still
+// fall through to InferToolRequestTypePrompt so the safety posture remains
+// fail-closed.
+func inferKubectlVerbType(command string) core.ToolRequestType {
+	if hasUnquotedShellSyntax(command) {
+		return ""
+	}
+	parts, err := shlex.Split(strings.TrimSpace(command))
+	if err != nil || len(parts) == 0 {
+		return ""
+	}
+	// kubectl_execute does not prepend the executable. If the input names a
+	// different command (or omits kubectl), its semantics are outside this
+	// classifier and must go through the existing LLM fallback.
+	if !strings.EqualFold(parts[0], "kubectl") {
+		return ""
+	}
+	parts = parts[1:]
+	if len(parts) == 0 {
+		return ""
+	}
+	// Help/version flags before a `--` separator describe kubectl itself and
+	// cannot mutate the cluster. Anything after `--` belongs to an exec payload.
+	for _, part := range parts {
+		if part == "--" {
+			break
+		}
+		if part == "--help" || part == "-h" || part == "--version" {
+			return core.ToolRequestTypeRead
+		}
+	}
+
+	// Global flags can precede the verb. Only skip forms whose boundary is
+	// unambiguous; an unfamiliar flag falls back to the LLM classifier.
+	for len(parts) > 0 && strings.HasPrefix(parts[0], "-") {
+		flag := parts[0]
+		parts = parts[1:]
+		if strings.Contains(flag, "=") || flag == "--help" || flag == "-h" || flag == "--version" {
+			continue
+		}
+		if !kubectlGlobalFlagsWithValue[flag] || len(parts) == 0 {
+			return ""
+		}
+		parts = parts[1:]
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+
+	verb := strings.ToLower(parts[0])
+	if kubectlReadVerbs[verb] {
+		return core.ToolRequestTypeRead
+	}
+
+	if kubectlCreateVerbs[verb] {
+		return core.ToolRequestTypeCreate
+	}
+	if kubectlUpdateVerbs[verb] {
+		return core.ToolRequestTypeUpdate
+	}
+	if verb == "delete" {
+		return core.ToolRequestTypeDelete
+	}
+
+	return ""
+}
+
+// hasUnquotedShellSyntax reports command shapes whose overall intent cannot be
+// inferred from one kubectl verb. Operators inside single/double quotes are
+// arguments (for example JSONPath); substitutions remain executable inside
+// double quotes and therefore still require LLM classification.
+func hasUnquotedShellSyntax(command string) bool {
+	var singleQuoted, doubleQuoted, escaped bool
+	for i := 0; i < len(command); i++ {
+		char := command[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if char == '\\' && !singleQuoted {
+			escaped = true
+			continue
+		}
+		if char == '\'' && !doubleQuoted {
+			singleQuoted = !singleQuoted
+			continue
+		}
+		if char == '"' && !singleQuoted {
+			doubleQuoted = !doubleQuoted
+			continue
+		}
+		if singleQuoted {
+			continue
+		}
+		if char == '`' || (char == '$' && i+1 < len(command) && command[i+1] == '(') {
+			return true
+		}
+		if !doubleQuoted && strings.ContainsRune("|&;<>\n\r(){}", rune(char)) {
+			return true
+		}
+	}
+	return singleQuoted || doubleQuoted || escaped
+}
+
+func (m KubectlExecuteTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
+	requestType := inferKubectlVerbType(extractCommandFromToolInput(input))
+	if requestType != "" {
+		return requestType, nil
+	}
+	ctx.GetLogger().Warn("kubectl: verb not recognized by heuristic, falling through to LLM classification", "input", input)
+	return "", nil
 }
 
 func (m KubectlExecuteTool) ConfigSchema(ctx *security.RequestContext) core.ToolConfigSchema {
