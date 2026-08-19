@@ -129,6 +129,17 @@ class TestDiscoveryCleanupScoping(unittest.TestCase):
 
 
 class TestWorkloadRecoveryClose(unittest.TestCase):
+    """The recovery close is DEFAULT OFF (see Configs.EVENT_CLOSE_ON_WORKLOAD_RECOVERY):
+    the readiness signal it uses closes live crashloops. These tests pin the predicate
+    it will use once a sound signal replaces `ready_pods == total_pods`, so the
+    scoping work already done is not lost when it is re-enabled.
+    """
+
+    def setUp(self):
+        enabled = mock.patch.object(dh.Configs, "EVENT_CLOSE_ON_WORKLOAD_RECOVERY", True)
+        enabled.start()
+        self.addCleanup(enabled.stop)
+
     # utc_from_epoch_millis() returns NAIVE UTC and WorkloadDetails.last_seen carries
     # its .isoformat(), so naive is the shape production actually delivers.
     OBSERVED_AT = datetime(2026, 8, 19, 8, 30)
@@ -149,6 +160,9 @@ class TestWorkloadRecoveryClose(unittest.TestCase):
         self.assertEqual(kwargs["params"], [[LIVE_RESOURCE], self.OBSERVED_AT])
         self.assertEqual(kwargs["closing_reason"], "workload_recovered")
         self.assertIn("kubernetes_api_server", kwargs["where_conditions"])
+        # Config-change findings describe a past event, not a recoverable condition:
+        # a healthy workload is their normal state, so recovery must not touch them.
+        self.assertIn("finding_type = 'issue'", kwargs["where_conditions"])
         # The close is anchored to when the agent OBSERVED the workload healthy,
         # so an event that started after the snapshot survives it.
         self.assertIn("starts_at < %s", kwargs["where_conditions"])
@@ -207,6 +221,13 @@ class TestWorkloadRecoveryClose(unittest.TestCase):
         ):
             dh.close_events_for_recovered_workloads(ACCOUNT, [self._workload(LIVE_RESOURCE, 1, 1)])
         closer.assert_not_called()
+
+    def test_flag_is_off_by_default(self):
+        """Readiness alone closes live crashloops -- nothing may close on it until a
+        sound recovery signal replaces it."""
+        from config import Settings
+
+        self.assertFalse(Settings.model_fields["EVENT_CLOSE_ON_WORKLOAD_RECOVERY"].default)
 
 
 class TestLegacyStatusUpdate(unittest.TestCase):

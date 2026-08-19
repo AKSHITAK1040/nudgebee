@@ -1153,6 +1153,14 @@ def close_events_for_recovered_workloads(cloud_account_id: str, workloads: List[
     (prometheus, datadog, pagerduty, cloud alarms) sends its own resolve and owns its
     own lifecycle; closing those here would overrule the producer.
 
+    Scoped further to `finding_type = 'issue'`. That source also carries
+    `configuration_change` findings ("this resource was changed"), which describe an
+    event in the past rather than a condition that can recover -- a healthy workload
+    is the NORMAL state for them, so recovery closed them within seconds of being
+    raised and they never appeared as open at all. Observed live after the first
+    deploy of this function: two config-change events closed 9 seconds and 0 seconds
+    after they were created.
+
     Only events that START BEFORE the snapshot was taken are closed. `last_seen` is
     the agent's own observation time (update_time on the wire), not the time this
     batch was consumed, so a snapshot that sat in the queue cannot close an event
@@ -1206,7 +1214,10 @@ def close_events_for_recovered_workloads(cloud_account_id: str, workloads: List[
     close_events_with_history(
         cloud_account_id=cloud_account_id,
         where_conditions=(
-            "cloud_resource_id = ANY(%s::uuid[]) " "AND source = 'kubernetes_api_server' " "AND starts_at < %s"
+            "cloud_resource_id = ANY(%s::uuid[]) "
+            "AND source = 'kubernetes_api_server' "
+            "AND finding_type = 'issue' "
+            "AND starts_at < %s"
         ),
         params=[[w.cloud_resource_id for w in recovered], observed_at],
         closing_reason="workload_recovered",
