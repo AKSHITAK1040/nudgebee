@@ -19,6 +19,8 @@ import { usePagination } from '@hooks/usePagination';
 import { toSeverityLevel } from '@utils/common';
 import { hasPermission, hasWriteAccess } from '@lib/auth';
 import apiVm, { SEVERITY_ORDER, VmVulnerability, VmVulnerabilityGroup, VmVulnerabilityGrouping } from '@api1/vm';
+import SecurityFindingPanel from '@components/recommendations/security/SecurityFindingPanel';
+import { fromVmRow } from '@components/recommendations/security/securityFinding';
 import { CellText, joinVmNames, useLatestRequest } from './common';
 import { ds } from '@utils/colors';
 
@@ -199,6 +201,9 @@ const VmVulnerabilities = ({
   const [severity, setSeverity] = useState<string | null>(initialSeverity || null);
   const [grouping, setGrouping] = useState<VmVulnerabilityGrouping | 'all'>('all');
   const [ticketFinding, setTicketFinding] = useState<VmVulnerability | null>(null);
+  // Flat findings had no detail view at all — the scan already stores a
+  // description, EPSS, KEV and advisory links that nothing rendered.
+  const [panelFinding, setPanelFinding] = useState<VmVulnerability | null>(null);
   // Seeded from the scope props so a link that arrives filtered shows its filter
   // in the control that owns it; from then on the dropdown is authoritative, or
   // the filter could never be cleared.
@@ -310,8 +315,10 @@ const VmVulnerabilities = ({
       .filter(Boolean)
       .join(' · ');
     return [
-      ...(accountsById ? [{ component: <CellText text={accountsById[finding.account_id] || finding.account_id} /> }] : []),
-      { component: <SeverityIcon level={toSeverityLevel(finding.severity)} size={14} aria-label={finding.severity} /> },
+      ...(accountsById
+        ? [{ component: <CellText text={accountsById[finding.account_id] || finding.account_id} />, drilldownQuery: { finding } }]
+        : []),
+      { component: <SeverityIcon level={toSeverityLevel(finding.severity)} size={14} aria-label={finding.severity} />, drilldownQuery: { finding } },
       { component: <CellText text={payload.vuln_id} subtext={vulnSubtext || undefined} mono /> },
       { component: <CellText text={payload.package?.name} subtext={packageSubtext || undefined} /> },
       { component: <CellText text={payload.package?.version} mono /> },
@@ -385,6 +392,7 @@ const VmVulnerabilities = ({
       totalRows={total}
       onPageChange={changePage}
       showExpandable={isGrouped}
+      onRowClick={isGrouped ? undefined : (query: any) => query?.finding && setPanelFinding(query.finding)}
       expandable={
         isGrouped
           ? {
@@ -404,6 +412,19 @@ const VmVulnerabilities = ({
       emptyHeading='No open vulnerabilities'
       emptySubHeading='Findings appear here after a VM package scan matches installed packages against the CVE database.'
       showUpdatedEmptyData={true}
+    />
+  );
+
+  const findingPanel = (
+    <SecurityFindingPanel
+      open={Boolean(panelFinding)}
+      onClose={() => setPanelFinding(null)}
+      finding={panelFinding ? fromVmRow(panelFinding) : null}
+      accountName={panelFinding ? accountsById?.[panelFinding.account_id] : undefined}
+      scopeAccountId={accountId}
+      onCreateTicket={() => {
+        if (panelFinding) setTicketFinding(panelFinding);
+      }}
     />
   );
 
@@ -435,6 +456,7 @@ const VmVulnerabilities = ({
           <ListingLayout.Body>{table}</ListingLayout.Body>
         </ListingLayout>
         {ticketModal}
+        {findingPanel}
       </Box>
     );
   }
@@ -502,6 +524,7 @@ const VmVulnerabilities = ({
         <ListingLayout.Body>{table}</ListingLayout.Body>
       </ListingLayout>
       {ticketModal}
+      {findingPanel}
     </Box>
   );
 };
