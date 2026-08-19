@@ -12,6 +12,7 @@ poller's own daemon thread — nothing new lands on the shared event loop.
 """
 
 import logging
+import re
 import threading
 import time
 import uuid
@@ -55,6 +56,12 @@ _SETTLED_TASK_STATUSES = ("complete", "error")
 
 # Slack caps task_update fields at 256 chars.
 _TASK_FIELD_LIMIT = 250
+# Task titles favor the LLM's own thought over the bare tool name (reverting
+# part of b9bb0ddb54's "bare tool titles" simplification) so a step reads as
+# what it's actually doing, and so two rows sharing a tool_name (e.g. the
+# same recommendation executed twice) don't render as identical titles.
+# Hard-capped since thought is free LLM prose with no length contract.
+_TASK_TITLE_CHAR_LIMIT = 58
 # Header shown from panel creation until the first tool title arrives.
 _INITIAL_HEADER = "Thinking"
 # Synthetic first task so the panel opens already populated (Slack renders a
@@ -147,35 +154,45 @@ _FLUSH_FETCH_TIMEOUT_SECONDS = 5
 
 
 def _flush_final_delta(common_service, entry, team_id, channel_id, stream_ts, since):
-    """Best-effort catch-up fetch before the stream closes.
+    """Closes out the panel: always relabels the synthetic placeholder task
+    back to _INITIAL_TASK_TITLE/complete, plus a best-effort catch-up fetch
+    for any tool call that hasn't been sent yet.
 
     Uses the turn-start cursor (not the poller's own, thread-local advancing
-    one) and a fresh dedupe map, so it re-sends every tool call's current
-    status regardless of what was already sent — harmless (Slack task_update
-    is an upsert by id) and guarantees nothing from this turn is missed,
-    including when the poller closes the panel itself (a terminal status can
-    still be read a beat before the turn's own final write, e.g. on a reused
-    session where a stale prior-turn row briefly makes it look active).
+    one) and a fresh dedupe map, so a successful catch-up re-sends every tool
+    call's current status regardless of what was already sent — harmless
+    (Slack task_update is an upsert by id) and guarantees nothing from this
+    turn is missed, including when the poller closes the panel itself (a
+    terminal status can still be read a beat before the turn's own final
+    write, e.g. on a reused session where a stale prior-turn row briefly
+    makes it look active).
 
     Called both from the poller's own finally block and, via
     stop_progress_stream, inline from the Slack response handlers on the
     shared event loop — the fetch uses a tight timeout so the latter case
-    can't gate the user's answer on api-server latency. A catch-up that
-    misses is a cosmetic loss, not a correctness one.
+    can't gate the user's answer on api-server latency. The catch-up fetch
+    can therefore fail or time out under real load; when it does, the
+    placeholder relabel must still go out on its own; skipping the whole
+    flush left the panel stuck showing the mid-run "investigating..." title
+    forever (seen live 2026-08-19). A missed catch-up tool call is a
+    cosmetic loss, not a correctness one — but a missed placeholder relabel
+    isn't.
     """
-    if not since:
-        return
     try:
         bot = common_service.get_slack_installation(team_id)
         if not bot:
             return
-        delta = _fetch_delta(entry, since, _FLUSH_FETCH_TIMEOUT_SECONDS)
-        if delta is None:
-            return
-        chunks = _build_chunks(delta.get("tool_calls"), {})
-        for chunk in chunks:
-            if chunk["status"] not in _SETTLED_TASK_STATUSES:
-                chunk["status"] = "complete"
+        chunks = []
+        if since:
+            # Isolated from the guaranteed finalize below: even an outright
+            # exception here (not just a None/timeout return) must not skip
+            # relabeling the placeholder.
+            try:
+                delta = _fetch_delta(entry, since, _FLUSH_FETCH_TIMEOUT_SECONDS)
+                if delta is not None:
+                    chunks = _build_chunks(delta.get("tool_calls"), {}, force_settle=True)
+            except Exception as e:
+                LOG.debug("thinking steps: final catch-up fetch failed: %s", e)
         chunks.append(
             {"type": "task_update", "id": _INITIAL_TASK_ID, "title": _INITIAL_TASK_TITLE, "status": "complete"}
         )
@@ -293,8 +310,16 @@ def _stream_updates(common_service, cache, entry, thread_ts, token, stream_ts, s
     # turn for a moment after this one starts — llm-server's async endpoint
     # returns 202 as soon as the request is queued, before a worker actually
     # dequeues it and flips the row's status. A terminal status is only
-    # trusted once this turn has shown up as real activity (a message or
-    # tool call), which lands in the same write as the status flip.
+    # trusted once this turn has shown up as real activity: a tool call, or a
+    # message with a real response body. A bare new message row is NOT
+    # enough on its own — llm-server inserts the human message row with an
+    # empty response and writes its ack_message (~seconds in) via a separate
+    # update that never touches response/status, well before the real worker
+    # picks up the request. Trusting that bare row tripped this guard on the
+    # ack and closed the panel before the investigation even started (seen
+    # live 2026-08-19: panel froze on "Understanding your query" for a
+    # 5-minute, 19-tool-call turn). A populated response is only ever written
+    # once real generation has happened, which is what this guard needs.
     turn_activity_seen = False
     deadline = time.monotonic() + settings.slack.thinking_steps_max_minutes * 60
 
@@ -325,7 +350,7 @@ def _stream_updates(common_service, cache, entry, thread_ts, token, stream_ts, s
             continue
         failures = 0
         since = delta.get("cursor") or since
-        if delta.get("messages") or delta.get("tool_calls"):
+        if delta.get("tool_calls") or any((m.get("response") or "").strip() for m in delta.get("messages") or []):
             turn_activity_seen = True
 
         chunks = _build_chunks(delta.get("tool_calls"), sent_statuses)
@@ -408,20 +433,27 @@ def _fetch_delta(entry, since, timeout=10):
         return None
 
 
-def _build_chunks(tool_calls, sent_statuses):
+def _build_chunks(tool_calls, sent_statuses, force_settle=False):
+    """``force_settle`` mirrors what the final catch-up flush is about to do to
+    each chunk's status (see _flush_final_delta) so the title truncation
+    decision below - full text while in_progress, capped once settled -
+    matches the status the task will actually be left showing, instead of the
+    still-in_progress status this row happens to have in the DB right now."""
     chunks = []
     for row in sorted(tool_calls or [], key=lambda r: r.get("updated_at") or ""):
         row_id = row.get("id")
         if not row_id:
             continue
         status = _TOOL_STATUS_TO_TASK_STATUS.get((row.get("status") or "").upper(), "in_progress")
+        if force_settle and status not in _SETTLED_TASK_STATUSES:
+            status = "complete"
         if sent_statuses.get(row_id) == status or sent_statuses.get(row_id) in _SETTLED_TASK_STATUSES:
             continue
         chunks.append(
             {
                 "type": "task_update",
                 "id": row_id,
-                "title": _task_title(row.get("tool_name")),
+                "title": _task_title(row.get("tool_name"), row.get("thought"), status),
                 "status": status,
             }
         )
@@ -433,9 +465,92 @@ def _is_pending(stream_ts):
     return isinstance(stream_ts, str) and stream_ts.startswith(_STREAM_PENDING_PREFIX)
 
 
-def _task_title(tool_name):
-    title = (tool_name or "Working").replace("_", " ").strip() or "Working"
-    return (title[:1].upper() + title[1:])[:_TASK_FIELD_LIMIT]
+# Verbs whose gerund doubles the final consonant (run -> running, not runing).
+# Not exhaustive English grammar - just the short common verbs likely to show
+# up in an SRE/DevOps thought, since a title is cosmetic and a rare miss here
+# is harmless.
+_GERUND_DOUBLES_CONSONANT = {"run", "scan", "stop", "get", "set", "put", "plan", "map", "tag", "log", "drop"}
+
+
+def _gerund(verb):
+    verb = verb.lower()
+    if verb in _GERUND_DOUBLES_CONSONANT:
+        return verb + verb[-1] + "ing"
+    if verb.endswith("ie"):
+        return verb[:-2] + "ying"
+    if verb.endswith("e") and not verb.endswith("ee"):
+        return verb[:-1] + "ing"
+    return verb + "ing"
+
+
+# LLM thoughts default to narrating intent ("I will...", "Let's...", "I need
+# to...") rather than stating the action, which reads fine as an internal
+# monologue but wastes the little width a Slack task title has. Rewritten to
+# lead with the action itself instead, mirroring the same convention applied
+# to this assistant's own status text.
+_DELIBERATION_VERB_LEAD_IN = re.compile(
+    r"^(?:let[’']s|let us|let me|i will|i[’']ll|i need to|i[’']m going to)\s+(\w+)\s*", re.IGNORECASE
+)
+# These have nothing to convert - the real verb is already the next word
+# ("I have identified"/"I've identified", "I attempted") - just drop the
+# subject in front of it. The bare "I <verb>" form (no have/'ve) is only
+# safe to drop when <verb> is past tense ("I attempted" -> "Attempted..."):
+# present-tense/modal openers ("I am", "I can", "I should") read as broken
+# English with the subject removed, so those are left alone.
+_DELIBERATION_STRIP_LEAD_INS = (
+    re.compile(r"^i(?:\s+have|[’']ve)\s+", re.IGNORECASE),
+    re.compile(r"^i\s+(?=\w+ed\b)", re.IGNORECASE),
+)
+
+
+def _drop_deliberation_prefix(thought):
+    match = _DELIBERATION_VERB_LEAD_IN.match(thought)
+    if match:
+        rewritten = _gerund(match.group(1)) + " " + thought[match.end() :]
+        return rewritten.rstrip()
+    for pattern in _DELIBERATION_STRIP_LEAD_INS:
+        match = pattern.match(thought)
+        if match:
+            return thought[match.end() :]
+    return thought
+
+
+_AND_WORD = re.compile(r"\band\b", re.IGNORECASE)
+# Backticks/asterisks/underscores wrapping a word are markdown syntax
+# ("`code`", "*bold*", "_word_", "__bold__") and read as noise in a title
+# (no markdown support in a Slack task title). But an underscore between two
+# alphanumerics is the word separator in a snake_case identifier
+# ("cloud_command") - dropping it would collapse it into an unreadable
+# run-on - so only strip these characters where they aren't sandwiched
+# between alphanumeric characters, i.e. where they're wrapping rather than
+# embedded.
+_MARKDOWN_WRAPPER_CHARS = re.compile(r"(?<![A-Za-z0-9])[`*_]+|[`*_]+(?![A-Za-z0-9])")
+
+
+def _task_title(tool_name, thought=None, status=None):
+    thought = " ".join((thought or "").split())
+    if thought:
+        title = _drop_deliberation_prefix(thought) or thought
+    else:
+        title = (tool_name or "Working").replace("_", " ").strip() or "Working"
+    title = _AND_WORD.sub("&", title)
+    title = _MARKDOWN_WRAPPER_CHARS.sub("", title) or title
+    title = title[:1].upper() + title[1:]
+    # While a task is actively in progress, show the LLM's full thought
+    # (still hard-capped by Slack's field limit below) instead of the
+    # cosmetic cap - it's the one row the user is actually watching right
+    # now. Once settled, cap it so the panel stays compact.
+    if status != "in_progress" and len(title) > _TASK_TITLE_CHAR_LIMIT:
+        # Back up to the last full word rather than cutting mid-word ("clu…")
+        # - drop the partial word entirely instead of showing a fragment of
+        # it. Falls back to the raw cut only when there's no word boundary to
+        # use (one long unbroken token).
+        truncated = title[: _TASK_TITLE_CHAR_LIMIT - 1]
+        last_space = truncated.rfind(" ")
+        if last_space > 0:
+            truncated = truncated[:last_space]
+        title = truncated.rstrip() + "…"
+    return title[:_TASK_FIELD_LIMIT]
 
 
 def _stop_stream(common_service, team_id, channel_id, stream_ts):
