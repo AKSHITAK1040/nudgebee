@@ -49,10 +49,10 @@ type LogQueryAgent struct {
 // (the logs tab's "Select an Index" dropdown). Elasticsearch field sets are
 // per-index, so the selection has to reach label discovery, not just the final
 // query: overwriting the resolved provider's DefaultIndex is what makes
-// fetchLabelsAndIndices → QueryLogLabels scope its fetch_index lookup to the
-// selected index, so the generator is shown the fields that actually exist
-// there instead of the account default's. Ignored for backends with no index
-// concept (Loki, Pinot, …), which have no DefaultIndex to speak of.
+// fetchLabelsAndIndices → QueryLogLabels scope its field lookup to the selected
+// index, so the generator is shown the fields that actually exist there instead
+// of the account default's. Ignored for backends with no index concept (Loki,
+// Pinot, …), which have no DefaultIndex to speak of.
 func NewLogQueryAgent(accountId, requestedProvider, requestedIndex string) *LogQueryAgent {
 	provider, err := tools.GetLogProviderWithOverride(accountId, requestedProvider)
 	// Empty provider (or unresolved) means no services-server log backend —
