@@ -4,6 +4,7 @@ import apiHome from '@api1/home';
 import KubernetesSecurity from '@components/recommendations/KubernetesSecurity';
 import KubernetesCisSecurityV2 from '@components/recommendations/KubernetesCisSecurityV2';
 import VmVulnerabilities from '@components/vm/VmVulnerabilities';
+import CloudPostureView from '@components/recommendations/security/CloudPostureView';
 import FilterDropdown from '@ui/FilterDropdown';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import { Skeleton } from '@ui/Skeleton';
@@ -11,12 +12,21 @@ import { ds } from '@utils/colors';
 
 const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
-/** VM accounts are SelfHosted cloud_accounts; everything else can carry k8s scan findings. */
-const VM_PROVIDER = 'SelfHosted';
+/**
+ * Which accounts a sub-tab can have findings on, by `account_type`.
+ *
+ * Scoping by type rather than by cloud_provider matters: the k8s tabs used to
+ * offer every non-SelfHosted account, so the eleven cloud accounts were
+ * selectable and always returned an empty table. Verified against dev — no
+ * cloud-typed account carries image-scan or CIS findings, and no k8s-typed
+ * account carries an aws_/azure_/gcp_ posture rule — so the split is clean.
+ */
+const TAB_ACCOUNT_TYPE = ['kubernetes', 'kubernetes', 'vm', 'cloud'] as const;
 
 interface AccountInfo {
   name: string;
   provider: string;
+  type: string;
 }
 
 /**
@@ -38,7 +48,11 @@ const SecurityView = ({ subTab = 0 }: { subTab?: number }) => {
         // getCloudAccounts swallows its own failures and resolves to [], but guard
         // the shape anyway so a non-array never reaches .map().
         const list = Array.isArray(res) ? res : [];
-        setAccounts(Object.fromEntries(list.map((a: any) => [a.id, { name: a.account_name || a.id, provider: a.cloud_provider || '' }])));
+        setAccounts(
+          Object.fromEntries(
+            list.map((a: any) => [a.id, { name: a.account_name || a.id, provider: a.cloud_provider || '', type: a.account_type || '' }])
+          )
+        );
       })
       .catch((err: any) => {
         // Not reachable today, but leaving `accounts` null would strand the tab on
@@ -49,14 +63,16 @@ const SecurityView = ({ subTab = 0 }: { subTab?: number }) => {
   }, []);
 
   const isVmTab = subTab === 2;
+  const isCloudTab = subTab === 3;
+  const accountType = TAB_ACCOUNT_TYPE[subTab] ?? 'kubernetes';
 
   // Accounts the active sub-tab can have findings on.
   const relevantIds = useMemo(() => {
     if (!accounts) return null;
     return Object.entries(accounts)
-      .filter(([, info]) => (isVmTab ? info.provider === VM_PROVIDER : info.provider !== VM_PROVIDER))
+      .filter(([, info]) => info.type === accountType)
       .map(([id]) => id);
-  }, [accounts, isVmTab]);
+  }, [accounts, accountType]);
 
   // Empty selection means "all"; a selection is intersected with the sub-tab's
   // relevant accounts so a picked VM account never leaks into the k8s queries.
@@ -67,13 +83,14 @@ const SecurityView = ({ subTab = 0 }: { subTab?: number }) => {
   }, [relevantIds, selectedAccounts]);
 
   const accountsById = useMemo(() => Object.fromEntries(Object.entries(accounts || {}).map(([id, info]) => [id, info.name])), [accounts]);
+  const providerById = useMemo(() => Object.fromEntries(Object.entries(accounts || {}).map(([id, info]) => [id, info.provider])), [accounts]);
 
   const accountFilterOptions = useMemo(
     () =>
       Object.entries(accounts || {})
-        .filter(([, info]) => (isVmTab ? info.provider === VM_PROVIDER : info.provider !== VM_PROVIDER))
+        .filter(([, info]) => info.type === accountType)
         .map(([id, info]) => ({ label: info.name, value: id, group: info.provider || 'Other' })),
-    [accounts, isVmTab]
+    [accounts, accountType]
   );
 
   // Stable object identity: the reused components key their fetch effects on
@@ -95,6 +112,8 @@ const SecurityView = ({ subTab = 0 }: { subTab?: number }) => {
         <Typography sx={{ fontSize: ds.text.bodyLg, color: ds.gray[600] }}>
           {isVmTab
             ? 'No self-hosted VM accounts connected. Findings appear here once a VM account is added and scanned.'
+            : isCloudTab
+            ? 'No cloud accounts connected. Findings appear here once an AWS, Azure or GCP account is added and scanned.'
             : 'No clusters connected. Findings appear here once a cluster is connected and scanned.'}
         </Typography>
       </Box>
@@ -134,6 +153,7 @@ const SecurityView = ({ subTab = 0 }: { subTab?: number }) => {
         />
       )}
       {isVmTab && <VmVulnerabilities accountId={scopeIds} accountsById={accountsById} leadingFilters={accountFilter} hidePageInset />}
+      {isCloudTab && <CloudPostureView accountId={scopeIds} accountsById={accountsById} providerById={providerById} leadingFilters={accountFilter} />}
     </Box>
   );
 };

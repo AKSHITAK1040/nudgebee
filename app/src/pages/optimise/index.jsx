@@ -88,6 +88,7 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
             { id: 'image-scan', text: 'Image Scan', value: 0, fragment: 'image-scan' },
             { id: 'cis-scan', text: 'CIS Scan', value: 1, fragment: 'cis-scan' },
             { id: 'vm-vulnerabilities', text: 'VM Vulnerabilities', value: 2, fragment: 'vm-vulnerabilities' },
+            { id: 'cloud-posture', text: 'Cloud Posture', value: 3, fragment: 'cloud-posture' },
           ],
         },
         {

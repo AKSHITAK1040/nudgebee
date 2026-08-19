@@ -11,7 +11,7 @@ jest.mock('@api1/home', () => ({
   },
 }));
 
-const lastProps: Record<string, any> = { imageScan: null, cis: null, vm: null };
+const lastProps: Record<string, any> = { imageScan: null, cis: null, vm: null, cloud: null };
 
 jest.mock('@components/recommendations/KubernetesSecurity', () => ({
   __esModule: true,
@@ -52,6 +52,19 @@ jest.mock('@components/vm/VmVulnerabilities', () => ({
   },
 }));
 
+jest.mock('@components/recommendations/security/CloudPostureView', () => ({
+  __esModule: true,
+  default: (props: any) => {
+    lastProps.cloud = props;
+    return (
+      <div data-testid='child-cloud'>
+        {props.leadingFilters}
+        {JSON.stringify(props.accountId)}
+      </div>
+    );
+  },
+}));
+
 jest.mock('@ui/FilterDropdown', () => ({
   __esModule: true,
   default: ({ label, options = [], onSelect }: any) => (
@@ -66,10 +79,15 @@ jest.mock('@shared/icons/CloudIcon', () => ({ __esModule: true, default: () => <
 jest.mock('@ui/Skeleton', () => ({ __esModule: true, Skeleton: () => <div data-testid='skeleton' /> }));
 jest.mock('@utils/colors');
 
+// account_type is what the sub-tabs scope on — cloud_provider only groups the
+// picker. A cloud account and a cluster can both be 'AWS', so the two columns
+// are not interchangeable.
 const ACCOUNTS = [
-  { id: 'k8s-1', account_name: 'prod-cluster', cloud_provider: 'AWS' },
-  { id: 'k8s-2', account_name: 'staging-cluster', cloud_provider: 'GCP' },
-  { id: 'vm-1', account_name: 'vm-fleet', cloud_provider: 'SelfHosted' },
+  { id: 'k8s-1', account_name: 'prod-cluster', cloud_provider: 'K8s', account_type: 'kubernetes' },
+  { id: 'k8s-2', account_name: 'staging-cluster', cloud_provider: 'K8s', account_type: 'kubernetes' },
+  { id: 'vm-1', account_name: 'vm-fleet', cloud_provider: 'SelfHosted', account_type: 'vm' },
+  { id: 'cloud-1', account_name: 'aws-prod', cloud_provider: 'AWS', account_type: 'cloud' },
+  { id: 'cloud-2', account_name: 'gcp-dev', cloud_provider: 'GCP', account_type: 'cloud' },
 ];
 
 beforeEach(() => {
@@ -77,11 +95,12 @@ beforeEach(() => {
   lastProps.imageScan = null;
   lastProps.cis = null;
   lastProps.vm = null;
+  lastProps.cloud = null;
   mockGetCloudAccounts.mockResolvedValue(ACCOUNTS);
 });
 
 describe('SecurityView', () => {
-  it('scopes the Image Scan tab to every non-VM account when nothing is picked', async () => {
+  it('scopes the Image Scan tab to the kubernetes accounts when nothing is picked', async () => {
     render(<SecurityView subTab={0} />);
     await waitFor(() => expect(screen.getByTestId('child-image-scan')).toBeInTheDocument());
     expect(lastProps.imageScan.kubernetes.id).toEqual(['k8s-1', 'k8s-2']);
@@ -102,10 +121,12 @@ describe('SecurityView', () => {
       'k8s-1': 'prod-cluster',
       'k8s-2': 'staging-cluster',
       'vm-1': 'vm-fleet',
+      'cloud-1': 'aws-prod',
+      'cloud-2': 'gcp-dev',
     });
   });
 
-  it('scopes the VM tab to SelfHosted accounts only', async () => {
+  it('scopes the VM tab to vm-typed accounts only', async () => {
     render(<SecurityView subTab={2} />);
     await waitFor(() => expect(screen.getByTestId('child-vm')).toBeInTheDocument());
     expect(lastProps.vm.accountId).toEqual(['vm-1']);
@@ -116,6 +137,20 @@ describe('SecurityView', () => {
     await waitFor(() => expect(screen.getByTestId('filter-Account-count')).toHaveTextContent('2'));
     rerender(<SecurityView subTab={2} />);
     await waitFor(() => expect(screen.getByTestId('filter-Account-count')).toHaveTextContent('1'));
+    rerender(<SecurityView subTab={3} />);
+    await waitFor(() => expect(screen.getByTestId('filter-Account-count')).toHaveTextContent('2'));
+  });
+
+  it('scopes the Cloud Posture tab to cloud-typed accounts, never clusters', async () => {
+    render(<SecurityView subTab={3} />);
+    await waitFor(() => expect(screen.getByTestId('child-cloud')).toBeInTheDocument());
+    expect(lastProps.cloud.accountId).toEqual(['cloud-1', 'cloud-2']);
+  });
+
+  it('gives Cloud Posture the provider of each account so checks can be labelled', async () => {
+    render(<SecurityView subTab={3} />);
+    await waitFor(() => expect(screen.getByTestId('child-cloud')).toBeInTheDocument());
+    expect(lastProps.cloud.providerById).toMatchObject({ 'cloud-1': 'AWS', 'cloud-2': 'GCP' });
   });
 
   it('narrows the scope to the picked account', async () => {
@@ -140,7 +175,7 @@ describe('SecurityView', () => {
   });
 
   it('shows an empty state instead of querying when the tenant has no matching account', async () => {
-    mockGetCloudAccounts.mockResolvedValue([{ id: 'vm-1', account_name: 'vm-fleet', cloud_provider: 'SelfHosted' }]);
+    mockGetCloudAccounts.mockResolvedValue([{ id: 'vm-1', account_name: 'vm-fleet', cloud_provider: 'SelfHosted', account_type: 'vm' }]);
     render(<SecurityView subTab={0} />);
     await waitFor(() => expect(screen.getByTestId('optimise-security-empty')).toBeInTheDocument());
     expect(screen.queryByTestId('child-image-scan')).not.toBeInTheDocument();
