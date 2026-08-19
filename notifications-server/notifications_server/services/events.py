@@ -32,7 +32,6 @@ from notifications_server.services.actions import (
 from notifications_server.services.bot_messages import (
     get_account_selection_prompt,
     get_account_selected_confirmation,
-    get_account_selected_with_context,
     get_account_already_selected,
     get_account_not_accessible_message,
     get_user_not_found_message,
@@ -558,17 +557,15 @@ class Events:
             if slack_user_id:
                 user_display_name = self.common_service.get_slack_user_display_name(team_id, slack_user_id)
 
-            blocks, selection_prompt = self._get_cluster_confirmation_blocks(valid_accounts, user_display_name)
+            blocks, _ = self._get_cluster_confirmation_blocks(valid_accounts, user_display_name)
 
             selection_msg_ts = self.common_service.slack_reply_in_thread_as_blocks(
                 channel_id, team_id, thread_ts, blocks
             )
 
-            # Store the selection message timestamp and prompt for later update
+            # Store the selection message timestamp for later update
             if selection_msg_ts:
-                self.cache.update_event_entry(
-                    thread_ts, selection_msg_ts=selection_msg_ts, selection_prompt=selection_prompt
-                )
+                self.cache.update_event_entry(thread_ts, selection_msg_ts=selection_msg_ts)
 
         except Exception as e:
             LOG.error("Failed to request cluster confirmation: %s", e, exc_info=True)
@@ -785,14 +782,11 @@ class Events:
 
             # Update the selection message instead of sending a new one
             selection_msg_ts = cached_entry.get("selection_msg_ts") if cached_entry else None
-            selection_prompt = cached_entry.get("selection_prompt") if cached_entry else None
             url = f"{settings.base_url}/ask-nudgebee?accountId={account_id}&session_id={channel_id}-{thread_ts}"
 
-            if selection_prompt:
-                body = get_account_selected_with_context(selection_prompt, account_name)
-            else:
-                body = get_account_selected_confirmation(account_name)
-            confirmation_message = f"{body}\n<{url}|View in {settings.urls.branding_name}>"
+            confirmation_message = (
+                f"Got it! Working with *{account_name}*. <{url}|View in {settings.urls.branding_name}>"
+            )
 
             if selection_msg_ts:
                 # Replace the selection message with confirmation
@@ -801,6 +795,7 @@ class Events:
                     team_id,
                     selection_msg_ts,
                     confirmation_message,
+                    unfurl_links=False,
                 )
             else:
                 # Fallback: send new message if we don't have the original ts
@@ -809,6 +804,7 @@ class Events:
                     team_id,
                     thread_ts,
                     confirmation_message,
+                    unfurl_links=False,
                 )
 
             self._process_event(channel_id, self.cache.get_event_entry(thread_ts)["text"], team_id, thread_ts, "chat")
