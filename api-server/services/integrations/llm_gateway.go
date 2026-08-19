@@ -108,9 +108,13 @@ func (m LLMGateway) ConfigSchema() core.IntegrationSchema {
 				RequiredWhen: map[string]any{"provider": llmGatewayProviderCustom},
 			},
 			"models": {
-				Type:         core.ToolSchemaTypeString,
-				Description:  "Comma-separated model ids this endpoint serves (e.g. Qwen/Qwen3.6-35B-A3B-FP8, or google/gemma-3-27b-it-maas for Vertex MaaS). A client addresses the model by one of these names. To give a model a distinct client-facing name — e.g. so two endpoints can serve the same underlying model — use alias=served (e.g. qwen-vertex=Qwen/Qwen3.6-35B-A3B-FP8): clients call the alias, the gateway forwards the served name.",
-				Priority:     5,
+				Type:        core.ToolSchemaTypeString,
+				Description: "Model ids this endpoint serves. Give a model a distinct client-facing name to alias it — e.g. so two endpoints can serve the same underlying model, or to expose a friendlier id. Stored as comma-separated entries, each a served id (e.g. Qwen/Qwen3.6-35B-A3B-FP8) or alias=served (e.g. qwen-vertex=Qwen/Qwen3.6-35B-A3B-FP8).",
+				Priority:    5,
+				// Render as a structured name → served-model editor so the alias isn't buried
+				// in the comma string (a plain edit could silently drop it). Type stays string;
+				// the widget serializes back to the same alias=served value the backend validates.
+				Widget:       "model_alias_list",
 				ShowWhen:     map[string]any{"provider": []any{llmGatewayProviderCustom, llmGatewayProviderVertexOpenAI}},
 				RequiredWhen: map[string]any{"provider": []any{llmGatewayProviderCustom, llmGatewayProviderVertexOpenAI}},
 			},

@@ -90,7 +90,12 @@ type IntegrationSchemaProperty struct {
 	AllowEdit    bool           `json:"allow_edit,omitempty"`
 	Hidden       bool           `json:"hidden,omitempty"`
 	Multiline    bool           `json:"multiline,omitempty"`
-	IsTestable   bool           `json:"is_testable,omitempty"`
+	// Widget names a custom frontend renderer for this field, overriding the default
+	// input for its Type (which is unchanged, so the stored value + validation still
+	// apply). E.g. "model_alias_list" renders a string field of comma-joined
+	// `alias=served` entries as a two-column name → served-model editor.
+	Widget     string `json:"widget,omitempty"`
+	IsTestable bool   `json:"is_testable,omitempty"`
 	// SingleSelect, on an array-typed property with auto_generate_func='listAccounts',
 	// tells the frontend to render a single-select dropdown instead of the default
 	// multi-select. Used for integrations that bind 1:1 to an account (e.g.
