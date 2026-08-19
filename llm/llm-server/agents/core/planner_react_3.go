@@ -2161,20 +2161,21 @@ func (o *NBReActPlanner3) runCritique(input, scratchpad, finalAnswer string, int
 	}
 	critiquePrompt := prompts.NewPromptTemplate(
 		critiquerPrompt,
-		[]string{"input", "scratchpad", "final_answer", "question_type", "tool_names", "tool_descriptions", "tools_invoked", "hypothesis_mode_enabled", "sdg_grounding_enabled", "notebook", "today"},
+		[]string{"input", "scratchpad", "final_answer", "question_type", "tool_names", "tool_descriptions", "tools_invoked", "hypothesis_mode_enabled", "sdg_grounding_enabled", "premise_verification_enabled", "notebook", "today"},
 	)
 	critiquePromptStr, promptErr := critiquePrompt.Format(map[string]any{
-		"input":                   input,
-		"scratchpad":              scratchpad,
-		"final_answer":            finalAnswer,
-		"today":                   time.Now().Format(time.RFC1123),
-		"notebook":                o.Notebook,
-		"question_type":           lo.Ternary(IsInvestigationRequestTask(o.request.Query), "investigation", "query"),
-		"tool_names":              reActPromptToolNames(o.tools),
-		"tool_descriptions":       reActPromptToolDescriptions(o.tools),
-		"tools_invoked":           extractToolsInvoked(intermediateSteps),
-		"hypothesis_mode_enabled": o.hypothesisModeEnabled,
-		"sdg_grounding_enabled":   config.Config.LlmServerSDGGroundingContractEnabled && HasServiceDependencyGraphTool(o.tools),
+		"input":                        input,
+		"scratchpad":                   scratchpad,
+		"final_answer":                 finalAnswer,
+		"today":                        time.Now().Format(time.RFC1123),
+		"notebook":                     o.Notebook,
+		"question_type":                lo.Ternary(IsInvestigationRequestTask(o.request.Query), "investigation", "query"),
+		"tool_names":                   reActPromptToolNames(o.tools),
+		"tool_descriptions":            reActPromptToolDescriptions(o.tools),
+		"tools_invoked":                extractToolsInvoked(intermediateSteps),
+		"hypothesis_mode_enabled":      o.hypothesisModeEnabled,
+		"sdg_grounding_enabled":        config.Config.LlmServerSDGGroundingContractEnabled && HasServiceDependencyGraphTool(o.tools),
+		"premise_verification_enabled": config.Config.PremiseVerificationEnabled,
 	})
 	if promptErr != nil {
 		logger.Error("reactagent3: failed to format critique prompt, accepting answer", "error", promptErr)
