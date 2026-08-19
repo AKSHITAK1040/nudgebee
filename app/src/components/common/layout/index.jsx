@@ -42,6 +42,7 @@ import {
   OptimizeSummaryIcon,
   RecommendationIcon,
   RecommendationResolutionIcon,
+  SecuritytoolsBlue,
   LLMConsumptionIcon,
   IntegrationsIcon,
   CloudAccountIcon,
@@ -398,6 +399,13 @@ const PageLayout = ({ children }) => {
         id: 'sidenav-optimise-resolutions',
         module: 'recommendations',
         icon: RecommendationResolutionIcon,
+      },
+      {
+        text: 'Security',
+        path: '/optimise#security',
+        id: 'sidenav-optimise-security',
+        module: 'recommendations',
+        icon: SecuritytoolsBlue,
       },
       { text: 'Auto Optimize', path: '/optimise#auto-optimize', id: 'sidenav-optimise-auto-optimize', module: 'autooptimize', icon: AutomateBlue },
       ...(llmAnalyserEnabled && canReadAccount

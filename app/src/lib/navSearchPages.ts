@@ -121,6 +121,9 @@ export const navSearchPages: NavSearchPage[] = [
   { group: 'Optimize', label: 'Optimize Summary', path: '/optimise#summary' },
   { group: 'Optimize', label: 'Optimize Recommendations', path: '/optimise#recommendations' },
   { group: 'Optimize', label: 'Optimize Resolutions', path: '/optimise#resolutions' },
+  { group: 'Optimize', label: 'Security - Image Scan', path: '/optimise#security/image-scan' },
+  { group: 'Optimize', label: 'Security - CIS Scan', path: '/optimise#security/cis-scan' },
+  { group: 'Optimize', label: 'Security - VM Vulnerabilities', path: '/optimise#security/vm-vulnerabilities' },
   { group: 'Optimize', label: 'Auto Optimize - Optimizations', path: '/optimise#auto-optimize/optimizations' },
   { group: 'Optimize', label: 'Auto Optimize - Approvals', path: '/optimise#auto-optimize/approvals' },
   // Both gated in GlobalPageSearch.jsx by the same two gates the tabs themselves

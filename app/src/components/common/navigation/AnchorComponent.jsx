@@ -33,6 +33,12 @@ const AnchorComponent = ({
   // this drops the tab strip entirely while still rendering the sub-section
   // jump-nav (`options`) below it. Default false keeps every other usage intact.
   hideParentTabs = false,
+  // Suppresses the hover popover that lists a tab's sub-tabs. Those sub-tabs
+  // already render as an inline row under the tab strip, so the popover is a
+  // second, hover-only way to reach the same thing — and it appears on only the
+  // few tabs that declare tabOptions, making the strip behave inconsistently
+  // tab-to-tab. Opt-in so pages relying on the popover keep it.
+  disableHoverSubmenu = false,
 }) => {
   const router = useRouter();
   const [currentOpt, setCurrentOpt] = useState([]);
@@ -552,12 +558,14 @@ const AnchorComponent = ({
                           '&.Mui-disabled': { opacity: 0.5, pointerEvents: 'none' },
                         }}
                         disabled={opt.disabled || false}
-                        aria-owns={anchorEl ? 'mouse-over-popover' : undefined}
-                        aria-haspopup='true'
+                        aria-owns={anchorEl && !disableHoverSubmenu ? 'mouse-over-popover' : undefined}
+                        aria-haspopup={disableHoverSubmenu ? undefined : 'true'}
                         aria-current={selected ? 'page' : undefined}
-                        onMouseOver={(e) => {
-                          handlePopoverOpen(e, opt);
-                        }}
+                        {...(!disableHoverSubmenu && {
+                          onMouseOver: (e) => {
+                            handlePopoverOpen(e, opt);
+                          },
+                        })}
                       >
                         <SafeIcon
                           src={opt.icon}
@@ -580,7 +588,7 @@ const AnchorComponent = ({
                             style={{ height: ds.space.mul(0, 10), width: ds.space.mul(0, 10), marginTop: ds.space.mul(0, -5) }}
                           />
                         )}
-                        {opt.tabOptions && (
+                        {opt.tabOptions && !disableHoverSubmenu && (
                           <SafeIcon
                             src={MenuArrowDownIcon}
                             alt='down arrow'
@@ -708,6 +716,7 @@ AnchorComponent.propTypes = {
   tabPadding: PropTypes.string,
   groupedTabs: PropTypes.bool,
   showGroupedTabs: PropTypes.bool,
+  disableHoverSubmenu: PropTypes.bool,
   tooltip: PropTypes.string,
   hideParentTabs: PropTypes.bool,
 };

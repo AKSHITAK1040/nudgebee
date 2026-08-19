@@ -38,6 +38,19 @@ import { hasWriteAccess } from '@lib/auth';
 import WidgetCard from '@ui/WidgetCard';
 
 const KubernetesSecurityDetails = (props) => {
+  // Rows carry their own account_id; in cross-account mode (the /optimise
+  // Security tab) kubernetes.id is a list, so every per-row action must use the
+  // row's account. Page-level id remains the fallback for injected llm rows,
+  // which are always single-account. A multi-account scope has no single
+  // fallback: returning undefined makes the action fail loudly rather than
+  // silently raise a PR or ticket against an arbitrary cluster.
+  const accountIdForRow = (item) => {
+    if (item?.account_id) return item.account_id;
+    const scope = props?.kubernetes?.id;
+    if (!Array.isArray(scope)) return scope;
+    return scope.length === 1 ? scope[0] : undefined;
+  };
+
   const prevQueryRef = useRef();
 
   const [kubernetesSecurity, setKubernetesSecurity] = useState([]);
@@ -86,9 +99,10 @@ const KubernetesSecurityDetails = (props) => {
   }, [filteredGitIntegrations, selectedGitIntegration]);
 
   const BEST_PRACTICES_HEADER = [
+    ...(props?.accountsById ? [{ name: 'Cluster', width: '10%' }] : []),
     { name: 'CVE', width: '15%' },
-    { name: 'Image', width: '20%' },
-    { name: 'App', width: '20%' },
+    { name: 'Image', width: props?.accountsById ? '15%' : '20%' },
+    { name: 'App', width: props?.accountsById ? '15%' : '20%' },
     { name: 'Title', width: '20%' },
     { name: 'Severity', width: '5%' },
     { name: 'Package Id', width: '5%' },
@@ -159,7 +173,7 @@ const KubernetesSecurityDetails = (props) => {
   const getWorkloadAnnotations = async (data) => {
     try {
       const res = await k8sApi.getK8sWorkload(1, 0, {
-        accountId: props?.kubernetes?.id,
+        accountId: accountIdForRow(data),
         namespaceName: data?.namespace,
         workloadName: data?.workload_name,
         exactNameMatch: true,
@@ -221,7 +235,7 @@ const KubernetesSecurityDetails = (props) => {
     setPRLoading(true);
     apiRecommendations
       .applyRecommendation(
-        props?.kubernetes?.id,
+        accountIdForRow(selectedItemForPR),
         selectedItemForPR.id,
         { workload_name: selectedItemForPR?.workload_name, namespace: selectedItemForPR?.namespace },
         integrationType,
@@ -301,6 +315,12 @@ const KubernetesSecurityDetails = (props) => {
 
   const buildRow = (item) => {
     let data = [];
+    if (props?.accountsById) {
+      data.push({
+        component: <Text value={props.accountsById[item.account_id] || item.account_id} showAutoEllipsis />,
+        data: item.account_id,
+      });
+    }
     data.push({
       component: (
         <Stack direction='column' spacing={1}>
@@ -497,7 +517,7 @@ const KubernetesSecurityDetails = (props) => {
         ticketData={{
           subject: 'Security Issue On - ' + ticketData.image,
           description: getTicketDescription(ticketData),
-          accountId: props?.kubernetes?.id,
+          accountId: accountIdForRow(ticketData),
         }}
         ticketUrl={{}}
         reference={{
@@ -604,7 +624,7 @@ const KubernetesSecurityDetails = (props) => {
         onPageChange={changePage}
         pageNumber={page + 1}
         tableHeadingCenter={['Severity']}
-        stickyColumnIndex='9'
+        stickyColumnIndex={props?.accountsById ? '10' : '9'}
         showUpdatedEmptyData={kubernetesSecurity?.length == 0}
         sort={{
           name: 'Savings',
@@ -722,6 +742,7 @@ const KubernetesSecurityDetails = (props) => {
 };
 
 KubernetesSecurityDetails.propTypes = {
+  accountsById: PropTypes.object,
   kubernetes: PropTypes.object,
   disableInfographic: PropTypes.bool,
   query: PropTypes.object,

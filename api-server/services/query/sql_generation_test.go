@@ -1128,3 +1128,84 @@ func TestSQLGen_Where_EqF(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, sql, "name = account_id")
 }
+
+// ---- Cross-account security pushdown tests ----
+
+// The cross-account Security tab queries these tables with an account _in list
+// and a tenant filter that the security layer appends as an _and clause. The
+// account and tenant copies must be pushed into the pod/recommendation
+// subqueries as planner hints, while the outer WHERE keeps enforcing tenant.
+
+func securityCrossAccountWhere() QueryWhereClause {
+	return QueryWhereClause{
+		Binary: BinaryWhereClause{
+			"account_id": {In: []any{"acc-1", "acc-2"}},
+			"status":     {Eq: "Open"},
+		},
+		And: []QueryWhereClause{
+			{Binary: BinaryWhereClause{"tenant_id": {Eq: "t1"}}},
+		},
+	}
+}
+
+func TestSQLGen_RealTable_SecurityV2_CrossAccountPushdown(t *testing.T) {
+	td, ok := GetTableMetadata("recommendation_security_v2")
+	require.True(t, ok)
+
+	req := QueryRequest{
+		Table:   "recommendation_security_v2",
+		Columns: cols("id", "severity", "status", "image", "account_id"),
+		Where:   securityCrossAccountWhere(),
+		Limit:   10,
+	}
+	sql, err := GenerateSqlQuery(superAdminCtx(), "", req, td)
+	require.NoError(t, err)
+
+	assert.Contains(t, sql, "pc.cloud_account_id IN ('acc-1','acc-2')")
+	assert.Contains(t, sql, "rec.cloud_account_id IN ('acc-1','acc-2')")
+	assert.Contains(t, sql, "pc.tenant_id = 't1'")
+	assert.Contains(t, sql, "rec.tenant_id = 't1'")
+	// Two pushed copies plus the outer WHERE: the _and tenant filter must survive.
+	assert.GreaterOrEqual(t, strings.Count(sql, "tenant_id = 't1'"), 3,
+		"outer tenant filter must still be enforced alongside the pushed-down hints")
+}
+
+func TestSQLGen_RealTable_SecurityGroupings_HeavyPath_CrossAccountPushdown(t *testing.T) {
+	td, ok := GetTableMetadata("recommendation_security_groupings_v2")
+	require.True(t, ok)
+
+	// image + count reference non-pod columns, forcing the pod_container LATERAL path.
+	req := QueryRequest{
+		Table:   "recommendation_security_groupings_v2",
+		Columns: cols("account_id", "image", "count"),
+		Where:   securityCrossAccountWhere(),
+		Limit:   10,
+	}
+	sql, err := GenerateSqlQuery(superAdminCtx(), "", req, td)
+	require.NoError(t, err)
+
+	assert.Contains(t, sql, "pod_container")
+	assert.Contains(t, sql, "cr.cloud_account_id IN ('acc-1','acc-2')")
+	assert.Contains(t, sql, "cr.tenant_id = 't1'")
+	assert.GreaterOrEqual(t, strings.Count(sql, "tenant_id = 't1'"), 2,
+		"outer tenant filter must still be enforced alongside the pushed-down hint")
+}
+
+func TestSQLGen_RealTable_SecurityGroupings_LightPath_CrossAccountPushdown(t *testing.T) {
+	td, ok := GetTableMetadata("recommendation_security_groupings_v2")
+	require.True(t, ok)
+
+	// Pod-level columns only, so the cheaper pod_images EXISTS path is taken.
+	req := QueryRequest{
+		Table:   "recommendation_security_groupings_v2",
+		Columns: cols("namespace", "workload_name", "account_id"),
+		Where:   securityCrossAccountWhere(),
+		Limit:   10,
+	}
+	sql, err := GenerateSqlQuery(superAdminCtx(), "", req, td)
+	require.NoError(t, err)
+
+	assert.Contains(t, sql, "pod_images")
+	assert.Contains(t, sql, "cr.cloud_account_id IN ('acc-1','acc-2')")
+	assert.Contains(t, sql, "cr.tenant_id = 't1'")
+}

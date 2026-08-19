@@ -8,6 +8,7 @@ import {
   OptimizeSummaryIcon,
   RecommendationIcon,
   RecommendationResolutionIcon,
+  SecuritytoolsBlue,
   LLMConsumptionIcon,
   IntegrationsIcon,
   AutomateBlue,
@@ -24,6 +25,7 @@ import { ds } from '@utils/colors';
 // Only one tab is visible at a time; lazy-load the rest to cut initial JS.
 const OptimizeNewPage = dynamic(() => import('@components/optimise-new/OptimizeNewPage'), { ssr: false });
 const ResolutionsView = dynamic(() => import('@components/optimise-new/ResolutionsView'), { ssr: false });
+const SecurityView = dynamic(() => import('@components/optimise-new/SecurityView'), { ssr: false });
 const AutoOptimizeTabs = dynamic(() => import('@components/autopilot/tables/AutoOptimizeTabs'), { ssr: false });
 const CostAnalyser = dynamic(() => import('@components/llm/cost-analyser/CostAnalyser'), { ssr: false });
 const GatewayUsage = dynamic(() => import('@components/llm/gateway-usage/GatewayUsage'), { ssr: false });
@@ -77,27 +79,40 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
         { name: 'Recommendations', id: 'recommendations', fragment: 'recommendations', value: 1, icon: RecommendationIcon, iconSize: 18 },
         { name: 'Resolutions', id: 'resolutions', fragment: 'resolutions', value: 2, icon: RecommendationResolutionIcon, iconSize: 18 },
         {
+          name: 'Security',
+          id: 'security',
+          fragment: 'security',
+          value: 3,
+          icon: SecuritytoolsBlue,
+          tabOptions: [
+            { id: 'image-scan', text: 'Image Scan', value: 0, fragment: 'image-scan' },
+            { id: 'cis-scan', text: 'CIS Scan', value: 1, fragment: 'cis-scan' },
+            { id: 'vm-vulnerabilities', text: 'VM Vulnerabilities', value: 2, fragment: 'vm-vulnerabilities' },
+          ],
+        },
+        {
           name: 'Auto Optimize',
           id: 'auto-optimize',
           fragment: 'auto-optimize',
-          value: 3,
+          value: 4,
           icon: AutomateBlue,
           tabOptions: [
             { id: 'Optimizations', text: 'Optimizations', value: 0, fragment: 'optimizations' },
             { id: 'approvals', text: 'Approvals', value: 1, fragment: 'approvals' },
           ],
         },
-        // Auto Optimize stays at a fixed index 3 so it sits BEFORE this
+        // Auto Optimize stays at a fixed index 4 so it sits BEFORE this
         // feature-flagged tab. AnchorComponent renders sub-tabs via
         // filterOptions[activeDropdownTab] (index === value), so a tab with
-        // tabOptions must keep value === array index regardless of the flag.
+        // tabOptions (Security and Auto Optimize above) must keep
+        // value === array index regardless of the flag.
         isMounted &&
           llmAnalyserEnabled &&
           hasReadAccess(selectedCluster?.value) && {
             name: 'LLM Analyser',
             id: 'llm-analyser',
             fragment: 'cost-analyser',
-            value: 4,
+            value: 5,
             icon: LLMConsumptionIcon,
             iconSize: 18,
           },
@@ -118,7 +133,7 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
             name: 'AI Gateway',
             id: 'ai-gateway',
             fragment: 'ai-gateway',
-            value: 5,
+            value: 6,
             icon: IntegrationsIcon,
             iconSize: 18,
           },
@@ -171,7 +186,7 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
   };
 
   const createAutoOptimizeButton =
-    activeTab === 3 && hasWriteAccess(router?.query?.accountId) ? (
+    activeTab === 4 && hasWriteAccess(router?.query?.accountId) ? (
       <DsDropdownMenu
         align='end'
         disablePortal={false}
@@ -202,6 +217,7 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
     <>
       <AnchorComponent
         manageRoute={true}
+        disableHoverSubmenu
         filterOptions={filterOptions}
         onChangeFilter={(val, subVal) => {
           setActiveTab(val);
@@ -214,7 +230,8 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
           {activeTab === 0 && <SummaryView />}
           {activeTab === 1 && <OptimizeNewPage />}
           {activeTab === 2 && <ResolutionsView />}
-          {activeTab === 3 && (
+          {activeTab === 3 && <SecurityView subTab={subTab} />}
+          {activeTab === 4 && (
             <AutoOptimizeTabs
               subTab={subTab}
               openCreateAutoOptimize={openCreateAutoOptimize}
@@ -223,8 +240,8 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
               handleCloseCreateAutoOptimize={handleCloseCreateAutoOptimize}
             />
           )}
-          {activeTab === 4 && <CostAnalyser />}
-          {activeTab === 5 && <GatewayUsage gatewayUrl={llmGatewayUrl} />}
+          {activeTab === 5 && <CostAnalyser />}
+          {activeTab === 6 && <GatewayUsage gatewayUrl={llmGatewayUrl} />}
         </ErrorBoundary>
       )}
     </>

@@ -3646,6 +3646,13 @@ var table_metadata = map[string]TableDefinition{
 			// choose a more efficient join strategy.
 			podAccountFilter := extractFilterSQL(&request, "account_id", "pc.cloud_account_id")
 			recAccountFilter := strings.Replace(podAccountFilter, "pc.cloud_account_id", "rec.cloud_account_id", 1)
+			// Tenant filter arrives as an _and clause from the security layer, so
+			// extractFilterSQL leaves it enforced in the outer WHERE and the copies
+			// pushed here act purely as planner hints — without them a cross-account
+			// request (no account filter) scans every tenant's pods and findings
+			// inside the subqueries before the outer tenant filter applies.
+			podTenantFilter := extractFilterSQL(&request, "tenant_id", "pc.tenant_id")
+			recTenantFilter := strings.Replace(podTenantFilter, "pc.tenant_id", "rec.tenant_id", 1)
 			recStatusFilter := extractFilterSQL(&request, "status", "rec.status")
 			recSeverityFilter := extractFilterSQL(&request, "severity", "rec.severity")
 			podNamespaceFilter := extractFilterSQL(&request, "namespace", "pc.\"namespace\"")
@@ -3690,13 +3697,13 @@ var table_metadata = map[string]TableDefinition{
 					container->>'image' AS image
 				FROM k8s_pods pc,
 					LATERAL jsonb_array_elements(pc.meta->'config'->'containers') AS container
-				WHERE pc.is_active IS NOT FALSE` + podAccountFilter + podNamespaceFilter + `
+				WHERE pc.is_active IS NOT FALSE` + podAccountFilter + podTenantFilter + podNamespaceFilter + `
 			) cr ON cr.cloud_account_id = rec.cloud_account_id
 				AND cr.tenant_id        = rec.tenant_id
 				AND cr.image            = rec.recommendation->>'image_name'
 			WHERE rec.category            = 'Security'
 				AND rec.rule_name         = 'image_scan'
-				AND rec.account_object_id IS NOT NULL` + recAccountFilter + recStatusFilter + recSeverityFilter + `
+				AND rec.account_object_id IS NOT NULL` + recAccountFilter + recTenantFilter + recStatusFilter + recSeverityFilter + `
 		) AS t
 		`
 			return def, request, nil
@@ -3774,6 +3781,11 @@ var table_metadata = map[string]TableDefinition{
 			// instead of all pods for the account.
 			podAccountFilter := extractFilterSQL(&request, "account_id", "cr.cloud_account_id")
 			outerAccountFilter := strings.Replace(podAccountFilter, "cr.cloud_account_id", "pc.cloud_account_id", 1)
+			// Planner hint for cross-account requests — the tenant filter stays
+			// enforced in the outer WHERE (it arrives as an _and clause; see
+			// recommendation_security_v2 above). Both CTE paths alias k8s_pods as
+			// cr; the recommendation sides already bind tenant via the pod rows.
+			podTenantFilter := extractFilterSQL(&request, "tenant_id", "cr.tenant_id")
 			podNamespaceFilter := extractFilterSQL(&request, "namespace", "cr.\"namespace\"")
 			// rec2 alias is used in the heavy-path LATERAL; r alias is used in the light-path EXISTS.
 			recStatusFilter := extractFilterSQL(&request, "status", "rec2.status")
@@ -3809,7 +3821,7 @@ var table_metadata = map[string]TableDefinition{
 					cr.tenant_id                   AS tenant_id
 				FROM k8s_pods cr,
 					lateral jsonb_array_elements(cr.meta->'config'->'containers') AS container
-				WHERE cr.is_active IS NOT FALSE` + podAccountFilter + podNamespaceFilter + `
+				WHERE cr.is_active IS NOT FALSE` + podAccountFilter + podTenantFilter + podNamespaceFilter + `
 			)
 			SELECT DISTINCT
 				pi.namespace      AS namespace,
@@ -3954,7 +3966,7 @@ var table_metadata = map[string]TableDefinition{
 					cr.tenant_id         AS tenant_id
 				FROM k8s_pods cr,
 					lateral jsonb_array_elements(cr.meta->'config'->'containers') AS container
-				WHERE cr.is_active IS NOT FALSE` + podAccountFilter + podNamespaceFilter + `
+				WHERE cr.is_active IS NOT FALSE` + podAccountFilter + podTenantFilter + podNamespaceFilter + `
 			)
 			SELECT
 				pc.tenant_id         AS tenant_id,
