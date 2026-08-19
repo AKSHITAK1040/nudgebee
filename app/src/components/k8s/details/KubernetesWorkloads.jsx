@@ -2406,6 +2406,9 @@ const KubernetesWorkloadsTable = ({ accountId, resource_ids = [] }) => {
                         }}
                         queryFromProps={`{"namespaceName":"${drilldownQuery.namespaceName}","workloadName":"${drilldownQuery.workloadName}"}`}
                         showPolling={false}
+                        namespaceName={drilldownQuery.namespaceName}
+                        workloadName={drilldownQuery.workloadName}
+                        workloadType={drilldownQuery.workloadType}
                       />
                     );
                   },

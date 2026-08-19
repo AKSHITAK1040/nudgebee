@@ -3,6 +3,7 @@ import { useRouter } from 'next/router';
 import { v4 as uuidv4 } from 'uuid';
 import { md5 } from '@lib/encode';
 import SafeIcon from '@shared/icons/SafeIcon';
+import Loader from '@shared/Loader';
 import { Box } from '@mui/material';
 import { ToggleGroup } from '@ui/ToggleGroup';
 import dynamic from 'next/dynamic';
@@ -39,6 +40,7 @@ import { getNubiIconUrl, useTenantBranding } from '@hooks/useTenantBranding';
 import { Info as InfoIcon, KeyboardArrowDown as KeyboardArrowDownIcon } from '@mui/icons-material';
 import { DropdownMenu } from '@ui/DropdownMenu';
 import { ds } from '@utils/colors';
+import KubernetesWorkloadRelayLogs from './KubernetesWorkloadRelayLogs';
 
 interface TimeRange {
   [x: string]: number;
@@ -113,6 +115,12 @@ const buildStructuredQueryFromItems = (items: any[]): any[] =>
     };
   });
 
+// Workload kinds `kubectl logs <kind>/<name>` can actually resolve to a pod (used by the
+// relay-fallback below). CronJob has no pods of its own — only the Jobs it spawns do — and
+// Rollout is an Argo CRD kubectl has no built-in selector logic for, so both are excluded
+// rather than firing a relay call that's guaranteed to fail.
+const KUBECTL_LOGGABLE_WORKLOAD_KINDS = ['deployment', 'statefulset', 'daemonset', 'replicaset', 'job'];
+
 interface KubernetesLogProps {
   accountId: string;
   showTrend: boolean;
@@ -123,6 +131,13 @@ interface KubernetesLogProps {
   showDateFilter?: boolean;
   showPlusMinusTab?: boolean;
   nubiAboveModal?: boolean;
+  // Workload identity for the relay (kubectl) fallback used when no log
+  // provider is configured — see the `!logProvider` branch below. Only the
+  // Applications/workload Logs tab passes these; other callers of this
+  // component leave them unset and keep the plain "No Logs Available" card.
+  namespaceName?: string;
+  workloadName?: string;
+  workloadType?: string;
 }
 
 const KubernetesLogs: React.FC<KubernetesLogProps> = ({
@@ -134,6 +149,9 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
   showDateFilter = true,
   showPlusMinusTab = true,
   nubiAboveModal = false,
+  namespaceName = '',
+  workloadName = '',
+  workloadType = '',
 }) => {
   const router = useRouter();
   const { selectedCluster } = useData();
@@ -155,6 +173,11 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
   const [defaultIndex, setDefaultIndex] = useState('');
   const [availableProviders, setAvailableProviders] = useState<any[]>([]);
   const [runInitialQuery, setRunInitialQuery] = useState(false);
+  // Distinguishes "still checking which provider is configured" (logProvider
+  // is '' transiently while the getDefaultProvider call is in flight) from
+  // "checked, and there truly is none" — only the latter should trigger the
+  // relay (kubectl) fallback below.
+  const [providerCheckDone, setProviderCheckDone] = useState(false);
   const [time, setTime] = useState<any>(
     dateTime || {
       startTime: Number(router.query.startTime) || (router.query.start ? Number(router.query.start) / 1000000 : 0),
@@ -723,10 +746,12 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
       setDefaultProvider('');
       setDefaultIndex('');
       setAvailableProviders([]);
+      setProviderCheckDone(false);
       resetStates();
       if (accountId === 'demo') {
         setLogProvider('loki');
         setDefaultProvider('loki');
+        setProviderCheckDone(true);
         return;
       }
 
@@ -742,6 +767,7 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
         setAvailableProviders(cached.available_providers || []);
         setDefaultIndex(cached.default_index || '');
         setEsIndex(cached.default_index || '');
+        setProviderCheckDone(true);
         return;
       }
 
@@ -782,6 +808,8 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
         );
       } catch (error: any) {
         snackbar.error(error.message || 'Failed to fetch default provider');
+      } finally {
+        setProviderCheckDone(true);
       }
     };
 
@@ -962,7 +990,16 @@ const KubernetesLogs: React.FC<KubernetesLogProps> = ({
     }
   }, [logProvider]);
 
+  if (!providerCheckDone) {
+    return <Loader style={{ paddingTop: 'var(--ds-space-6)', width: '100%' }} />;
+  }
+
   if (!logProvider) {
+    const hasConnectedAgent = selectedCluster?.agent?.status === 'CONNECTED';
+    const isKubectlLoggableKind = workloadType ? KUBECTL_LOGGABLE_WORKLOAD_KINDS.includes(workloadType.toLowerCase()) : false;
+    if (hasConnectedAgent && isKubectlLoggableKind && workloadName && namespaceName && workloadType) {
+      return <KubernetesWorkloadRelayLogs accountId={accountId} namespace={namespaceName} workloadName={workloadName} workloadType={workloadType} />;
+    }
     return (
       <WidgetCard sx={{ maxWidth: ds.space.mul(0, 250), mx: 'auto', textAlign: 'center' }}>
         <Text
