@@ -75,10 +75,15 @@ const TerminalComponent = ({ accountId, httpEndpoint = getRelayServerEndpoint() 
   const consecutiveEmptyReadsRef = useRef(0);
   const abortControllerRef = useRef(null);
   const lastActivityRef = useRef(Date.now());
+  // Set when a keystroke lands while a read is already in flight, so that read
+  // re-arms quickly on completion instead of falling back to the idle cadence.
+  const pendingInputPollRef = useRef(false);
 
   // Constants for polling behavior
   const MIN_POLL_INTERVAL = 500; // Minimum 500ms
   const MAX_POLL_INTERVAL = 5000; // Maximum 5 seconds
+  const ACTIVE_POLL_INTERVAL = 100; // While output is still flowing
+  const INPUT_POLL_DELAY = 30; // After a keystroke, just long enough to coalesce a burst
   const EMPTY_READ_THRESHOLD = 5; // After 5 empty reads, slow down
   const REQUEST_TIMEOUT = 100000; // 10 second timeout for requests
 
@@ -146,9 +151,27 @@ const TerminalComponent = ({ accountId, httpEndpoint = getRelayServerEndpoint() 
 
       clearTimeout(timeoutId);
 
-      // Reset polling interval on successful input (user is active)
-      pollIntervalRef.current = MIN_POLL_INTERVAL;
+      // The keystroke itself is delivered immediately, but the terminal has no local
+      // echo — the character only becomes visible when a `read` brings the pod's echo
+      // back. Resetting the interval alone left the already-armed timer running, so
+      // each character waited out up to MAX_POLL_INTERVAL before appearing. Pull the
+      // next read forward instead.
+      // ACTIVE_POLL_INTERVAL, not MIN_POLL_INTERVAL: the echo needs a round trip, so
+      // the 30ms read below usually comes back empty, and an empty read reschedules at
+      // whatever this holds. Parking it at 500ms would put the echo half a second out
+      // and undo the point of the early poll. At 100ms the EMPTY_READ_THRESHOLD window
+      // gives ~500ms of tight polling after each keystroke before the idle backoff.
+      consecutiveEmptyReadsRef.current = 0;
+      pollIntervalRef.current = ACTIVE_POLL_INTERVAL;
       lastActivityRef.current = Date.now();
+
+      if (isPollingRef.current) {
+        // readOutput refuses to overlap requests, so an immediate re-arm here would
+        // be swallowed. Let the in-flight read pick this up when it finishes.
+        pendingInputPollRef.current = true;
+      } else {
+        scheduleNextPoll(INPUT_POLL_DELAY);
+      }
     } catch (err) {
       if (err.name !== 'AbortError') {
         console.error('Send input error:', err);
@@ -165,9 +188,11 @@ const TerminalComponent = ({ accountId, httpEndpoint = getRelayServerEndpoint() 
     }
 
     if (hasData) {
-      // Data received - use minimum interval for responsiveness
+      // Output is still flowing — poll tightly so a command's output streams in
+      // rather than arriving in half-second steps. This self-throttles: the first
+      // empty read starts winding the interval back up.
       consecutiveEmptyReadsRef.current = 0;
-      pollIntervalRef.current = MIN_POLL_INTERVAL;
+      pollIntervalRef.current = ACTIVE_POLL_INTERVAL;
       lastActivityRef.current = Date.now();
     } else {
       // No data received
@@ -238,8 +263,10 @@ const TerminalComponent = ({ accountId, httpEndpoint = getRelayServerEndpoint() 
         xtermRef.current?.write(data);
       }
 
-      // Calculate next polling interval
-      const nextInterval = calculateNextPollInterval(hasData);
+      // A keystroke that landed during this read takes priority over the idle
+      // cadence; its echo is what the user is waiting to see.
+      const nextInterval = pendingInputPollRef.current ? INPUT_POLL_DELAY : calculateNextPollInterval(hasData);
+      pendingInputPollRef.current = false;
 
       // Schedule next poll
       scheduleNextPoll(nextInterval);
@@ -285,6 +312,7 @@ const TerminalComponent = ({ accountId, httpEndpoint = getRelayServerEndpoint() 
     }
 
     isPollingRef.current = false;
+    pendingInputPollRef.current = false;
   };
 
   // Start session with improved error handling
