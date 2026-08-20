@@ -47,3 +47,25 @@ func TestAllocationAndScopeTotalReadTheSameView(t *testing.T) {
 			"dimension %q must resolve to exactly one spend view", dim)
 	}
 }
+
+// TestSetAllocationChangeFlags pins the NEW/GONE disambiguation: rows with no
+// prior-period spend must not read as "stable 0% change", and disappeared
+// dimensions must be flagged rather than showing as zero-amount noise.
+func TestSetAllocationChangeFlags(t *testing.T) {
+	rows := []allocationRow{
+		{DimensionValue: "steady", Amount: 100, AmountPrev: 95},
+		{DimensionValue: "brand-new", Amount: 50, AmountPrev: 0},
+		{DimensionValue: "gone", Amount: 0, AmountPrev: 40},
+		{DimensionValue: "empty", Amount: 0, AmountPrev: 0},
+	}
+	setAllocationChangeFlags(rows)
+
+	assert.False(t, rows[0].IsNew)
+	assert.False(t, rows[0].IsGone)
+	assert.True(t, rows[1].IsNew)
+	assert.False(t, rows[1].IsGone)
+	assert.False(t, rows[2].IsNew)
+	assert.True(t, rows[2].IsGone)
+	assert.False(t, rows[3].IsNew)
+	assert.False(t, rows[3].IsGone)
+}
