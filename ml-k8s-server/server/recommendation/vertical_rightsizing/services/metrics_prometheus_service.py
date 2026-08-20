@@ -324,21 +324,48 @@ class PrometheusMetricsService(MetricsService):
         current_pods_set = set()
         del related_pods_result
 
-        for pod_group in batched(related_pods, 100):
-            group_regex = "|".join(pod_group)
-            pods_status_result = await self.query_range(
-                f"""
+        # "Currently running" must be an INSTANT check. The previous query_range
+        # over the whole history period marked every pod that was Running at ANY
+        # step in the window as not-deleted, so current_pods_count counted every
+        # pod incarnation from every deploy/restart in the last N days — and the
+        # estimated-savings replica multiplier scaled by dozens instead of the
+        # live replica count (a 2-replica deployment with daily rollouts
+        # reported ~45 "replicas" and a ~22x inflated saving).
+        # Batches are independent and the relay semaphore already bounds
+        # concurrency, so they run in parallel.
+        def liveness_query(group_regex: str) -> str:
+            return f"""
                     kube_pod_status_phase{{
                         phase="Running",
                         pod=~"{group_regex}",
                         namespace="{object.namespace}",
                         {cluster_label}
                     }} == 1
-                """,
-                start=datetime.now() - period,
-                end=datetime.now(),
-                step=timedelta(hours=1),
-            )
-            current_pods_set |= {pod["metric"]["pod"] for pod in pods_status_result}
-            del pods_status_result
+                """
+
+        async def instant_batch(pod_group: Iterable[str]) -> set[str]:
+            result = await self.query(liveness_query("|".join(pod_group)))
+            return {pod["metric"]["pod"] for pod in result}
+
+        for batch_pods in await asyncio.gather(*(instant_batch(g) for g in batched(related_pods, 100))):
+            current_pods_set |= batch_pods
+
+        # A transient scrape gap can make the instant vector empty even though
+        # pods are running; fall back to the last hour so a momentary gap
+        # degrades to slightly-stale liveness rather than zero live pods.
+        if not current_pods_set and related_pods:
+            now = datetime.now()
+
+            async def range_batch(pod_group: Iterable[str]) -> set[str]:
+                result = await self.query_range(
+                    liveness_query("|".join(pod_group)),
+                    start=now - timedelta(hours=1),
+                    end=now,
+                    step=timedelta(minutes=15),
+                )
+                return {pod["metric"]["pod"] for pod in result}
+
+            for batch_pods in await asyncio.gather(*(range_batch(g) for g in batched(related_pods, 100))):
+                current_pods_set |= batch_pods
+
         return list({PodData(name=pod, deleted=pod not in current_pods_set) for pod in related_pods})
