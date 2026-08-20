@@ -62,23 +62,30 @@ func TestPRLifecycleDispatchSQL_DB(t *testing.T) {
 	}
 
 	t.Run("claimOrMark", func(t *testing.T) {
+		// wantClaimed is stated per case rather than derived from wantNewState: a
+		// row already in 'addressing' ENDS at 'addressing' without having been
+		// claimed — a run is in flight and this signal only sets pending (see
+		// claimOrMarkResolution's contract). Deriving it collapsed those two into
+		// one and asserted the wrong thing for that case, which went unnoticed
+		// because this suite skips whenever no database is reachable.
 		cases := []struct {
 			id, state             string
 			iters                 int
 			wantOld, wantNewState string
+			wantClaimed           bool
 			wantPending           bool
 		}{
-			{"c", "created", 0, "created", "addressing", false},                   // claim
-			{"n", "needs_followup", 0, "needs_followup", "addressing", false},     // claim
-			{"a", "addressing", 0, "addressing", "addressing", true},              // mark pending (run in flight)
-			{"cap", "created", followupIterationCap, "created", "created", false}, // at cap -> no-op
-			{"closed", "closed", 0, "closed", "closed", false},                    // terminal -> no-op
+			{"c", "created", 0, "created", "addressing", true, false},                    // claim
+			{"n", "needs_followup", 0, "needs_followup", "addressing", true, false},      // claim
+			{"a", "addressing", 0, "addressing", "addressing", false, true},              // mark pending (run in flight)
+			{"cap", "created", followupIterationCap, "created", "created", false, false}, // at cap -> no-op
+			{"closed", "closed", 0, "closed", "closed", false, false},                    // terminal -> no-op
 		}
 		for _, c := range cases {
 			seed(c.id, c.state, c.iters, false)
 			claimed, old, iters, e := claimOrMarkResolution(dbms, tbl, c.id, false)
 			require.NoError(t, e, c.id)
-			assert.Equal(t, c.wantNewState == "addressing", claimed, "claimed for %s", c.id)
+			assert.Equal(t, c.wantClaimed, claimed, "claimed for %s", c.id)
 			assert.Equal(t, c.wantOld, old, "old_state for %s", c.id)
 			assert.Equal(t, c.iters, iters, "old_iters for %s", c.id)
 			st, _, pend := get(c.id)

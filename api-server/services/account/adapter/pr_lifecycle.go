@@ -78,6 +78,14 @@ func CheckAndFollowupOpenPRs(ctx *security.RequestContext) error {
 	// and stop churning no-op followups.
 	markStaleResolutions(ctx, dbms)
 
+	// Settle PR creations that never produced a URL. The orphan handling below
+	// marks such a candidate 'unresolvable' but leaves status at InProgress, and
+	// prResolutionOpenClause then excludes it from every later sweep — so nothing
+	// revisits it, the resolution poller keeps calling the provider for it, and it
+	// keeps counting as an active resolution against its recommendation. This
+	// moves status off InProgress so the row is actually finished.
+	markAbandonedPRCreations(ctx, dbms)
+
 	candidates, err := queryOpenPRResolutionCandidates(dbms)
 	if err != nil {
 		return fmt.Errorf("failed to query open PR resolutions: %w", err)
@@ -158,6 +166,23 @@ const (
 	// is left open on GitHub, and a real webhook signal resurrects it (see
 	// ProcessOpenPRFollowup).
 	followupStaleAfter = "3 days"
+	// prCreationAbandonedAfter retires a resolution that has been "creating a pull
+	// request" without ever recording a URL for this long. Such a row is a dead
+	// end that cannot self-heal: GetRecommendationResolutionStatus has no URL to
+	// poll so it answers InProgress forever, and the followup cron never sees the
+	// row because its lifecycle state is not created/needs_followup. It then
+	// blocks its recommendation from every later run, permanently — dev carried
+	// two of these from February and March 2026, one of them blocking
+	// ml-k8s-server for five months (#34959 follow-up).
+	//
+	// Creation is a bounded code-agent run measured in minutes, so a row past this
+	// window did not survive to write its URL — the process died, or the agent
+	// finished without opening a pull request. The window is set far above the run
+	// bound so a genuinely in-flight creation is never retired, and far below the
+	// months these rows actually sit. Deliberately a code path and not a one-off
+	// cleanup script: #34943 shipped remediation SQL that was never run, and
+	// on-prem installs have no operator step to run it in.
+	prCreationAbandonedAfter = "6 hours"
 	// maxRedispatchChain bounds how many times a single completion can chain a
 	// re-dispatch for signals that arrived mid-run (pr_followup_pending). Each
 	// link is a fresh full run, so this caps a worst-case "signal during every
@@ -415,6 +440,79 @@ func markStaleResolutionsInTable(ctx *security.RequestContext, dbms *database.Da
 	total, _ := res.RowsAffected()
 	if total > 0 {
 		ctx.GetLogger().Info("pr_lifecycle: retired stale followups", "count", total, "stale_after", followupStaleAfter)
+	}
+	return total
+}
+
+// markAbandonedPRCreations retires resolutions stuck at "creating a pull request"
+// with no URL recorded, past prCreationAbandonedAfter. Best-effort — a failure
+// here must not stop the sweep, so the error is logged, not returned.
+//
+// 'unresolvable' is the right terminal state rather than 'closed': no pull
+// request was ever opened, so there is nothing on the provider that closed.
+//
+// The part that matters is `status`, and it is why this is not redundant with
+// the orphan handling in CheckAndFollowupOpenPRs. markResolutionRowUnresolvable
+// sets pr_lifecycle_state and nothing else, so the row keeps status InProgress
+// while prResolutionOpenClause now excludes 'unresolvable' — it is dropped from
+// every future candidate sweep and never revisited. Left there it is polled
+// forever by CheckRecommendationResolutions, and it counts as an active
+// resolution that blocks its recommendation from ever being optimized again.
+// Dev carried two of these from February and March 2026, one blocking
+// ml-k8s-server for five months. Moving status off InProgress, the way
+// prTerminalFields does, is what actually finishes the row.
+func markAbandonedPRCreations(ctx *security.RequestContext, dbms *database.DatabaseManager) {
+	markAbandonedPRCreationsInTables(ctx, dbms, prResolutionTables)
+}
+
+// markAbandonedPRCreationsInTables is the table-parameterized core of
+// markAbandonedPRCreations, split out so the SQL can be exercised against
+// throwaway tables in tests. Returns the number of rows retired.
+func markAbandonedPRCreationsInTables(ctx *security.RequestContext, dbms *database.DatabaseManager, tables []string) int64 {
+	msg := fmt.Sprintf("no pull request was ever created — gave up after %s", prCreationAbandonedAfter)
+	var total int64
+	for _, tbl := range tables {
+		// (now() AT TIME ZONE 'UTC') on both sides, not bare now(). These columns
+		// are `timestamp without time zone` holding UTC, and comparing one against
+		// timestamptz now() makes Postgres reinterpret it in the session timezone —
+		// so the window silently shrinks by the session's offset. Measured on a
+		// scratch database: under Asia/Kolkata the bare-now() form retires a row
+		// only three hours old, killing a pull-request creation that is still in
+		// flight. Still one DB clock on both sides, now independent of the session.
+		//
+		// Idempotence comes from status, not from the lifecycle state: this update
+		// moves the row off InProgress, so the next sweep's WHERE no longer matches
+		// it. Guarding on the lifecycle state instead would have skipped the very
+		// rows this exists for — dev's two are already marked 'unresolvable' while
+		// still sitting at status InProgress, which is what keeps them in the poll
+		// set forever. 'merged' and 'closed' are still excluded: those record a real
+		// provider outcome, so the row is not an abandoned creation whatever its URL
+		// column says.
+		res, err := dbms.Db.ExecContext(ctx.GetContext(),
+			fmt.Sprintf(`UPDATE %s SET
+				pr_lifecycle_state = 'unresolvable',
+				status = $1,
+				status_message = $2,
+				pr_followup_pending = false,
+				last_pr_check_at = (now() AT TIME ZONE 'UTC')
+				WHERE type = 'PullRequest'
+				  AND status = 'InProgress'
+				  AND (type_reference_id IS NULL OR type_reference_id NOT LIKE 'http%%')
+				  AND (pr_lifecycle_state IS NULL
+				       OR pr_lifecycle_state NOT IN ('merged', 'closed'))
+				  AND created_at < (now() AT TIME ZONE 'UTC') - $3::interval`, tbl),
+			string(RecommendationResolutionStatusFailed), msg, prCreationAbandonedAfter)
+		if err != nil {
+			ctx.GetLogger().Error("pr_lifecycle: failed to retire abandoned PR creations", "table", tbl, "error", err)
+			continue
+		}
+		if n, err := res.RowsAffected(); err == nil {
+			total += n
+		}
+	}
+	if total > 0 {
+		ctx.GetLogger().Info("pr_lifecycle: retired abandoned PR creations",
+			"count", total, "abandoned_after", prCreationAbandonedAfter)
 	}
 	return total
 }
