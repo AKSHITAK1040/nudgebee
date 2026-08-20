@@ -56,8 +56,10 @@ func (a *awsTrustedAdvisor) GetRecommendations(ctx providers.CloudProviderContex
 			ctx.GetLogger().Info("trusted advisor not available (requires Business/Enterprise support plan)")
 			return recommendations, nil
 		}
-		ctx.GetLogger().Warn("failed to list trusted advisor checks", "error", err)
-		return recommendations, nil
+		// Anything other than a missing support plan is a failed scan, not an
+		// empty one. Reporting it as empty archives every Trusted Advisor
+		// recommendation the account has.
+		return nil, fmt.Errorf("list trusted advisor checks: %w", err)
 	}
 
 	// Filter to cost optimization and performance checks (most relevant for recommendations)
@@ -78,8 +80,15 @@ func (a *awsTrustedAdvisor) GetRecommendations(ctx providers.CloudProviderContex
 			CheckId: check.Id,
 		})
 		if err != nil {
-			ctx.GetLogger().Warn("failed to get trusted advisor check result", "checkId", *check.Id, "error", err)
-			continue
+			// Not being entitled to a particular check is a stable condition, not
+			// a failed scan — skip it as the check list itself does. Anything else
+			// means we cannot tell whether this check's recommendations still
+			// apply, and reporting them as absent would archive them.
+			if isAccessDeniedError(err) {
+				ctx.GetLogger().Info("trusted advisor check not available", "checkId", aws.ToString(check.Id))
+				continue
+			}
+			return nil, fmt.Errorf("get trusted advisor check result %s: %w", aws.ToString(check.Id), err)
 		}
 
 		if resultOutput.Result == nil {
