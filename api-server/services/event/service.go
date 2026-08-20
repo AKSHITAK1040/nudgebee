@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/samber/lo"
 	"gopkg.in/yaml.v2"
 )
 
@@ -1994,14 +1995,76 @@ func extractEvidenceActionNames(evidences []any) map[string]bool {
 		if !ok {
 			continue
 		}
+		names := make([]string, 0, 2)
 		if name, ok := ai["action_name"].(string); ok && name != "" {
-			actions[name] = true
+			names = append(names, name)
 		}
 		if name, ok := ai["actual_action_name"].(string); ok && name != "" {
+			names = append(names, name)
+		}
+		if len(names) == 0 {
+			continue
+		}
+
+		// A log enrichment that carried nothing did not enrich. The names collected here
+		// suppress the server-side equivalent action (eventrule.executeAutoActions), and
+		// for logs that suppression is category-wide: any one member of the log-action set
+		// having run marks the whole category done. So an agent k8s_pod_log_enricher
+		// evidence whose gzip decodes to zero bytes — 62 of the 433 written in a week —
+		// stopped the `logs` action from ever asking the account's configured log source.
+		//
+		// Restricted to log actions deliberately. The same "empty evidence still suppresses
+		// its twin" pattern may well exist for other enrichers, but the measurement behind
+		// this change only covers logs, and widening it would change what evidence every
+		// investigation collects on no evidence at all.
+		if lo.SomeBy(names, eventrule.IsLogAction) && !evidenceHasContent(m) {
+			continue
+		}
+		for _, name := range names {
 			actions[name] = true
 		}
 	}
 	return actions
+}
+
+// evidenceHasContent reports whether an evidence carries anything worth keeping.
+//
+// Deliberately conservative: it answers false only for shapes it positively
+// recognises as empty, so an unfamiliar enrichment still suppresses its
+// server-side twin exactly as before.
+func evidenceHasContent(evidence map[string]any) bool {
+	switch data := evidence["data"].(type) {
+	case string:
+		if playbooks.IsWrappedAgentPayload(data) {
+			decoded, err := playbooks.DecodeAgentPayload(data)
+			if err != nil {
+				// Undecodable is not the same as empty — leave the old behaviour.
+				return true
+			}
+			return strings.TrimSpace(decoded) != ""
+		}
+		if trimmed := strings.TrimSpace(data); trimmed == "" {
+			return false
+		} else if strings.HasPrefix(trimmed, "{") {
+			var wrapper struct {
+				Data []any `json:"data"`
+			}
+			if err := common.UnmarshalJson([]byte(trimmed), &wrapper); err == nil && wrapper.Data != nil {
+				return len(wrapper.Data) > 0
+			}
+		}
+		return true
+	case map[string]any:
+		if inner, ok := data["data"].([]any); ok {
+			return len(inner) > 0
+		}
+		return true
+	case []any:
+		return len(data) > 0
+	case nil:
+		return false
+	}
+	return true
 }
 
 // dedupeEvidencesByContent removes exact-duplicate evidence elements (same serialized

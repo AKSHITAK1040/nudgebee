@@ -51,6 +51,13 @@ var agentToServerActionMap = map[string][]string{
 	"event_resource_events_enricher":      {"event_resource_events_enricher"},
 }
 
+// IsLogAction reports whether an action name belongs to the mutually exclusive
+// log-collection set. Callers outside this package need it to know that treating
+// one of these as "already ran" suppresses the whole category, not just that action.
+func IsLogAction(name string) bool {
+	return logActions[name]
+}
+
 // logActions is the set of mutually exclusive log-collection actions.
 // Once any one of these runs, the rest should be skipped to avoid
 // duplicate log evidences.

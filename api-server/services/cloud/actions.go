@@ -3426,23 +3426,17 @@ func (a *cloudVpcFlowLogsAction) Execute(ctx playbooks.PlaybookActionContext, ra
 		return nil, fmt.Errorf("invalid log_group_name format: %q", params.LogGroupName)
 	}
 
-	// Prioritize time sources: explicit params > event times > default (last 1 hour)
-	var startTime, endTime time.Time
-
+	// Prioritize time sources: explicit params > event window > default (last 1 hour).
+	// The event window goes through ResolveQueryWindow rather than being used raw: a
+	// just-fired EventBridge alarm has EndedAt nil and StartedAt seconds ago, which made
+	// the CloudWatch Insights range a few seconds wide and returned no flows — 36 of the
+	// 41 VPC-flow evidences stored in a week were empty for that reason.
+	startTime, endTime := ctx.GetEvent().ResolveQueryWindow(0)
 	if params.StartTime != nil {
 		startTime = *params.StartTime
-	} else if ctx.GetEvent().StartedAt != nil {
-		startTime = *ctx.GetEvent().StartedAt
-	} else {
-		startTime = time.Now().Add(-1 * time.Hour)
 	}
-
 	if params.EndTime != nil {
 		endTime = *params.EndTime
-	} else if ctx.GetEvent().EndedAt != nil {
-		endTime = *ctx.GetEvent().EndedAt
-	} else {
-		endTime = time.Now()
 	}
 
 	// Discover VPC Flow Logs log group name and format
