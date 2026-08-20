@@ -5,11 +5,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"nudgebee/collector/cloud/common"
 	"nudgebee/collector/cloud/config"
 	"nudgebee/collector/cloud/providers"
 	"nudgebee/collector/cloud/security"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -209,6 +211,41 @@ func ConsumeCloudAccountCostReportJobs(ctx *security.RequestContext, concurrency
 // costBackfillTimeout bounds the in-process historical backfill so a hung
 // downstream S3/DB call can't leak the consumer worker indefinitely.
 const costBackfillTimeout = 30 * time.Minute
+
+// StartHistoricalBackfill runs the historical backfill detached from the caller,
+// on its own bounded context.
+//
+// The onboarding consumer can afford to run runHistoricalBackfill inline because
+// it is a queue worker. The HTTP onboarding path cannot: discovery plus a month
+// at a time of report processing routinely outlasts any sane request timeout, so
+// holding the request open would either time out the caller or tie up the
+// handler for up to costBackfillTimeout.
+//
+// Best-effort by the same rules as the consumer's call: the requested month has
+// already been stored by the time this runs, so a failure here costs history,
+// not the current month.
+func StartHistoricalBackfill(ctx *security.RequestContext, accountId, tenantId string, processedMonth time.Month, processedYear int) {
+	logger := ctx.GetLogger()
+	if logger == nil {
+		logger = slog.Default()
+	}
+	tracer, meter := ctx.GetTracer(), ctx.GetMeter()
+	go func() {
+		// The consumer's inline call to runHistoricalBackfill is covered by the
+		// MQ consumer's recover; a bare goroutine has no such umbrella, so a
+		// panic anywhere downstream would take the whole collector process down
+		// rather than costing one account its history.
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Error("usagereport: historical backfill panicked", "panic", r, "accountId", accountId, "stack", string(debug.Stack()))
+			}
+		}()
+		backfillCtx, cancel := context.WithTimeout(context.Background(), costBackfillTimeout)
+		defer cancel()
+		backfillJobCtx := security.NewRequestContext(backfillCtx, security.NewSecurityContextForSuperAdminWithTenant(tenantId), logger, tracer, meter)
+		runHistoricalBackfill(backfillJobCtx, accountId, tenantId, processedMonth, processedYear)
+	}()
+}
 
 // postReportProcessingTimeout bounds a single post-report job safely under the
 // RabbitMQ consumer_timeout (30m default). Staying under it means a slow account

@@ -1078,10 +1078,23 @@ func CreateAccount(context *security.RequestContext, query AccountCreateRequest)
 	if query.CloudProvider == "AWS" || query.CloudProvider == "Azure" || query.CloudProvider == "GCP" || query.CloudProvider == "CloudFoundry" {
 		go func() {
 			context.GetLogger().Info("account: triggering intial load for account", "account", newAccountId)
+			// Backfill: this is the account's first sync, so the current month on
+			// its own is whatever fraction of it has elapsed. An account connected
+			// on the 20th would otherwise show 20 days of spend and no history at
+			// all — no month-on-month comparison, an empty trend chart, and no
+			// baseline for spend-anomaly detection to work from. The organisation
+			// auto-registration path already asks for this; account creation from
+			// the UI never did.
+			// UTC, not local: billing periods are UTC, so a server west of it would
+			// ask for the previous month during the first hours of a new UTC month.
+			// That month is also what the backfill skips as already-processed, so a
+			// local-time answer would skip the wrong one.
+			now := time.Now().UTC()
 			_, err := cloud.StoreUsageReport(context, cloud.StoreUsageRequest{
 				AccountId: newAccountId,
-				Month:     time.Now().Month(),
-				Year:      time.Now().Year(),
+				Month:     now.Month(),
+				Year:      now.Year(),
+				Backfill:  true,
 			})
 			if err != nil {
 				context.GetLogger().Error("failed to hit store_usage", "error", err)

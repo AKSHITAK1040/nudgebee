@@ -30,6 +30,12 @@ type getUsageRequest struct {
 	AccountId string     `json:"account_id" validate:"required"`
 	Month     time.Month `json:"month" validate:"required"`
 	Year      int        `json:"year" validate:"required"`
+	// Backfill asks for the account's already-available historical billing
+	// periods to be ingested as well, not just the requested month. Set when an
+	// account is first connected — without it a mid-month onboarding leaves the
+	// account with only a partial current month and no history to trend or
+	// baseline against.
+	Backfill bool `json:"backfill"`
 }
 
 type getRecommendationRequest struct {
@@ -367,6 +373,13 @@ func handleCloudProviderApis(r *gin.Engine, tracer *trace.Tracer, meter *metric.
 			c.JSON(500, buildApiResponse(nil, err))
 			return
 		}
+
+		// Detached: the requested month is already stored, and the historical
+		// sweep takes far longer than this request should stay open.
+		if request.Backfill {
+			account.StartHistoricalBackfill(ctx, request.AccountId, ctx.GetSecurityContext().GetTenantId(), month, year)
+		}
+
 		c.JSON(200, buildApiResponse(resp))
 	})
 
