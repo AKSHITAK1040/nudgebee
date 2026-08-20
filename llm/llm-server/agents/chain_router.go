@@ -9,6 +9,7 @@ import (
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 	toolcore "nudgebee/llm/tools/core"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -342,8 +343,41 @@ func getAgent(ctx *security.RequestContext, agent string, accountId string) (cor
 	return core.GetNBAgent(ctx, agentName, accountId, core.AgentStatusEnabled)
 }
 
+// deterministicCostRouteRe matches questions that are unambiguously about
+// cloud cost/spend. Precision over recall: every pattern here should be a
+// phrase no reasonable SRE/troubleshooting question contains, so anything
+// ambiguous ("expensive query", "cost of downtime") falls through to the LLM
+// router rather than being force-routed. Recall gaps are acceptable — the LLM
+// router and its few-shot examples still catch phrasings this misses.
+var deterministicCostRouteRe = regexp.MustCompile(`(?i)\b(?:` +
+	`(?:aws|gcp|azure|cloud|our|my|the) bill\b|billing|bill (?:went|go(?:ne)? up|spike)|` +
+	`spends?|spending|spent|budgets?|` +
+	`savings? plans?|reserved instances?|commitment coverage|finops|` +
+	`cost (?:anomal\w*|spike|breakdown|saving\w*|by|per)|cloud costs?|monthly cost|` +
+	`potential savings|savings opportunit\w*|save money|run-rate|` +
+	`right-?siz\w* recommendations?` +
+	`)\b`)
+
+// IsDeterministicCostQuery reports whether a query should route to the FinOps
+// agent without consulting the LLM router or the last-agent reuse shortcut.
+func IsDeterministicCostQuery(query string) bool {
+	return deterministicCostRouteRe.MatchString(query)
+}
+
 func InferAgent(ctx *security.RequestContext, userId string, accountId string, conversationId string, query string, configs ...core.ConversationSessionRequestConfig) (core.NBAgent, error) {
 	isNewConversation := core.IsNewConversationRequest(configs...)
+
+	// Deterministic cost routing runs before BOTH the last-agent reuse shortcut
+	// and the LLM router: unambiguous cost/spend questions go to FinOps in code.
+	// The LLM router was observed violating its own written cost-routing rule,
+	// and the reuse shortcut then pinned the wrong agent for the rest of the
+	// conversation — a regex decides what a regex can decide.
+	if IsDeterministicCostQuery(query) {
+		if agent, found := getAgent(ctx, FinOpsAgentName, accountId); found {
+			ctx.GetLogger().Info("router: deterministic cost route to finops", "query_len", len(query))
+			return agent, nil
+		}
+	}
 
 	// Optimization: If conversation has a last agent in history, try to use it directly to skip routing overhead
 	// But ONLY if this isn't explicitly flagged as a new conversation

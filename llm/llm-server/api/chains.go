@@ -382,7 +382,13 @@ func handleCompletionApis(r *gin.Engine, tracer trace.Tracer, meter metric.Meter
 					// Check if we can reuse the last agent from the pre-loaded history
 					if len(chatHistory) > 0 && chatHistory[0]["response"] != "" {
 						lastAgentName := strings.TrimSpace(chatHistory[0]["response"])
-						if lastAgentName != "" && lastAgentName != core.RouterAgentName {
+						// A deterministically cost-shaped question must not inherit a
+						// non-FinOps agent from history: one early misroute otherwise
+						// pins the wrong agent for the rest of the conversation. Fall
+						// through to InferAgentOrHelp, which routes it to finops.
+						if agents.IsDeterministicCostQuery(request.Query) && !strings.EqualFold(lastAgentName, agents.FinOpsAgentName) {
+							logger.Info("api: skipping last-agent reuse for deterministic cost query", "last_agent", lastAgentName)
+						} else if lastAgentName != "" && lastAgentName != core.RouterAgentName {
 							if agent1, found := core.GetNBAgent(agentContext, lastAgentName, request.AccountId, core.AgentStatusEnabled); found {
 								agent = agent1
 								logger.Info("api: reusing last active agent from pre-loaded history", "agent_name", lastAgentName)
