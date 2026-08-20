@@ -1458,8 +1458,31 @@ func (p *ReActPlanner) repairTruncatedJSON(content string) string {
 	return ""
 }
 
-// isExplorationCommand checks if a command is exploratory (ls, find without specific purpose)
+// gitReadOnlySubcommands are the git_tool subcommands that only inspect state
+// (mirrors git_tool.go's Description()). Used by isExplorationCommand so a
+// run that repeatedly checks status/log/diff/branch/remote/fetch through the
+// git tool — instead of ls/find through cli — still gets forced to decide.
+var gitReadOnlySubcommands = map[string]bool{
+	"status": true, "log": true, "diff": true, "show": true,
+	"branch": true, "remote": true, "fetch": true, "blame": true,
+}
+
+// isExplorationCommand checks if a command is exploratory: ls/find without a
+// specific purpose (via the cli tool), or a read-only git subcommand (via the
+// git tool) repeated instead of acting. Without the git case, a run can loop
+// on git status/log/diff/branch/remote/fetch indefinitely and never trip this
+// limiter — observed burning a whole commit-enforcement retry's budget on
+// investigation with zero commit/push attempt (issue #36634).
 func (p *ReActPlanner) isExplorationCommand(action string, actionInput map[string]any) bool {
+	if action == "git" {
+		if args, ok := actionInput["args"].([]any); ok && len(args) > 0 {
+			if sub, ok := args[0].(string); ok {
+				return gitReadOnlySubcommands[strings.ToLower(strings.TrimSpace(sub))]
+			}
+		}
+		return false
+	}
+
 	if action != "cli" {
 		return false
 	}
@@ -1488,8 +1511,13 @@ func (p *ReActPlanner) executeStep(ctx context.Context, step *Step) {
 		p.mu.Unlock()
 		if explCount > p.explorationLimit {
 			step.Status = "failed"
-			step.Error = fmt.Sprintf("Too many consecutive exploration commands (%d). Instead of ls, try: 1) 'grep -r \"keyword\" .' to find relevant files, 2) 'find . -name \"*pattern*\" -type f' to locate specific files, or 3) directly analyze files you've already found.", p.consecutiveExplorationCount)
-			step.Observation = "Exploration limit exceeded. Use targeted search commands like grep or find instead of ls."
+			if step.Action == "git" {
+				step.Error = fmt.Sprintf("Too many consecutive read-only git commands (%d) without acting. You already have enough context — commit and push now (git add, git commit, git push), or discard with git checkout -- . if the changes are wrong. Do not run another status/log/diff/branch/remote/fetch.", p.consecutiveExplorationCount)
+				step.Observation = "Exploration limit exceeded. Stop inspecting state and either commit+push or discard the changes."
+			} else {
+				step.Error = fmt.Sprintf("Too many consecutive exploration commands (%d). Instead of ls, try: 1) 'grep -r \"keyword\" .' to find relevant files, 2) 'find . -name \"*pattern*\" -type f' to locate specific files, or 3) directly analyze files you've already found.", p.consecutiveExplorationCount)
+				step.Observation = "Exploration limit exceeded. Use targeted search commands like grep or find instead of ls."
+			}
 			if p.logger != nil {
 				p.logger.Log(common.EventStepFailure, "Exploration limit exceeded", map[string]any{
 					"consecutive_count": p.consecutiveExplorationCount,
