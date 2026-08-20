@@ -15,7 +15,7 @@ import {
   AutomateBlue,
   BetaIcon,
 } from '@assets';
-import { hasFeatureAccess, hasPermission, hasReadAccess, hasWriteAccess } from '@lib/auth';
+import { hasFeatureAccess, hasPermission, hasReadAccess, hasWriteAccess, withAuth } from '@lib/auth';
 import { useData } from '@context/DataContext';
 import { DropdownMenu as DsDropdownMenu } from '@ui/DropdownMenu';
 import { Button as DsButton } from '@ui/Button';
@@ -285,4 +285,4 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
   );
 };
 
-export default Optimise;
+export default withAuth(Optimise);
