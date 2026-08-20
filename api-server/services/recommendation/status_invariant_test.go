@@ -60,8 +60,9 @@ const statusGuard = "status = CASE WHEN recommendation.status NOT IN ('Open', 'A
 // them when producers are added; a failure here means either the regexes drifted
 // or the code moved, and both are worth a look.
 const (
-	minUpsertSites  = 6
-	minArchiveSites = 5
+	minUpsertSites      = 6
+	minArchiveSites     = 5
+	minFailedApplySites = 2
 )
 
 // goSourceFiles returns every non-test .go file under the services tree.
@@ -165,4 +166,79 @@ func TestRecommendationArchivesDoNotSweepUserOwnedStates(t *testing.T) {
 	}
 	assert.GreaterOrEqualf(t, found, minArchiveSites,
 		"only found %d recommendation archive statements; the pattern has probably drifted and this test is no longer checking anything", found)
+}
+
+// TestFailedApplyNeverDismissesARecommendation fails if any code maps a failed
+// resolution outcome onto the Dismissed status.
+//
+// Dismissed means a person decided not to do this. A failed apply means the
+// platform could not do it — the opposite claim about the same row, and a far
+// more damaging one to record, because every guarded upsert now pins
+// user-owned statuses and no re-scan can lift it. An IAM denial or a throttled
+// call would delete a live savings opportunity permanently.
+//
+// The coordinator already answers this correctly in projectRecommendation
+// (Failed on an InProgress row hands it back as Open, for retry) and refuses
+// the transition outright in legalDismissal. This asserts nobody re-derives
+// that mapping by hand next to it, which is how the api-server ended up with
+// three copies of it.
+func TestFailedApplyNeverDismissesARecommendation(t *testing.T) {
+	failedCaseRe := regexp.MustCompile(`(?i)case\s+adapter\.RecommendationResolutionStatusFailed\s*:`)
+
+	found := 0
+	for name, content := range goSourceFiles(t) {
+		for _, match := range failedCaseRe.FindAllStringIndex(content, -1) {
+			found++
+			assert.NotContainsf(t, caseBody(content, match[1]), "RecommendationStatusDismissed",
+				"%s: a failed apply is recorded as Dismissed.\n"+
+					"Dismissed is the user's decision not to act, and no re-scan can reopen it, so a "+
+					"failed apply recorded this way deletes the recommendation for good.\n"+
+					"Settle the resolution through coordinator.SettleResolution and let "+
+					"projectRecommendation decide — it returns a failed attempt to Open for retry.", name)
+		}
+	}
+	assert.GreaterOrEqualf(t, found, minFailedApplySites,
+		"only found %d failed-outcome branches; the pattern has probably drifted and this test is no longer checking anything", found)
+}
+
+// caseBody returns the body of the switch case whose label ends at start,
+// bounded by the next label at the same nesting or the close of the switch.
+//
+// Scanning the whole case rather than a fixed window is the point: a comment
+// explaining the branch is enough to push an assignment outside any character
+// budget, which would leave this test passing while checking nothing. The
+// boundary is found by indentation rather than a hardcoded depth so a switch
+// inside a closure or a goroutine is bounded just as tightly — guessing the
+// depth would over-scan into unrelated code and report a failure against the
+// wrong file.
+func caseBody(content string, start int) string {
+	indent := labelIndent(content, start)
+	body := content[start:]
+
+	for offset := 0; ; {
+		nl := strings.IndexByte(body[offset:], '\n')
+		if nl < 0 {
+			return body
+		}
+		lineStart := offset + nl + 1
+		line := body[lineStart:]
+		if eol := strings.IndexByte(line, '\n'); eol >= 0 {
+			line = line[:eol]
+		}
+		trimmed := strings.TrimLeft(line, " \t")
+		// A line indented deeper than the label is inside this case.
+		if trimmed != "" && len(line)-len(trimmed) <= len(indent) {
+			if strings.HasPrefix(trimmed, "case ") || strings.HasPrefix(trimmed, "default:") || strings.HasPrefix(trimmed, "}") {
+				return body[:lineStart]
+			}
+		}
+		offset = lineStart
+	}
+}
+
+// labelIndent returns the leading whitespace of the line containing pos.
+func labelIndent(content string, pos int) string {
+	lineStart := strings.LastIndexByte(content[:pos], '\n') + 1
+	line := content[lineStart:pos]
+	return line[:len(line)-len(strings.TrimLeft(line, " \t"))]
 }

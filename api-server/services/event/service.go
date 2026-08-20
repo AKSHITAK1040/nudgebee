@@ -1130,7 +1130,10 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 	case adapter.RecommendationResolutionStatusSuccess:
 		recommendationStatus = models.RecommendationStatusClosed
 	case adapter.RecommendationResolutionStatusFailed:
-		recommendationStatus = models.RecommendationStatusDismissed
+		// Not Dismissed: that is the user's decision not to act, and reporting it
+		// for a failure the platform hit says the opposite of what happened. The
+		// event stays unresolved either way — only Closed marks it RESOLVED below.
+		recommendationStatus = models.RecommendationStatusOpen
 	case adapter.RecommendationResolutionStatusInProgress:
 		recommendationStatus = models.RecommendationStatusInProgress
 	}
