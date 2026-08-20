@@ -644,6 +644,16 @@ func lockForRepo(repoKey string) chan struct{} {
 	return ch
 }
 
+// baseCanCheckout reports whether the bare base repo holds at least one commit on
+// any ref — the minimum for `git worktree add` to produce a working tree. Checked
+// by state rather than by matching git's error text, so an unusable base is caught
+// however it got that way (cloned while the remote was still empty, objects pruned,
+// refs corrupted).
+func baseCanCheckout(ctx context.Context, baseDir string) bool {
+	out, err := exec.CommandContext(ctx, "git", "-C", baseDir, "rev-list", "-n", "1", "--all").Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
+}
+
 // ensureRemoteTracking makes each named branch resolvable as origin/<branch> in a bare
 // base repo, by adding it to the remote's fetch refspec and fetching it.
 //
@@ -802,11 +812,11 @@ func (gc *GitClient) CloneOrReuseRepositoryAtCommit(ctx context.Context, repoURL
 		}
 	}
 
-	if _, err := os.Stat(filepath.Join(baseDir, "HEAD")); os.IsNotExist(err) {
+	freshBareClone := func() error {
 		// Fresh bare clone — single-branch by default
 		gc.logger.Log(common.EventStepStart, "Performing fresh bare clone (single-branch)", map[string]any{"base_dir": baseDir, "branch": branch})
 		if err := os.MkdirAll(filepath.Dir(baseDir), 0755); err != nil {
-			return nil, fmt.Errorf("failed to create repos directory: %w", err)
+			return fmt.Errorf("failed to create repos directory: %w", err)
 		}
 		cloneCtx, cancel := context.WithTimeout(ctx, gc.timeout)
 		defer cancel()
@@ -818,7 +828,7 @@ func (gc *GitClient) CloneOrReuseRepositoryAtCommit(ctx context.Context, repoURL
 		cmd := exec.CommandContext(cloneCtx, "git", cloneArgs...)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			_ = os.RemoveAll(baseDir)
-			return nil, fmt.Errorf("bare clone failed: %s: %w", string(out), err)
+			return fmt.Errorf("bare clone failed: %s: %w", string(out), err)
 		}
 		gc.logger.Log(common.EventStepComplete, "Bare clone completed", map[string]any{"base_dir": baseDir})
 
@@ -828,6 +838,35 @@ func (gc *GitClient) CloneOrReuseRepositoryAtCommit(ctx context.Context, repoURL
 		// `git merge origin/<base>` could not reproduce a PR merge conflict. Establish
 		// the remote-tracking refspec for exactly the branches this request needs.
 		gc.ensureRemoteTracking(ctx, baseDir, append([]string{branch}, extraBranches...)...)
+		return nil
+	}
+
+	if _, err := os.Stat(filepath.Join(baseDir, "HEAD")); os.IsNotExist(err) {
+		if err := freshBareClone(); err != nil {
+			return nil, err
+		}
+	} else if !baseCanCheckout(ctx, baseDir) {
+		// The cached base holds no commit, so no worktree can ever be created from
+		// it. The reuse path above cannot repair that: `git clone --bare` configures
+		// no fetch refspec, so a later `git fetch origin` only writes FETCH_HEAD and
+		// leaves refs/heads/* empty. Seen in production when a repo was first cloned
+		// while it still had zero commits — every later analysis in that pod kept
+		// failing on `worktree add` with `invalid reference: HEAD`. Discard and
+		// re-clone; a base that has been pruned or corrupted recovers the same way.
+		gc.logger.Log(common.EventStepFailure, "Cached clone resolves no commit, re-cloning", map[string]any{"base_dir": baseDir})
+		_ = os.RemoveAll(baseDir)
+		if err := freshBareClone(); err != nil {
+			return nil, err
+		}
+	}
+
+	// A remote with no commits clones successfully (exit 0, unborn HEAD), so a
+	// clean clone is not evidence there is anything to check out. Say so plainly
+	// here — otherwise the failure surfaces from `worktree add` as git's
+	// `--orphan` advice plus `invalid reference: HEAD`, which reads like a bug in
+	// the agent rather than an empty repository.
+	if !baseCanCheckout(ctx, baseDir) {
+		return nil, fmt.Errorf("repository has no commits to check out: %s", repoURL)
 	}
 
 	// On the reuse path the requested branch is already handled above; make sure any
