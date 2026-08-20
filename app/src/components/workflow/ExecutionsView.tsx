@@ -461,14 +461,31 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
 
   // Poll execution tasks when the selected execution is running
   const taskPollingRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Execution we were polling as a live run — tells "this run just finished" apart from
+  // "the user selected a run that was already finished".
+  const wasLivePollingRef = useRef<string | null>(null);
   useEffect(() => {
     if (taskPollingRef.current) {
       clearInterval(taskPollingRef.current);
       taskPollingRef.current = null;
     }
 
-    if (!selectedExecution || !workflowId || !accountId) return;
-    if (isExecutionCompleted(selectedExecution.status)) return;
+    if (!selectedExecution || !workflowId || !accountId) {
+      // Deselecting drops the live run: keeping its id would fire a redundant fetch if the
+      // user re-selects it after it finished.
+      wasLivePollingRef.current = null;
+      return;
+    }
+    if (isExecutionCompleted(selectedExecution.status)) {
+      // Polling stops here, so a run that just went terminal (e.g. cancelled) would keep
+      // its pre-cancel tasks — including an approval still badged SCHEDULED (#36358).
+      if (wasLivePollingRef.current === selectedExecution.id) {
+        fetchExecutionTasks(selectedExecution.id, true);
+      }
+      wasLivePollingRef.current = null;
+      return;
+    }
+    wasLivePollingRef.current = selectedExecution.id;
 
     taskPollingRef.current = setInterval(() => {
       fetchExecutionTasks(selectedExecution.id, true);
@@ -697,6 +714,10 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
     }
     return statusUpper || undefined;
   };
+
+  // A terminal run has nothing in progress and nothing awaiting a human — it gates both
+  // the progress pill and the approval form (#36358).
+  const isSelectedExecutionLive = !!selectedExecution && !isExecutionCompleted(selectedExecution.status);
 
   // Only use tasks when they belong to the currently selected execution.
   // Prevents stale tasks of a previous execution from overlaying the canvas
@@ -1650,7 +1671,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
           {/* Execution Status Bar - floating pill with approval prompt when an approval task is waiting */}
           <ExecutionStatusBar
             top={140}
-            visible={!!selectedExecution && !isExecutionCompleted(selectedExecution.status)}
+            visible={isSelectedExecutionLive}
             completedTasks={
               effectiveTasks.filter((t) => {
                 const s = String(t.status ?? '').toUpperCase();
@@ -1659,7 +1680,7 @@ const ExecutionsView: React.FC<ExecutionsViewProps> = ({
             }
             totalTasks={effectiveTasks.length}
             pendingApprovals={
-              hasWriteAccess(accountId)
+              isSelectedExecutionLive && hasWriteAccess(accountId)
                 ? effectiveTasks
                     .filter((t) => t.type === 'core.approval' && String(t.status ?? '').toUpperCase() === 'SCHEDULED' && !!t.id)
                     .map<PendingApproval>((t) => ({
