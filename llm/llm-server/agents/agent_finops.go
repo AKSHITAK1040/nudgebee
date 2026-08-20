@@ -51,7 +51,13 @@ func init() {
 		`rightsizing financial impact, idle/unattached resources, cost anomalies, and commitment coverage. ` +
 		`Provides evidence-backed cost analysis with dollar figures and actionable next steps.`
 	toolInput := "Provide a question about cloud cost, spend, or optimization in natural language."
-	toolOutput := "Returns a cost analysis with dollar figures, evidence citations, and recommended actions."
+	// The relay contract in the output line is load-bearing: an orchestrator that
+	// received this tool's fully formatted markdown answer re-encoded it into a
+	// raw JSON object as its user-facing reply. The narrowest place to stop that
+	// class of mangling is the tool interface the caller actually reads.
+	toolOutput := "Returns a cost analysis formatted as user-ready markdown (tables, [tool] citations, dollar figures). " +
+		"When this answers the user's question, relay the markdown as-is (preserving tables and citations) — " +
+		"do NOT re-encode it into JSON or restructure it."
 
 	core.RegisterNBAgentFactoryAndTool(FinOpsAgentName, func(accountId string) (core.NBAgent, error) {
 		return &FinOpsAgent{accountId: accountId}, nil

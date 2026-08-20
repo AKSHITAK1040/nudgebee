@@ -151,6 +151,16 @@ func (l RouterAgent) GetSystemPrompt(ctx *security.RequestContext, query core.NB
 			Explanation: `Matches FinOpsAgent — cost and billing questions route to finops even when phrased as an investigation.`,
 		},
 		{
+			Question:    "Show me the safety band and blast radius for the top rightsizing recommendation",
+			Answer:      "finops",
+			Explanation: `Matches FinOpsAgent — cost/rightsizing recommendations and their apply-safety details are FinOps territory, not a Kubernetes investigation.`,
+		},
+		{
+			Question:    "How did our spend change vs the previous 30 days? Break it down by service.",
+			Answer:      "finops",
+			Explanation: `Matches FinOpsAgent based on "spend" — period-over-period cost breakdowns route to finops even when a service/workload dimension is mentioned.`,
+		},
+		{
 			Question:    "Create an automation to restart pods when OOM occurs",
 			Answer:      "automation",
 			Explanation: `Matches automation agent because user explicitly wants to create an automation.`,

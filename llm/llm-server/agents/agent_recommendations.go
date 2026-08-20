@@ -12,7 +12,8 @@ func init() {
 	Recommendations can be related to identifying unused/abandoned k8s services/resources/deployments/pv/pvc, security vulnerabilities, or performance optimizations in Kubernetes clusters and cloud infrastructure.
 	Also answers resolution questions — what was done or attempted about a recommendation: pull requests, tickets, deployment changes, workflow runs, who initiated them, and whether they succeeded or failed.`
 	toolInput := "Provide question related to recommendations in natural language."
-	toolOutput := "The tool will return return the response based on the user question."
+	toolOutput := "Returns the recommendations as a user-ready markdown table (with recommendation ids and safety bands). " +
+		"When this answers the user's question, relay the markdown as-is — do NOT re-encode it into JSON or restructure it."
 
 	core.RegisterNBAgentFactoryAndTool(RecommendationsAgentName, func(accountId string) (core.NBAgent, error) {
 		return newRecommendationAgent(accountId), nil
