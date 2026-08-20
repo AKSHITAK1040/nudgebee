@@ -541,6 +541,20 @@ func (s *OpenObserveTraceSource) CountTraces(ctx *security.RequestContext, req T
 	return common.OpenTelemetryTraceCount{Count: count}, nil
 }
 
+// QueryRootSpansByTrace returns one representative root span per trace for the "By Traces"
+// view. OpenObserve exposes spans rather than a native trace-level result, so use the shared
+// reducer that backs the other non-ClickHouse providers.
+func (s *OpenObserveTraceSource) QueryRootSpansByTrace(ctx *security.RequestContext, req TracesV3Request) ([]common.OpenTelemetryTrace, error) {
+	return queryRootSpansViaSpans(ctx, s, req)
+}
+
+// CountTracesByTrace returns an estimate marker for the "By Traces" view. Counting matching
+// spans would over-count traces, while a distinct trace-id count would not match the shared
+// root-span filter semantics. Count = -1 tells the frontend to estimate pagination.
+func (s *OpenObserveTraceSource) CountTracesByTrace(_ *security.RequestContext, _ TracesV3Request) (common.OpenTelemetryTraceCount, error) {
+	return countTracesByTraceEstimate()
+}
+
 func (s *OpenObserveTraceSource) GetLabelValues(ctx *security.RequestContext, req TracesV3LabelValuesRequest) (common.OpenTelemetryTraceLabelValues, error) {
 	cfg, err := integrations.GetOpenObserveConfigs(ctx, req.AccountId)
 	if err != nil {
@@ -609,6 +623,13 @@ func (s *OpenObserveTraceSource) GetLabelValues(ctx *security.RequestContext, re
 	}
 
 	return common.OpenTelemetryTraceLabelValues{Label: col, Values: values}, nil
+}
+
+// QueryLabels returns backend-discovered trace label keys. OpenObserve has no cheap
+// account-wide trace label-key endpoint, so FetchTraceLabels falls back to the canonical
+// keys derived from GetLabelMapping, matching the other providers without discovery APIs.
+func (s *OpenObserveTraceSource) QueryLabels(_ *security.RequestContext, _ FetchTraceLabelRequest) ([]OutputTraceLabel, error) {
+	return []OutputTraceLabel{}, nil
 }
 
 func (s *OpenObserveTraceSource) QueryGroupedTraces(ctx *security.RequestContext, req TracesV3Request) ([]TraceGroupingValues, error) {
