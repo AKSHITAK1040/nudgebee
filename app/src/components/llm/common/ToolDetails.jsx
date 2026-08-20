@@ -295,6 +295,56 @@ export const salvageTruncatedParams = (text) => {
   return lenientUnescape(out);
 };
 
+// jq expressions like `.[] | {...}` emit one JSON object per line (a stream, not
+// an array), so whole-text JSON.parse rejects the response even though it is fully
+// structured. Detect that shape strictly — two or more lines, every non-empty line
+// parsing to a plain object — and return the collected array so it can take the
+// same structured-table path a real JSON array takes. All-or-nothing: any prose,
+// markdown, primitive, or nested-array line returns null and the response keeps
+// rendering as text.
+export const tryParseJsonLines = (text) => {
+  if (!text || typeof text !== 'string') {
+    return null;
+  }
+  // Raw text first: a JSON string value may itself contain `\n` escapes
+  // (issue bodies, log messages), and decoding those into real newlines
+  // before splitting would cut such a line in half. Only when the raw form
+  // isn't JSONL, retry with literal `\n` separators decoded — some persisted
+  // responses arrive with them (the same variant the markdown and rabbitmq
+  // fallbacks in this file normalize for). Decode only at record boundaries
+  // (between `}` and `{`, or at the end) so value escapes survive even in
+  // that transport.
+  return parseJsonObjectLines(text) || parseJsonObjectLines(text.replace(/\}\s*(?:\\n\s*)+(?=\{|$)/g, '}\n'));
+};
+
+const parseJsonObjectLines = (text) => {
+  const lines = text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+  // A single line is whole-parseable JSON (handled by the caller); past ~500 rows
+  // the unpaginated table is heavier than the text fallback it would replace.
+  if (lines.length < 2 || lines.length > 500) {
+    return null;
+  }
+  const parsed = [];
+  for (const line of lines) {
+    if (!line.startsWith('{') || !line.endsWith('}')) {
+      return null;
+    }
+    try {
+      const obj = JSON.parse(line);
+      if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+        return null;
+      }
+      parsed.push(obj);
+    } catch {
+      return null;
+    }
+  }
+  return parsed;
+};
+
 const isPreformattedText = (text) => {
   if (!text) {
     return false;
@@ -459,6 +509,14 @@ const renderResponseText = (responseText, toolCall) => {
     }
   } catch (e) {
     console.warn('renderResponseText: not JSON', e);
+  }
+
+  // JSONL (one JSON object per line): re-serialize as an array and reuse the
+  // structured-table path. Checked before the markdown sniff below so a field
+  // value containing `**` or backticks can't divert structured data to markdown.
+  const jsonLines = tryParseJsonLines(responseText);
+  if (jsonLines) {
+    return <LLMAnswerRenderer toolCall={{ ...(toolCall || {}), text: JSON.stringify(jsonLines) }} messages={[]} />;
   }
 
   // Check for markdown in raw (non-JSON) text before falling back to preformatted
