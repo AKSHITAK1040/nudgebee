@@ -646,6 +646,20 @@ var fingerprintDependentColumns = map[string]bool{
 	"count_new_issue_events":    true,
 }
 
+// Columns that depend on the analysed-events JOIN on event_groupings_v2.
+//
+// Kept separate from prDependentColumns (which serves a different table's
+// pr_url/pr_title) because this one joins a PRE-AGGREGATED subquery:
+// event_log_analysis holds one row per analysis_type per event, so joining it
+// raw would multiply every event row by its stage count and silently inflate
+// event_count, count_new_issues and every other aggregate in the same query.
+// The subquery collapses to one row per (event, account) before the join.
+var analysisDependentColumns = map[string]bool{
+	"count_analysed_issues":     true,
+	"first_analysed_at":         true,
+	"minutes_to_first_analysis": true,
+}
+
 // Columns that depend on the event_log_analysis JOIN
 var prDependentColumns = map[string]bool{
 	"pr_url":   true,
@@ -1310,6 +1324,24 @@ var table_metadata = map[string]TableDefinition{
 					GROUP BY related_event_id, cloud_account_id) ecc
 					ON ecc.related_event_id = events.id AND ecc.cloud_account_id = events.cloud_account_id`
 			}
+			// One row per analysed event, not per analysis stage. event_log_analysis
+			// carries a row per analysis_type (summary / log_analysis /
+			// investigation / detailed_response), so a raw join would return up to
+			// four rows per event and multiply every other aggregate selected
+			// alongside these columns.
+			//
+			// min(recorded_at) is the clock: time to FIRST completed stage is when a
+			// reader could first see an explanation, which is what "time to
+			// understand" means. Waiting for all four would measure pipeline depth
+			// instead.
+			if requestReferencesColumns(request, analysisDependentColumns) {
+				from += ` LEFT JOIN (
+					SELECT event_id, cloud_account_id, min(recorded_at) AS first_analysed_at
+					FROM event_log_analysis
+					WHERE status = 'COMPLETED'
+					GROUP BY event_id, cloud_account_id
+				) ela ON ela.event_id = events.id AND ela.cloud_account_id = events.cloud_account_id`
+			}
 			return from, request, nil
 		},
 		Name:                "event_groupings_v2",
@@ -1600,6 +1632,33 @@ var table_metadata = map[string]TableDefinition{
 			"fingerprint_first_seen_at": {
 				Type:         ColumnDefinitionTypeDatetime,
 				Def:          "min(ed.absolute_first_seen_at)",
+				IsAggregated: true,
+			},
+			// Coverage numerator. DISTINCT fingerprint so it shares the issue unit
+			// with event_count's distinct transformation — dividing a per-event
+			// numerator by a per-chain denominator is the exact mistake this
+			// column exists to stop callers making.
+			"count_analysed_issues": {
+				Type:         ColumnDefinitionTypeInt,
+				Def:          "count(DISTINCT CASE WHEN ela.first_analysed_at IS NOT NULL THEN events.fingerprint END)",
+				IsAggregated: true,
+			},
+			"first_analysed_at": {
+				Type:         ColumnDefinitionTypeDatetime,
+				Def:          "min(ela.first_analysed_at)",
+				IsAggregated: true,
+			},
+			// Median, not mean: analysis latency has a long tail (a stuck chain
+			// sitting for hours drags an average far past anything a reader would
+			// recognise). Rows where the analysis predates the event are excluded
+			// rather than clamped — a negative interval means the analysis came
+			// from an earlier occurrence being reused, which is not this event's
+			// time to understand.
+			"minutes_to_first_analysis": {
+				Type: ColumnDefinitionTypeFloat,
+				Def: "percentile_cont(0.5) WITHIN GROUP (ORDER BY " +
+					"CASE WHEN ela.first_analysed_at >= events.created_at " +
+					"THEN EXTRACT(EPOCH FROM (ela.first_analysed_at - events.created_at)) / 60 END)",
 				IsAggregated: true,
 			},
 			"fingerprint_event_count": {

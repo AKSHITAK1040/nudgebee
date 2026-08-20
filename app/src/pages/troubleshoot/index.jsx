@@ -11,6 +11,7 @@ import { useMemo, useState, useEffect } from 'react';
 import AutoInvestigated from '@components/troubleshoot/AutoInvestigated';
 import ManualInvestigated from '@components/troubleshoot/ManualInvestigated';
 import EventResolutions from '@components/troubleshoot/EventResolutions';
+import TroubleshootAnalytics from '@components/troubleshoot/analytics/TroubleshootAnalytics';
 import Tabs from '@shared/navigation/Tabs';
 import {
   AllEventsIcon,
@@ -84,6 +85,16 @@ const filterOptions = [
     fragment: 'kg',
     value: 2,
     icon: ServiceMapsIcon,
+    iconSize: 16,
+  },
+  // Analytics is a top-level destination, not a view of the events list: it
+  // answers "is the estate getting better" rather than "what fired". No
+  // tabOptions — it owns its whole pane, like Knowledge Graph.
+  {
+    name: 'Analytics',
+    fragment: 'analytics',
+    value: 3,
+    icon: GroupedEventsIcon,
     iconSize: 16,
   },
 ];
@@ -302,6 +313,23 @@ const TroubleshootPage = () => {
         <div style={{ margin: 'var(--ds-space-4)' }}>
           <ErrorBoundary>
             <KnowledgeGraphServiceMapWrapper />
+          </ErrorBoundary>
+        </div>
+      )}
+
+      {/* Analytics drills back into All Events via applyWidgetFilter, which
+          switches selectedTab itself — so a click here leaves this pane for the
+          events list, exactly as the briefing's tiles do. */}
+      {selectedTab === 3 && (
+        <div style={{ margin: '0px var(--ds-space-6)' }}>
+          {/* Same account/range controls the All Events tab carries. Without them
+              this pane inherited whatever window the URL happened to hold and
+              offered no way to change it. */}
+          <Box sx={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--ds-space-4)' }}>
+            <BriefingFilters />
+          </Box>
+          <ErrorBoundary>
+            <TroubleshootAnalytics onDrillDown={applyWidgetFilter} />
           </ErrorBoundary>
         </div>
       )}

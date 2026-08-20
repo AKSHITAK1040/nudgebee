@@ -1590,7 +1590,7 @@ func init() {
 	viper.SetDefault("llm_memory_maintenance_events_retention_days", 90)
 
 	viper.SetDefault("llm_productivity_manual_baseline_minutes", 25)
-	viper.SetDefault("llm_productivity_engineer_hourly_rate_usd", 5.0)
+	viper.SetDefault("llm_productivity_engineer_hourly_rate_usd", 30.0)
 
 	// Watch (background-poll-and-notify) defaults. Disabled by default — opt in via env.
 	viper.SetDefault("llm_server_watch_enabled", false)

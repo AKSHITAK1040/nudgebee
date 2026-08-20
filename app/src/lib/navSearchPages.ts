@@ -106,6 +106,7 @@ export const navSearchPages: NavSearchPage[] = [
   { group: 'Troubleshoot', label: 'Auto Investigated', path: '/troubleshoot#investigations/auto-investigated' },
   { group: 'Troubleshoot', label: 'Manual Investigated', path: '/troubleshoot#investigations/manual-investigated' },
   { group: 'Troubleshoot', label: 'Knowledge Graph', path: '/troubleshoot#kg' },
+  { group: 'Troubleshoot', label: 'Analytics', path: '/troubleshoot#analytics' },
 
   // Fleet-wide summary across every provider's accounts (K8s, AWS, Azure, GCP,
   // CloudFoundry, self-hosted VMs). Was /kubernetes#overview while it only

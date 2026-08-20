@@ -891,6 +891,60 @@ func TestSQLGen_RealTable_EventGroupings_WithFingerprintJoin(t *testing.T) {
 	assert.Contains(t, sql, "event_duplicates")
 }
 
+func TestSQLGen_RealTable_EventGroupings_WithAnalysisJoin(t *testing.T) {
+	td, ok := GetTableMetadata("event_groupings_v2")
+	require.True(t, ok)
+
+	req := QueryRequest{
+		Table:   "event_groupings_v2",
+		Columns: cols("account_id", "event_count", "count_analysed_issues", "minutes_to_first_analysis"),
+		Where: QueryWhereClause{
+			Binary: BinaryWhereClause{
+				"tenant_id": {Eq: "t1"},
+			},
+		},
+		Limit: 10,
+	}
+	sql, err := GenerateSqlQuery(superAdminCtx(), "", req, td)
+	require.NoError(t, err)
+
+	// The analysis join is PRE-AGGREGATED. event_log_analysis holds one row per
+	// analysis_type per event, so joining it raw multiplies every event row by
+	// its stage count and inflates event_count alongside it. Assert on the
+	// GROUP BY inside the subquery, not just the table name, because that is
+	// the part that makes the join safe.
+	assert.Contains(t, sql, "event_log_analysis")
+	assert.Contains(t, sql, "GROUP BY event_id, cloud_account_id")
+	assert.Contains(t, sql, "AS count_analysed_issues")
+	assert.Contains(t, sql, "AS minutes_to_first_analysis")
+	// Coverage numerator and denominator must share the issue unit, or callers
+	// divide a per-event count by a per-chain count.
+	assert.Contains(t, sql, "count(DISTINCT CASE WHEN ela.first_analysed_at IS NOT NULL THEN events.fingerprint END)")
+}
+
+func TestSQLGen_RealTable_EventGroupings_NoAnalysisJoinWhenUnreferenced(t *testing.T) {
+	td, ok := GetTableMetadata("event_groupings_v2")
+	require.True(t, ok)
+
+	req := QueryRequest{
+		Table:   "event_groupings_v2",
+		Columns: cols("account_id", "status", "event_count"),
+		Where: QueryWhereClause{
+			Binary: BinaryWhereClause{
+				"tenant_id": {Eq: "t1"},
+			},
+		},
+		Limit: 10,
+	}
+	sql, err := GenerateSqlQuery(superAdminCtx(), "", req, td)
+	require.NoError(t, err)
+
+	// Every existing caller must keep the plan it had. The join is opt-in via
+	// analysisDependentColumns precisely so adding these columns cannot change
+	// the cost or the results of queries that never asked for them.
+	assert.NotContains(t, sql, "event_log_analysis")
+}
+
 func TestSQLGen_RealTable_SpendGroupings(t *testing.T) {
 	td, ok := GetTableMetadata("spend_groupings_v2")
 	require.True(t, ok)
