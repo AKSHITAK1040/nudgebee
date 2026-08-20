@@ -47,7 +47,12 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 	// defaultColumns is the explicit column list used in instructions and example
 	// queries to prevent SELECT * from pulling the large recommendation JSON into
 	// the ReAct scratchpad (can exceed 100 KB per row).
-	const defaultColumns = "namespace, service, resource_name, controller_name, category, rule_name, severity, status, estimated_saving, created_at, updated_at"
+	// id and safety_band are part of the default set on purpose: callers (the
+	// FinOps agent's apply/hand-off tools) need the recommendation id to act on
+	// a row, and safety_band is the gate they must present before any apply —
+	// omitting them forced callers to answer "which one?" and "how safe?" with
+	// guesses.
+	const defaultColumns = "id, namespace, service, resource_name, controller_name, category, rule_name, severity, status, estimated_saving, safety_band, created_at, updated_at"
 
 	instructions := []string{
 		"**Understand the Question Precisely:** Parse user's natural-language question to identify filters: category, severity, status, rule_name, namespace, service, name/resource_name, controller_name, date ranges, numeric thresholds. Normalize synonyms (e.g., 'prod' -> '%prod%', 'last 30 days' -> INTERVAL '30 days', 'RDS' -> service ILIKE '%rds%').",
@@ -90,7 +95,8 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 			"Input: a safe SELECT query; Output: resolution attempt rows or an error.",
 		},
 	}
-	outputFormat := "Output a Markdown table as the primary format. Columns: Namespace | Resource | Category | Severity | Est. Saving ($/mo) | Rule | Status | Age. " +
+	outputFormat := "Output a Markdown table as the primary format. Columns: Namespace | Resource | Category | Severity | Est. Saving ($/mo) | Safety | Rule | Status | Age. " +
+		"Safety renders safety_band ('—' when NULL). ALWAYS include each row's recommendation id — append an Id column (or an id list after the table when the table is wide); callers need the id to act on a recommendation, so never drop it. " +
 		"Fit the first column to the rows: Namespace applies only to Kubernetes recommendations (service = 'kubernetes'). When the rows are cloud-resource recommendations (namespace NULL, service = a cloud service), replace Namespace with Service and render the short service name (AmazonRDS -> RDS, AmazonEC2 -> EC2); when the result set mixes both, show both columns with \"—\" where a value does not apply. " +
 		"Sort rows by estimated_saving descending (nulls last). For a null/zero estimated_saving show \"—\", never \"$0.00\". A negative estimated_saving means resolving it ADDS cost (e.g. growing nearly-full storage) — render it as added cost (e.g. \"+$12/mo cost\"), never as savings. " +
 		"After the table, add one line: the row count and total quantified savings (sum of positive estimated_saving only). Append [recommendation_execute] after the table heading."
@@ -106,6 +112,13 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 		"",
 		"**Financial Fields:**",
 		"- estimated_saving (DECIMAL): Estimated cost savings in USD if recommendation is implemented",
+		"",
+		"**Safety / Impact Fields (blast radius from the dependency graph):**",
+		"- safety_band (STRING): How safe it is to act — 'safe', 'review', 'risky', 'unknown'; NULL when impact has not been computed yet",
+		"- safety_reason (STRING): One-line reason behind the band (e.g. '2 production dependent(s) would be affected')",
+		"- dependent_count (INT), production_dependents (INT): Number of dependent services, and how many are production",
+		"- dependents (JSON): Compact list of the dependent services (name, namespace, hops away); select only when the caller asks for the blast radius in detail",
+		"- finops_score (INT 0-100), finops_band (STRING): Priority score and band ('Act Now', 'Critical', 'High', 'Medium', 'Low') — prioritization, NOT apply-safety; safety_band is the safety verdict",
 		"",
 		"**Temporal Fields:**",
 		"- created_at (TIMESTAMP): When the recommendation was first created",

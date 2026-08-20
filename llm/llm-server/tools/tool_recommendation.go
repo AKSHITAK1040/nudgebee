@@ -42,7 +42,14 @@ const recommendationView = `
 			r.is_dismissed,
 			r.snoozed_until,
 			r.account_object_id,
-			r.updated_by::text
+			r.updated_by::text,
+			r.finops_score,
+			r.finops_band,
+			r.finops_score_breakdown ->> 'safety_band' AS safety_band,
+			r.finops_score_breakdown -> 'impact_summary' ->> 'safety_reason' AS safety_reason,
+			(r.finops_score_breakdown -> 'impact_summary' ->> 'dependent_count')::int AS dependent_count,
+			(r.finops_score_breakdown -> 'impact_summary' ->> 'production_dependents')::int AS production_dependents,
+			r.finops_score_breakdown -> 'impact_summary' -> 'dependents' AS dependents
 		FROM recommendation r
 		LEFT JOIN cloud_resourses cr ON r.resource_id = cr.id
 		JOIN tenant t ON r.tenant_id = t.id
@@ -63,7 +70,7 @@ func (m RecommendationExecuteTool) GetType() core.NBToolType {
 }
 
 func (m RecommendationExecuteTool) Description() string {
-	return "Executes a SQL query for recommendation_view and returns the result. Columns: id, namespace, service, resource_name, estimated_saving, category, severity, status, rule_name, is_dismissed, dismissed_reason, snoozed_until, recommendation."
+	return "Executes a SQL query for recommendation_view and returns the result. Columns: id, namespace, service, resource_name, estimated_saving, category, severity, status, rule_name, is_dismissed, dismissed_reason, snoozed_until, recommendation, finops_score, finops_band, safety_band, safety_reason, dependent_count, production_dependents, dependents."
 }
 
 func (m RecommendationExecuteTool) InputSchema() core.ToolSchema {

@@ -141,6 +141,9 @@ func (t SpendSummaryTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 	case "service":
 		rows, qErr := querySpendByService(dbManager, tenantId, accountId, filter, windowStart, windowEnd)
 		err = qErr
+		for i := range rows {
+			rows[i].IsNew = rows[i].AmountLast == 0 && rows[i].Amount > 0
+		}
 		result = rows
 		shownCount = len(rows)
 		if len(rows) > 0 {
@@ -150,6 +153,9 @@ func (t SpendSummaryTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 	default:
 		rows, qErr := querySpendByCloudAccount(dbManager, tenantId, accountId, filter, windowStart, windowEnd)
 		err = qErr
+		for i := range rows {
+			rows[i].IsNew = rows[i].AmountLast == 0 && rows[i].Amount > 0
+		}
 		result = rows
 		shownCount = len(rows)
 		if len(rows) > 0 {
@@ -221,6 +227,10 @@ type spendByAccountRow struct {
 	Saving           float64 `json:"estimated_savings" db:"saving"`
 	AmountLast       float64 `json:"amount_previous_period" db:"amount_last"`
 	PercentageChange float64 `json:"percentage_change" db:"percentage_change"`
+	// IsNew disambiguates "no prior-period spend" (a NEW entity) from a genuine
+	// 0% change: percentage_change is 0 in both cases, and the "<5% = stable"
+	// reading would otherwise mislabel a brand-new spender as stable.
+	IsNew bool `json:"is_new,omitempty" db:"-"`
 	// Window aggregates over the full result set (before LIMIT); identical on every
 	// row, read once into the response envelope, excluded from per-row JSON.
 	GrandTotal float64 `json:"-" db:"grand_total"`
@@ -234,6 +244,9 @@ type spendByServiceRow struct {
 	AmountLast       float64 `json:"amount_previous_period" db:"spend_amount_last"`
 	PercentageChange float64 `json:"percentage_change" db:"percentage_change"`
 	EstimatedSaving  float64 `json:"estimated_savings" db:"resource_estimated_saving"`
+	// IsNew disambiguates "no prior-period spend" (a NEW entity) from a genuine
+	// 0% change; see spendByAccountRow.IsNew.
+	IsNew bool `json:"is_new,omitempty" db:"-"`
 	// Window aggregates over the full result set (before LIMIT); identical on every
 	// row, read once into the response envelope, excluded from per-row JSON.
 	GrandTotal float64 `json:"-" db:"grand_total"`
@@ -343,49 +356,66 @@ func querySpendByService(dbManager *common.DatabaseManager, tenantId string, acc
 		nameFilter = fmt.Sprintf(" AND cr.service_name ILIKE $%d", len(args))
 	}
 
+	// The previous-period aggregate is computed per SERVICE over that service's
+	// full resource set, not per current-window resource. Joining the prior
+	// window through resources that also spent in the current window (the old
+	// shape) silently dropped every dollar attached to a resource that has since
+	// churned out — on a K8s account that undercounted the prior period by ~5x
+	// while the account-level query reported the true figure.
 	query := fmt.Sprintf(`
-		SELECT
-			dedup.service_name,
-			COUNT(DISTINCT dedup.resourse_id)::int AS resource_count,
-			ROUND(SUM(s.amount)::numeric, 2)::float AS spend_amount,
-			CASE WHEN SUM(s1.amount) IS NOT NULL
-				THEN ROUND(SUM(s1.amount)::numeric, 2)::float
-				ELSE 0
-			END AS spend_amount_last,
-			CASE WHEN SUM(s1.amount) > 0
-				THEN ROUND(((SUM(s.amount) - SUM(s1.amount)) / SUM(s1.amount) * 100)::numeric, 2)::float
-				ELSE 0
-			END AS percentage_change,
-			ROUND(COALESCE(SUM(r.estimated_savings), 0)::numeric, 2)::float AS resource_estimated_saving,
-			ROUND(SUM(SUM(s.amount)) OVER ()::numeric, 2)::float AS grand_total,
-			COUNT(*) OVER ()::int AS row_count
-		FROM (
+		WITH dedup AS (
 			SELECT DISTINCT ON (cr.resourse_id, cr.service_name) cr.id, cr.resourse_id, cr.service_name
 			FROM cloud_resourses cr
 			WHERE cr.tenant = $1 AND cr.service_name IS NOT NULL%s%s
 			ORDER BY cr.resourse_id, cr.service_name, cr.created_at ASC
-		) dedup
-		LEFT JOIN (
-			SELECT recommendation.resource_id, SUM(recommendation.estimated_savings) AS estimated_savings
-			FROM recommendation
-			WHERE recommendation.status = 'Open' AND recommendation.tenant_id = $1
-			GROUP BY recommendation.resource_id
-		) r ON dedup.id = r.resource_id
-		INNER JOIN (
-			SELECT spends.cloud_resource_id, SUM(spends.amount) AS amount
-			FROM spends
-			WHERE spends.date >= $2 AND spends.date < $3 AND tenant = $1 AND spends.exclude_aggregate = false%s
-			GROUP BY spends.cloud_resource_id
-		) s ON s.cloud_resource_id = dedup.id
-		LEFT JOIN (
-			SELECT spends.cloud_resource_id, SUM(spends.amount) AS amount
-			FROM spends
-			WHERE spends.date >= $2 - ($3 - $2) AND spends.date < $2 AND tenant = $1 AND spends.exclude_aggregate = false%s
-			GROUP BY spends.cloud_resource_id
-		) s1 ON s1.cloud_resource_id = dedup.id
-		WHERE s.amount > 0
-		GROUP BY dedup.service_name
-		ORDER BY SUM(s.amount) DESC
+		),
+		cur AS (
+			SELECT dedup.service_name,
+				COUNT(DISTINCT dedup.resourse_id)::int AS resource_count,
+				SUM(s.amount) AS amount,
+				SUM(r.estimated_savings) AS estimated_savings
+			FROM dedup
+			INNER JOIN (
+				SELECT spends.cloud_resource_id, SUM(spends.amount) AS amount
+				FROM spends
+				WHERE spends.date >= $2 AND spends.date < $3 AND tenant = $1 AND spends.exclude_aggregate = false%s
+				GROUP BY spends.cloud_resource_id
+			) s ON s.cloud_resource_id = dedup.id
+			LEFT JOIN (
+				SELECT recommendation.resource_id, SUM(recommendation.estimated_savings) AS estimated_savings
+				FROM recommendation
+				WHERE recommendation.status = 'Open' AND recommendation.tenant_id = $1
+				GROUP BY recommendation.resource_id
+			) r ON dedup.id = r.resource_id
+			WHERE s.amount > 0
+			GROUP BY dedup.service_name
+		),
+		prev AS (
+			SELECT dedup.service_name, SUM(s1.amount) AS amount
+			FROM dedup
+			INNER JOIN (
+				SELECT spends.cloud_resource_id, SUM(spends.amount) AS amount
+				FROM spends
+				WHERE spends.date >= $2 - ($3 - $2) AND spends.date < $2 AND tenant = $1 AND spends.exclude_aggregate = false%s
+				GROUP BY spends.cloud_resource_id
+			) s1 ON s1.cloud_resource_id = dedup.id
+			GROUP BY dedup.service_name
+		)
+		SELECT
+			cur.service_name,
+			cur.resource_count,
+			ROUND(cur.amount::numeric, 2)::float AS spend_amount,
+			ROUND(COALESCE(prev.amount, 0)::numeric, 2)::float AS spend_amount_last,
+			CASE WHEN COALESCE(prev.amount, 0) > 0
+				THEN ROUND(((cur.amount - prev.amount) / prev.amount * 100)::numeric, 2)::float
+				ELSE 0
+			END AS percentage_change,
+			ROUND(COALESCE(cur.estimated_savings, 0)::numeric, 2)::float AS resource_estimated_saving,
+			ROUND(SUM(cur.amount) OVER ()::numeric, 2)::float AS grand_total,
+			COUNT(*) OVER ()::int AS row_count
+		FROM cur
+		LEFT JOIN prev ON prev.service_name = cur.service_name
+		ORDER BY cur.amount DESC
 		LIMIT 20`, resourceAccountFilter, nameFilter, accountFilter, accountFilter)
 
 	rows := []spendByServiceRow{}
