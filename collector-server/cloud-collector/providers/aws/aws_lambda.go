@@ -266,7 +266,7 @@ func (a *awsLambda) GetRecommendations(ctx providers.CloudProviderContext, accou
 			recommendation := providers.Recommendation{
 				CategoryName:        providers.RecommendationCategoryConfiguration,
 				RuleName:            "aws_lambda_dead_letter_queue",
-				Severity:            providers.RecommendationSeverityHigh,
+				Severity:            providers.RecommendationSeverityLow,
 				Savings:             0,
 				Data:                nil,
 				Action:              providers.RecommendationActionModify,
@@ -283,7 +283,7 @@ func (a *awsLambda) GetRecommendations(ctx providers.CloudProviderContext, accou
 			recommendation := providers.Recommendation{
 				CategoryName:        providers.RecommendationCategorySecurity,
 				RuleName:            "aws_lambda_environment_variable_encryption",
-				Severity:            providers.RecommendationSeverityHigh,
+				Severity:            providers.RecommendationSeverityLow,
 				Savings:             0,
 				Data:                nil,
 				Action:              providers.RecommendationActionModify,
@@ -300,7 +300,7 @@ func (a *awsLambda) GetRecommendations(ctx providers.CloudProviderContext, accou
 			recommendation := providers.Recommendation{
 				CategoryName:        providers.RecommendationCategoryConfiguration,
 				RuleName:            "aws_lambda_provisioned_concurrency",
-				Severity:            providers.RecommendationSeverityHigh,
+				Severity:            providers.RecommendationSeverityLow,
 				Savings:             0,
 				Data:                nil,
 				Action:              providers.RecommendationActionModify,
@@ -317,7 +317,7 @@ func (a *awsLambda) GetRecommendations(ctx providers.CloudProviderContext, accou
 			recommendation := providers.Recommendation{
 				CategoryName:        providers.RecommendationCategoryConfiguration,
 				RuleName:            "aws_lambda_reserved_concurrency",
-				Severity:            providers.RecommendationSeverityHigh,
+				Severity:            providers.RecommendationSeverityLow,
 				Savings:             0,
 				Data:                nil,
 				Action:              providers.RecommendationActionModify,
@@ -337,7 +337,7 @@ func (a *awsLambda) GetRecommendations(ctx providers.CloudProviderContext, accou
 						recommendation := providers.Recommendation{
 							CategoryName:        providers.RecommendationCategoryInfraUpgrade,
 							RuleName:            "aws_lambda_deprecated_runtime",
-							Severity:            providers.RecommendationSeverityHigh,
+							Severity:            providers.RecommendationSeverityMedium,
 							Savings:             0,
 							Data:                nil,
 							Action:              providers.RecommendationActionModify,
@@ -359,7 +359,7 @@ func (a *awsLambda) GetRecommendations(ctx providers.CloudProviderContext, accou
 			recommendation := providers.Recommendation{
 				CategoryName:        providers.RecommendationCategoryConfiguration,
 				RuleName:            "aws_lambda_tracing",
-				Severity:            providers.RecommendationSeverityHigh,
+				Severity:            providers.RecommendationSeverityLow,
 				Savings:             0,
 				Data:                nil,
 				Action:              providers.RecommendationActionModify,
