@@ -1227,6 +1227,9 @@ class Events:
                 # Use summary if available, otherwise fall back to analysis
                 content = summary if summary else analysis
                 if content and content != "No analysis available":
+                    # llm-server returns GFM markdown (### headers, - bullets); Slack's
+                    # mrkdwn renders those literally, so convert before sending.
+                    content = Transformer.markdown_to_slack_markdown(content)
                     message = f"Hey! Just wrapped up digging into this event for you 🔍\n\n{content}"
                 else:
                     message = (
@@ -1284,17 +1287,31 @@ class Events:
         if len(text) <= max_len:
             return [text.strip()]
 
-        sentences = re.split(_SENTENCE_PATTERN, text)
+        # Split on lines first and keep them joined with "\n" so headings/
+        # bullets stay on their own line. _SENTENCE_PATTERN's "\s+" also
+        # matches newlines, so splitting the whole text by sentence (as this
+        # used to do) and rejoining fragments with a single space silently
+        # collapsed every line break in a chunked message. Sentence/word
+        # splitting is now only a fallback for a single line that alone
+        # exceeds max_len, where there's no line break to preserve anyway.
+        lines = text.split("\n")
         chunks, current = [], ""
 
-        for sentence in sentences:
-            if len(sentence) > max_len:
-                words = sentence.split()
-                for word in words:
-                    current = Events._split_chunk_on_words(chunks, current, max_len, word)
+        for line in lines:
+            if len(line) > max_len:
+                if current:
+                    chunks.append(current.strip())
+                    current = ""
+                for sentence in re.split(_SENTENCE_PATTERN, line):
+                    if len(sentence) > max_len:
+                        words = sentence.split()
+                        for word in words:
+                            current = Events._split_chunk_on_words(chunks, current, max_len, word)
+                    else:
+                        current = Events._split_chunks(chunks, current, max_len, sentence)
                 continue
 
-            current = Events._split_chunks(chunks, current, max_len, sentence)
+            current = Events._split_chunks_on_lines(chunks, current, max_len, line)
 
         if current:
             chunks.append(current.strip())
@@ -1322,12 +1339,25 @@ class Events:
         return current
 
     @staticmethod
+    def _split_chunks_on_lines(chunks, current, max_len, line):
+        if len(current) + len(line) + 1 > max_len:
+            if current:
+                chunks.append(current.strip())
+            current = line
+        else:
+            current += ("\n" if current else "") + line
+        return current
+
+    @staticmethod
     def _plain_text_leaf(text: str) -> List[dict]:
         """Leftover-plain-text renderer passed to render_rich_segments: chunks
-        by sentence (Events.split_text) rather than generic.py's char-slice
-        chunking, since this path is a fire-and-forget background reply with
-        no fixed block budget to respect."""
-        blocks = [MarkdownBlock(text=chunk) for chunk in Events.split_text(text) if chunk.strip()]
+        by line (Events.split_text, falling back to sentence/word splitting
+        only for a single line that alone exceeds the block limit) rather
+        than generic.py's char-slice chunking, since this path is a
+        fire-and-forget background reply with no fixed block budget to
+        respect."""
+        converted = Transformer.markdown_to_slack_markdown(text)
+        blocks = [MarkdownBlock(text=chunk) for chunk in Events.split_text(converted) if chunk.strip()]
         return to_slack_dicts(blocks)
 
     def _send_message_with_fallback(self, channel_id: str, team_id: str, thread_ts: str, blocks: List[dict]) -> None:
