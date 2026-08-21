@@ -29,6 +29,7 @@ func (t SpendSummaryTool) GetType() core.NBToolType { return core.NBToolTypeTool
 
 func (t SpendSummaryTool) Description() string {
 	return "Retrieves pre-aggregated cloud spend summary. Returns spend amounts, period-over-period changes, and estimated savings. " +
+		"Savings count each opportunity once (alternative purchase options for the same commitment are collapsed to the best one), so they match the recommendations tool and the Optimise page. " +
 		"Spend amounts are gross usage cost — provider credits/refunds are excluded; the separate top-level 'credits' field carries the window's credit total (negative or zero). " +
 		"Optional group_by parameter: 'cloud_account' (default) for per-account breakdown or 'service' for per-service breakdown. " +
 		"Optional account_id parameter: UUID of a specific cloud account to scope results to (defaults to the current account). " +
@@ -298,6 +299,15 @@ func querySpendByCloudAccount(dbManager *common.DatabaseManager, tenantId string
 		nameFilter = fmt.Sprintf(" WHERE ca.account_name ILIKE $%d", len(args))
 	}
 
+	// Scope the savings roll-up as narrowly as the outer query: the ROW_NUMBER
+	// window is an optimisation fence, so the outer ca.id = r.cloud_account_id
+	// join cannot be pushed in and the rank would otherwise be computed across
+	// every recommendation in the tenant.
+	savingsScope := " AND r2.tenant_id = $1"
+	if accountId != "" {
+		savingsScope += " AND r2.cloud_account_id = $4"
+	}
+
 	query := fmt.Sprintf(`
 		SELECT
 			ca.id,
@@ -324,12 +334,7 @@ func querySpendByCloudAccount(dbManager *common.DatabaseManager, tenantId string
 			WHERE spends.date >= $2 - ($3 - $2) AND spends.date < $2 AND tenant = $1 AND spends.exclude_aggregate = false%s
 			GROUP BY spends.cloud_account
 		) s1 ON ca.id = s1.cloud_account
-		LEFT JOIN (
-			SELECT recommendation.cloud_account_id, SUM(recommendation.estimated_savings) AS estimated_savings
-			FROM recommendation
-			WHERE recommendation.status = 'Open' AND recommendation.tenant_id = $1
-			GROUP BY recommendation.cloud_account_id
-		) r ON ca.id = r.cloud_account_id%s
+		LEFT JOIN `+PrimarySavingsSubquery("cloud_account_id", savingsScope)+` r ON ca.id = r.cloud_account_id%s
 		ORDER BY s.amount DESC
 		LIMIT 10`, accountFilter, accountFilter, nameFilter)
 
@@ -383,6 +388,13 @@ func querySpendByService(dbManager *common.DatabaseManager, tenantId string, acc
 		nameFilter = fmt.Sprintf(" AND cr.service_name ILIKE $%d", len(args))
 	}
 
+	// Same window-fence reasoning as querySpendByCloudAccount: push the account
+	// scope into the savings subquery instead of leaving it on the outer join.
+	savingsScope := " AND r2.tenant_id = $1"
+	if accountId != "" {
+		savingsScope += " AND r2.cloud_account_id = $4"
+	}
+
 	// The previous-period aggregate is computed per SERVICE over that service's
 	// full resource set, not per current-window resource. Joining the prior
 	// window through resources that also spent in the current window (the old
@@ -408,12 +420,7 @@ func querySpendByService(dbManager *common.DatabaseManager, tenantId string, acc
 				WHERE spends.date >= $2 AND spends.date < $3 AND tenant = $1 AND spends.exclude_aggregate = false%s
 				GROUP BY spends.cloud_resource_id
 			) s ON s.cloud_resource_id = dedup.id
-			LEFT JOIN (
-				SELECT recommendation.resource_id, SUM(recommendation.estimated_savings) AS estimated_savings
-				FROM recommendation
-				WHERE recommendation.status = 'Open' AND recommendation.tenant_id = $1
-				GROUP BY recommendation.resource_id
-			) r ON dedup.id = r.resource_id
+			LEFT JOIN `+PrimarySavingsSubquery("resource_id", savingsScope)+` r ON dedup.id = r.resource_id
 			WHERE s.amount > 0
 			GROUP BY dedup.service_name
 		),

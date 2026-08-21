@@ -474,12 +474,21 @@ func (a *FinOpsAgent) appendSpendContext(ctx *security.RequestContext, b *string
 		Quantified   int     `db:"quantified"`
 		TotalSavings float64 `db:"total_savings"`
 	}
+	// One row per opportunity, matching every other savings surface. Without the
+	// dedupe this line primed each conversation with an inflated baseline: an
+	// AWS account read $2,806.30 here while its own recommendations table and
+	// the Optimise page both said $1,183.91.
 	if err := dbManager.Db.GetContext(queryCtx, &rec,
 		`SELECT COUNT(*) AS cnt,
 		        COUNT(*) FILTER (WHERE estimated_savings > 0) AS quantified,
 		        COALESCE(SUM(estimated_savings) FILTER (WHERE estimated_savings > 0), 0) AS total_savings
-		 FROM recommendation
-		 WHERE cloud_account_id = $1 AND status = 'Open'`,
+		 FROM (
+		     SELECT r2.estimated_savings, `+tools.PrimaryRecommendationRank("r2", "ca2")+` AS dedupe_rank
+		     FROM recommendation r2
+		     JOIN cloud_accounts ca2 ON ca2.id = r2.cloud_account_id
+		     WHERE r2.cloud_account_id = $1 AND r2.status = 'Open'
+		 ) primary_recs
+		 WHERE dedupe_rank = 1`,
 		a.accountId); err != nil {
 		slog.Warn("finops: open recommendation query failed for account context", "error", err, "account_id", a.accountId)
 		complete = false

@@ -3254,6 +3254,10 @@ var table_metadata = map[string]TableDefinition{
 							-- Per-resource recommendations: one primary per (resource, category) wins.
 							WHEN r.resource_id IS NOT NULL THEN r.resource_id::text
 							-- Azure-shaped fallback (kept while Azure ingestion still relies on it).
+							-- NOTE: llm-server mirrors this whole partition in
+							-- tools.PrimaryRecommendationRank so chat and this page report the
+							-- same savings (#36673). Change both together, or Azure/AWS totals
+							-- diverge across surfaces again.
 							-- Gated on cloud_provider FIRST so the jsonb tests are only reached for
 							-- Azure rows. Without the gate every non-Azure row that falls through the
 							-- branches above detoasts the recommendation jsonb up to four times just
