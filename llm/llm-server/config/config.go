@@ -1120,6 +1120,18 @@ type appConfig struct {
 	// for local demos where a shared dev DB has cluster pods holding the
 	// lease. Never set this in a multi-replica production deployment.
 	WatchBypassLeaderElection bool `mapstructure:"llm_server_watch_bypass_leader_election"`
+
+	// PromptsVersion forces the prompt loader (prompts/loader.go resolveConfig)
+	// to resolve every prompt to this exact version (e.g. "v3") when no DB
+	// experiment/config applies, for iterating on a new prompt version
+	// locally without a DB round-trip. Overridable per-prompt via
+	// PROMPTS_VERSION_<PROMPT_NAME> (e.g. PROMPTS_VERSION_K8S_LEAN=v1),
+	// read dynamically since prompt names aren't enumerable here -- see
+	// prompts/loader.go's forcedVersionFor. Mirrors the LLM_PROVIDER_<AGENT>
+	// per-agent-then-global env convention (agents/core/llm_config.go).
+	// Never set in a deployed environment; production rollout stays
+	// DB-experiment/DB-config gated.
+	PromptsVersion string `mapstructure:"prompts_version"`
 }
 
 func (a appConfig) SetString(key string, value string) {
@@ -1626,6 +1638,11 @@ func init() {
 	viper.SetDefault("llm_server_watch_dispatch_batch_size", 100)
 	viper.SetDefault("llm_server_watch_sql_source_enabled", false)
 	viper.SetDefault("llm_server_watch_bypass_leader_election", false)
+
+	// Local-dev prompt iteration. Unset by default — opt in via env.
+	// PROMPTS_VERSION_<PROMPT_NAME> has no static default: it's read
+	// dynamically per prompt name (see prompts/loader.go's forcedVersionFor).
+	viper.SetDefault("prompts_version", "")
 
 	viper.SetDefault("llm_server_scratchpad_summarization_enabled", true)
 	viper.SetDefault("llm_server_scratchpad_max_observation_chars", 65536)

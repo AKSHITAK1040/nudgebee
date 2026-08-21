@@ -209,7 +209,7 @@ func MustResolveAll() error {
 	for _, module := range modules {
 		// Verified against the default provider at v1: that is the final fallback of
 		// every resolution path, so if it exists no provider/version can resolve to nothing.
-		if _, err := loader.loadPromptFile(module, promptCategories[module], "default", "v1"); err != nil {
+		if _, _, err := loader.loadPromptFile(module, promptCategories[module], "default", "v1"); err != nil {
 			missing = append(missing, fmt.Sprintf("%s/%s: %v", promptCategories[module], module, err))
 		}
 	}
