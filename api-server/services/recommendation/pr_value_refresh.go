@@ -193,8 +193,15 @@ func summaryOrNone(drifts []valueDrift) string {
 	return describeDrifts(drifts)
 }
 
-// recordValueRefresh advances the stored values and the guardrail counters after
-// a refresh has actually landed on the branch.
+// recordValueRefresh advances the stored values and the rewrite budget after a
+// refresh has actually landed on the branch.
+//
+// value_refresh_count counts rewrites that LANDED, deliberately: an attempt that
+// failed on infrastructure — an expired git token, a gateway 5xx, an empty agent
+// response — must not consume a pull request's rewrite budget, or five transient
+// failures retire it for its entire life while valueRefreshBlocked reports it was
+// "already updated 5 times". The failing-refresh loop is bounded by the cadence
+// stamp instead (see recordValueRefreshFailure).
 //
 // pr_iteration_count is reset because the pull request's contents changed: review
 // comments raised against the previous numbers may no longer apply, so the review

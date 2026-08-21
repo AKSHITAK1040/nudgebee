@@ -189,3 +189,61 @@ func (s *IntegrationTestSuite) TestOptimizerRunsWhenItsOwnPRIsOpen() {
 	s.Assert().Empty(s.skipReason(tasks, recID),
 		"the run must proceed so the api-server guard can refresh its own open pull request (#34959)")
 }
+
+// TestOptimizerRunsRecommendationInProgressBehindItsOwnPR is the end-to-end half
+// of #34959's last gap. Raising the pull request flips the recommendation to
+// InProgress; on `status = 'Open'` alone the workload then produces no task at
+// all on any later run, so the api-server's refresh guard is never reached and
+// the pull request goes stale exactly as the ticket describes.
+//
+// Note what "no task at all" means here: not a Skipped task with a reason, which
+// is what a below-threshold change produces — nothing, silently. That is why
+// this asserts a task exists before asserting anything about it.
+func (s *IntegrationTestSuite) TestOptimizerRunsRecommendationInProgressBehindItsOwnPR() {
+	ctx := context.Background()
+	aoID, recID := s.seedOptimizeTarget(ctx, "own-pr-open")
+
+	created := "created"
+	s.seedResolution(ctx, recID, "InProgress", "https://github.com/acme/infra/pull/950", "AutoOptimize", &created)
+	_, err := s.testWorkflowDao.Db().ExecContext(ctx,
+		`UPDATE recommendation SET status = 'InProgress' WHERE id = $1`, recID)
+	s.Require().NoError(err)
+
+	tasks, err := s.optimizerService.GenerateTasks(ctx, aoID)
+	s.Require().NoError(err)
+
+	var found bool
+	for _, t := range tasks {
+		if t.RecommendationID != nil && *t.RecommendationID == recID {
+			found = true
+		}
+	}
+	s.Assert().True(found,
+		"a recommendation held InProgress only by the pull request this auto optimize raised "+
+			"must still be recomputed, or the refresh guard is unreachable and the PR goes stale (#34959)")
+}
+
+// TestOptimizerSkipsRecommendationInProgressBehindSomeoneElse is the negative
+// that keeps the widening narrow: InProgress behind work that is genuinely still
+// running must stay excluded, or the run duplicates it.
+func (s *IntegrationTestSuite) TestOptimizerSkipsRecommendationInProgressBehindSomeoneElse() {
+	ctx := context.Background()
+	aoID, recID := s.seedOptimizeTarget(ctx, "human-pr-open")
+
+	created := "created"
+	s.seedResolution(ctx, recID, "InProgress", "https://github.com/acme/infra/pull/901", "User", &created)
+	_, err := s.testWorkflowDao.Db().ExecContext(ctx,
+		`UPDATE recommendation SET status = 'InProgress' WHERE id = $1`, recID)
+	s.Require().NoError(err)
+
+	tasks, err := s.optimizerService.GenerateTasks(ctx, aoID)
+	s.Require().NoError(err)
+
+	for _, t := range tasks {
+		if t.RecommendationID != nil && *t.RecommendationID == recID {
+			s.Failf("unexpected task",
+				"a recommendation InProgress behind a pull request someone else raised must not be "+
+					"recomputed — we never rewrite a human's PR, so this is pointless churn")
+		}
+	}
+}

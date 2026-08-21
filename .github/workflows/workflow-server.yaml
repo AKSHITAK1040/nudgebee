@@ -117,4 +117,9 @@ jobs:
           # Turns a missing DSN into a failure in THIS job only, so the suite
           # cannot quietly stop running here.
           REQUIRE_DB_TESTS: "true"
-        run: go test ./internal/storage/ -run 'BlockingPredicate|Unreleasable' -v
+        # No -run filter. Naming every suite in the job is how the coverage this
+        # job exists for silently stopped being gated: a new predicate test that
+        # did not match the regex was simply skipped, with nothing to say so.
+        # requireTestDSN already gates on the database being present, and
+        # REQUIRE_DB_TESTS above turns a missing one into a failure here.
+        run: go test ./internal/storage/ -v

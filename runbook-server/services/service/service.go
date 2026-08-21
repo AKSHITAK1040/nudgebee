@@ -829,6 +829,9 @@ func RecommendationResolve(ctx *security.RequestContext, input RecommendationRes
 		Resolution struct {
 			ID string `json:"id"`
 		} `json:"resolution"`
+		Data []struct {
+			Message string `json:"message"`
+		} `json:"data"`
 	}
 
 	if err := common.UnmarshalJson(jsonBody, &response); err != nil {
@@ -839,9 +842,17 @@ func RecommendationResolve(ctx *security.RequestContext, input RecommendationRes
 		return RecommendationResolveResult{}, fmt.Errorf("got %s from service server for PR request", response.Status)
 	}
 
+	// The api-server returns one entry carrying the human-readable outcome; older
+	// builds and non-PR resolutions may return none, which reads as "no comment".
+	var message string
+	if len(response.Data) > 0 {
+		message = response.Data[0].Message
+	}
+
 	return RecommendationResolveResult{
 		ID:       response.Resolution.ID,
 		PRAction: response.PRAction,
+		Message:  message,
 	}, nil
 }
 

@@ -32,17 +32,7 @@ import (
 func blockingTestDB(t *testing.T) *sqlx.DB {
 	t.Helper()
 
-	dsn := os.Getenv("TEST_POSTGRES_DSN")
-	if dsn == "" {
-		if os.Getenv("REQUIRE_DB_TESTS") == "true" {
-			t.Fatal("REQUIRE_DB_TESTS is set but TEST_POSTGRES_DSN is not: this suite must not be " +
-				"skipped in the job that exists to run it — it is the only coverage that executes " +
-				"the blocking predicate")
-		}
-		t.Skip("TEST_POSTGRES_DSN not set; start a scratch postgres and export it to run this suite")
-	}
-
-	db, err := sqlx.Connect("postgres", dsn)
+	db, err := sqlx.Connect("postgres", requireTestDSN(t))
 	require.NoError(t, err, "connect to TEST_POSTGRES_DSN")
 
 	// One throwaway schema per run so concurrent runs and repeat runs cannot see
@@ -252,4 +242,26 @@ func TestGetActiveResolutions_UnreleasableRowsNeverBlock(t *testing.T) {
 		require.Emptyf(t, got[recIDs[i]],
 			"%q blocks the recommendation but api-server's guard cannot see it, so nothing can ever release it", u.name)
 	}
+}
+
+// requireTestDSN returns the scratch-Postgres DSN, or ends the test.
+//
+// Skips when unset so `go test ./...` on a machine with no database still
+// passes, but FAILS when REQUIRE_DB_TESTS is set — that variable is exported
+// only by the CI job that provisions a database, so the suite cannot quietly
+// stop running in the one place that exists to run it. Keying it on an explicit
+// opt-in rather than on CI is deliberate: the general unit job also runs in CI
+// and legitimately has no database.
+func requireTestDSN(t *testing.T) string {
+	t.Helper()
+	dsn := os.Getenv("TEST_POSTGRES_DSN")
+	if dsn == "" {
+		if os.Getenv("REQUIRE_DB_TESTS") == "true" {
+			t.Fatal("REQUIRE_DB_TESTS is set but TEST_POSTGRES_DSN is not: this suite must not be " +
+				"skipped in the job that exists to run it — it is the only coverage that executes " +
+				"these predicates against a database")
+		}
+		t.Skip("TEST_POSTGRES_DSN not set; start a scratch postgres and export it to run this suite")
+	}
+	return dsn
 }

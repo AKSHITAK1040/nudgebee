@@ -94,7 +94,7 @@ func DispatchPRValueRefresh(
 	}
 	followupID, claimed, err := claimPRFollowupForValueRefresh(dbms, meta.PRURL, tenantID, createdAt)
 	if err != nil {
-		releaseValueRefreshCadence(dbms, resolution.Id, "failed to claim the pull request for updating: "+err.Error())
+		recordValueRefreshFailure(dbms, resolution.Id, "failed to claim the pull request for updating: "+err.Error())
 		onDone(ValueRefreshFailed, "failed to claim the pull request for updating: "+err.Error())
 		return
 	}
@@ -102,7 +102,7 @@ func DispatchPRValueRefresh(
 		// Only a terminal PR (merged/closed/unresolvable) refuses this claim —
 		// nothing to refresh. Hand the cadence stamp back so it isn't wasted on
 		// a dead PR.
-		releaseValueRefreshCadence(dbms, resolution.Id, "pull request already reached a terminal state")
+		recordValueRefreshFailure(dbms, resolution.Id, "pull request already reached a terminal state")
 		onDone(ValueRefreshFailed, "pull request already reached a terminal state")
 		return
 	}
@@ -116,7 +116,7 @@ func DispatchPRValueRefresh(
 	// from one still running.
 	fail := func(message string) {
 		reason := truncateForStatus("Could not update the pull request with the changed values: " + message)
-		releaseValueRefreshCadence(dbms, resolution.Id, reason)
+		recordValueRefreshFailure(dbms, resolution.Id, reason)
 		releasePRFollowupClaim(dbms, followupID, reason)
 		onDone(ValueRefreshFailed, message)
 	}
@@ -196,12 +196,30 @@ func prMetadataForResolution(resolution *models.RecommendationResolution) (prMet
 // both decide to proceed: the claim STAMPS the cooldown it checks, so the
 // second update — serialised behind the first by the row lock — sees the
 // fresh stamp and loses. A refresh that fails hands the stamp back
-// (releaseValueRefreshCadence), so a failed attempt still retries on the next
-// run rather than waiting out the cooldown.
+// (recordValueRefreshFailure), which KEEPS that stamp, so a failed attempt
+// retries once the cooldown elapses rather than on the very next run.
+//
+// (now() AT TIME ZONE 'UTC'), not bare now(): the column is `timestamp without
+// time zone` and every other writer puts naive UTC in it (recordValueRefresh
+// writes time.Now().UTC()), while this statement then compares it against a UTC
+// bound in $3. Bare now() stores session-local, so on a session ahead of UTC the
+// row it just wrote reads as being in the future and the cooldown silently
+// stretches by the offset — 11.5h after a claim under Asia/Kolkata, but 6h after
+// a successful record. Two different cooldowns for the same column.
+//
+// value_refresh_count still counts REWRITES THAT LANDED, not attempts, and the
+// failing-refresh loop is bounded by the cadence instead: a failure now keeps
+// the stamp (see recordValueRefreshFailure) rather than handing it back, so a
+// refresh that cannot run retries once per cooldown rather than on every
+// scheduled run. Charging the counter for infra failures would have been the
+// wrong lever — five expired tokens or gateway 5xxs would exhaust a pull
+// request's rewrite budget for its entire life, and valueRefreshBlocked would
+// then report "already been updated 5 times" for a pull request updated zero
+// times.
 func claimValueRefreshCadence(dbms *database.DatabaseManager, resolutionID string, maxRefreshes int, cooldown time.Duration) (bool, error) {
 	result, err := dbms.Db.Exec(
 		`UPDATE recommendation_resolution
-		 SET last_value_refresh_at = now()
+		 SET last_value_refresh_at = (now() AT TIME ZONE 'UTC')
 		 WHERE id = $1
 		   AND value_refresh_count < $2
 		   AND (last_value_refresh_at IS NULL OR last_value_refresh_at < $3)`,
@@ -216,16 +234,27 @@ func claimValueRefreshCadence(dbms *database.DatabaseManager, resolutionID strin
 	return rows > 0, nil
 }
 
-// releaseValueRefreshCadence hands the cadence stamp back after a refresh
-// that did not land, recording why. Clearing it (rather than restoring the
-// previous value) is equivalent — the claim only succeeded because any
-// previous stamp had already expired. Guarded against a PR that went terminal
-// concurrently, matching recordValueRefresh's own terminal guard, so this
-// never resurrects a dead resolution's status_message.
-func releaseValueRefreshCadence(dbms *database.DatabaseManager, resolutionID, reason string) {
+// recordValueRefreshFailure records why a refresh did not land, and KEEPS the
+// cadence stamp the claim wrote.
+//
+// It used to clear it, so a failed attempt retried on the very next scheduled
+// run. That was harmless while nothing reselected a recommendation whose pull
+// request was open — but the optimizer now does, hourly, so clearing it means a
+// refresh that cannot run dispatches a code agent every hour for the life of the
+// pull request. Keeping the stamp bounds that to one attempt per cooldown while
+// leaving the rewrite budget (value_refresh_count) for rewrites that actually
+// landed.
+//
+// A NULL stamp also reads as "due" to the optimizer's selection predicate, so
+// clearing it here would reselect the workload on the next run regardless.
+//
+// Guarded against a PR that went terminal concurrently, matching
+// recordValueRefresh's own terminal guard, so this never resurrects a dead
+// resolution's status_message.
+func recordValueRefreshFailure(dbms *database.DatabaseManager, resolutionID, reason string) {
 	_, _ = dbms.Db.Exec(
 		`UPDATE recommendation_resolution
-		 SET status_message = $1, updated_at = now(), last_value_refresh_at = NULL
+		 SET status_message = $1, updated_at = now()
 		 WHERE id = $2
 		   AND (pr_lifecycle_state IS NULL OR pr_lifecycle_state NOT IN ('merged', 'closed', 'unresolvable'))`,
 		reason, resolutionID)

@@ -379,7 +379,16 @@ func ApplyRecommendation(ctx *security.RequestContext, query RecommendationApply
 				"refreshed", decision.Refreshed,
 				"decision", decision.Reason)
 
+			// The guard's reason travels on BOTH paths, not just the refresh. The
+			// caller ran a whole generate-execute-apply cycle to get here; if the
+			// answer is "left alone", the reason it was left alone is the only
+			// useful thing this response carries. Reporting bare "a pull request is
+			// already open" makes a below-threshold decline indistinguishable from a
+			// cooldown, a cap, or a payload the guard could not read.
 			message := fmt.Sprintf("a pull request is already open for this recommendation - %s", existingPR.TypeReferenceId)
+			if decision.Reason != "" {
+				message = fmt.Sprintf("%s - %s", message, decision.Reason)
+			}
 			action := PRActionUnchanged
 			if decision.Refreshed {
 				message = fmt.Sprintf("%s - %s", existingPR.TypeReferenceId, decision.Reason)

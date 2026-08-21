@@ -187,6 +187,12 @@ CREATE TABLE IF NOT EXISTS recommendation_resolution (
 	pr_iteration_count integer DEFAULT 0 NOT NULL,
 	pr_lifecycle_state text NULL,
 	last_pr_check_at timestamp NULL,
+	-- Value-refresh cadence (#34959). The optimizer's selection query reads
+	-- last_value_refresh_at to decide whether a recommendation held InProgress by
+	-- its own open pull request is due another look, so the fixture needs it or
+	-- every optimizer test fails on a missing column instead of its assertion.
+	value_refresh_count integer DEFAULT 0 NOT NULL,
+	last_value_refresh_at timestamp NULL,
 	CONSTRAINT recommendation_resolution_pkey PRIMARY KEY (id),
 	CONSTRAINT resolver_type_check CHECK ((resolver_type = ANY (ARRAY['User'::text, 'AutoOptimize'::text, 'AutoRunbook'::text]))),
 	CONSTRAINT status_check CHECK ((status = ANY (ARRAY['InProgress'::text, 'Failed'::text, 'Success'::text, 'Configuring'::text]))),
