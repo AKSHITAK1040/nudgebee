@@ -503,3 +503,25 @@ func TestParseESMappingFields_ConflictingTypeResolvesDeterministically(t *testin
 			"the lowest-sorted index must win on every call")
 	}
 }
+
+// QueryLabels and QueryIndexFields must answer with the same names: QueryLabels
+// delegates, so there is one implementation rather than two that can drift. This is the
+// invariant that replaced "QueryLabels returns index names" — the confusion that made the
+// empty-result diagnosis validate field names against a list of indices.
+func TestElasticSaasSourceQueryLabelsReturnsFields(t *testing.T) {
+	fields := []OutputLogLabelFields{
+		{Field: "kubernetes.namespace_name", Attributes: map[string]any{"type": "keyword"}},
+		{Field: "log", Attributes: map[string]any{"type": "keyword"}},
+	}
+	labels := LabelsFromIndexFields(fields)
+
+	names := make([]string, len(labels))
+	for i, l := range labels {
+		names[i] = l.Label
+	}
+	assert.Equal(t, []string{"kubernetes.namespace_name", "log"}, names,
+		"a label's name is the field's name")
+	assert.Equal(t, query.LabelTypeString, labels[0].DataType,
+		"the ES keyword type must survive the conversion, normalized to the canonical label type")
+	assert.NotEmpty(t, labels[0].Attributes, "attributes must survive: resolveLabelDataTypes reads them")
+}
