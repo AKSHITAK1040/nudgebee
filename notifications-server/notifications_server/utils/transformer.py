@@ -21,6 +21,7 @@ from notifications_server.message_templates.blocks import (
     JsonBlock,
     ListBlock,
     MarkdownBlock,
+    SlackFileImageBlock,
     TableBlock,
     CallbackBlock,
     LinksBlock,
@@ -712,6 +713,15 @@ class Transformer:
             return Transformer.__to_slack_action_list(block)
         elif isinstance(block, ChartBlock):
             return [{"type": "data_visualization", "title": block.title, "chart": block.chart}]
+        elif isinstance(block, SlackFileImageBlock):
+            return [
+                {
+                    "type": "image",
+                    "slack_file": {"id": block.slack_file_id},
+                    "alt_text": block.alt_text,
+                    "title": {"type": "plain_text", "text": block.title},
+                }
+            ]
         elif isinstance(block, GridTableBlock):
             payload: SlackBlock = {"type": "table", "rows": block.rows}
             if block.column_settings:

@@ -1348,7 +1348,14 @@ class Events:
             response_text = payload.response
             view_url = self._diagram_view_url(cached_entry)
 
-            slack_groups = render_rich_segments(response_text, self._plain_text_leaf, view_url)
+            slack_groups = render_rich_segments(
+                response_text,
+                self._plain_text_leaf,
+                view_url,
+                upload_image=lambda filename, contents: self.common_service.upload_file_for_inline_embed(
+                    team_id, filename, contents
+                ),
+            )
 
             if not slack_groups:
                 # response_text was empty/whitespace-only, so nothing survived the

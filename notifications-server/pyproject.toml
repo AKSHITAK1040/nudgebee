@@ -64,6 +64,10 @@ opentelemetry-instrumentation-fastapi = "^0.61b0"
 opentelemetry-instrumentation-requests = "^0.61b0"
 opentelemetry-instrumentation-aiohttp-client = "^0.61b0"
 reportlab = "^5.0.0"
+# mermaid_graph.py's flowchart Image tier: a thin binding over the local
+# `dot` CLI (installed via the Dockerfile's `apk add graphviz`) - no
+# browser, no network call. See notifications_server/utils/mermaid_graph.py.
+graphviz = "^0.21"
 
 [build-system]
 requires = ["poetry-core"]
