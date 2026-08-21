@@ -19,7 +19,7 @@ expected_output:
     FAILURE: it means live rows were dropped rather than deduplicated.
 
     If the total exceeds current monthly cloud spend the agent must flag that
-    as impossible and show both figures. Cite [recommendations].
+    as impossible and show both figures. Cite the recommendations data source ([recommendations] or [recommendation_execute]).
 tags:
   - optimization
   - savings

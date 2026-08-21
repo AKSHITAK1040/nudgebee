@@ -9,7 +9,7 @@ expected_output:
     indicators (stable) for <5% change, NEW for absent prior period, GONE for
     terminated. Close with available savings from
     recommendations and a suggested drill-down area. Every dollar figure
-    must cite [spend_summary] or [recommendations]. The lead must NOT
+    must cite [spend_summary] or the recommendations data source ([recommendations] or [recommendation_execute]). The lead must NOT
     describe the methodology (e.g. "I queried spend_summary and found...")
     — it must be the headline result.
 tags:

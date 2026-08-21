@@ -53,30 +53,20 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 	// a row, and safety_band is the gate they must present before any apply —
 	// omitting them forced callers to answer "which one?" and "how safe?" with
 	// guesses.
-	const defaultColumns = "id, namespace, service, resource_name, controller_name, category, rule_name, severity, status, estimated_saving, safety_band, created_at, updated_at"
+	defaultColumns := tools.RecommendationDefaultColumns
 
 	instructions := []string{
 		"**Understand the Question Precisely:** Parse user's natural-language question to identify filters: category, severity, status, rule_name, namespace, service, name/resource_name, controller_name, date ranges, numeric thresholds. Normalize synonyms (e.g., 'prod' -> '%prod%', 'last 30 days' -> INTERVAL '30 days', 'RDS' -> service ILIKE '%rds%').",
 		"**MANDATORY: Use recommendation_execute:** Always call the 'recommendation_execute' tool to retrieve recommendation data ('recommendation_resolution_execute' for resolution history). Do NOT include the executed SQL in the final response — focus on presenting the results clearly.",
 		"**Resolution history questions:** When the user asks what happened to a recommendation — whether it was resolved, who or what resolved it, PR/ticket references, or failed attempts — query `recommendation_resolution_view` via the 'recommendation_resolution_execute' tool. When only a resource or rule is named, filter the view by resource_name/rule_name directly, or find the recommendation's id in recommendation_view first and filter by recommendation_id.",
-		"**Default status behavior (important):**\n  - If the user asks to *see/get/list/retrieve recommendations* without qualification, assume they want actionable items and **add `status = 'Open'` by default**.\n  - If the user explicitly asks for **all** recommendations (phrases like 'all recommendations', 'include closed', 'show everything'), do **not** add a status filter.\n  - If the user explicitly requests 'closed', 'archived', 'inprogress', or similar, use that status filter exactly as requested.\n  - If the user asks for aggregates (counts, sums) or historical analysis and does not specify status, do NOT assume open unless the user said 'open' or the phrasing implies actionable items (e.g., 'show me recommendations to act on').",
-		"**ALWAYS use explicit columns, NEVER SELECT *:** Default to selecting: `" + defaultColumns + "`. If the user explicitly asks for recommendation details or raw JSON, add only the `recommendation` column to the explicit list — it contains large JSON blobs that slow down responses.",
-		"**Name vs resource_name vs controller_name:** Treat `name` as the primary workload name (alias for `resource_name`). Only filter by `controller_name` when user clearly refers to controller type (Deployment, StatefulSet, DaemonSet) or explicitly mentions controller. If ambiguous, prefer `name` and document the assumption.",
-		"**Namespace matching rules:** If user uses short token like 'prod' prefer fuzzy match `namespace ILIKE '%prod%'`. If user explicitly says 'production' or quotes namespace, prefer exact equality `namespace = 'production'` unless user asked fuzzy.",
-		"**An aggregate is the answer — do not follow it with a listing:** when a COUNT/SUM/GROUP BY already answers what was asked, report it and stop. Re-listing the rows \"for context\" adds nothing the aggregate did not already state, and an unlimited ORDER BY over an account's recommendations is the slowest query this tool runs. List rows only when the user asked WHICH items, and then always with a LIMIT.",
-		"**Ordering & Limits:** Use `ORDER BY created_at DESC` for recency requests. For interactive row lists, default to `LIMIT 50` and hard cap `LIMIT 100`. Do NOT apply `LIMIT` to aggregates (COUNT/SUM/AVG) or `DISTINCT` queries unless user asks for a limit.",
-		"**Aggregations & NULL handling:** When computing SUM/AVG/PERCENT, exclude NULLs: add `AND estimated_saving IS NOT NULL` to denominators or aggregation WHERE clauses as appropriate. For savings totals, sum only positive values (`AND estimated_saving > 0`) — negative values are added-cost rows (e.g. growing nearly-full storage), not savings.",
-		"**MANDATORY for savings totals — deduplicate alternatives:** every SUM of estimated_saving MUST add `AND is_primary_recommendation` . Rows sharing a `dedupe_group` are alternative ways to act on ONE opportunity (a commitment purchase comes back from AWS as 1yr/3yr × All/No-Upfront variants, and only one can be bought); `is_primary_recommendation` keeps the highest-saving variant of each. Without it a single EC2 commitment counted 11 times and inflated an account total by ~2.4x. Counts of actionable items should use it too. Do NOT apply it when the user asks to see the individual purchase options.",
-		"**Report commitments as one opportunity:** when listing recommendations, show the primary row per dedupe_group and note that other purchase terms exist (e.g. \"best of 11 EC2 Savings Plan options\"), rather than listing every variant as a separate finding.",
-		"**A commitment total is a conservative floor, not an exact figure:** one dedupe_group holds mutually-exclusive options (1yr vs 3yr, All- vs No-Upfront, and a Savings Plan vs Reserved Instances covering the same usage) and sometimes separately-purchasable per-instance-family Reserved Instances. Keeping the best single option per service never overstates, but can understate where per-family purchases would genuinely stack. Call it the \"best available commitment option per service\" and note the realisable figure depends on the purchase mix — never present it as an exact ceiling.",
-		"**Split totals by savings type:** when reporting a total, separate workload optimizations (RightSizing, Configuration, K8sSpotRecommendation, InfraUpgrade) from commitment purchases (rule_name LIKE 'aws_native_ce%' or dedupe_group LIKE 'aws_commitment%'). They are not additive in practice — commitments are sized against CURRENT usage, so rightsizing first reduces what is worth committing to. State that caveat whenever both appear.",
-		"**Date ranges:** Use `updated_at >= 'start' AND updated_at < 'end + 1 day'` semantics for 'between' queries. For 'on date' use `DATE(created_at) = 'YYYY-MM-DD'`.",
-		"**Free-text searches:** For textual matches within `recommendation` or `rule_name` use `ILIKE '%term%'` and avoid adding status unless user requested it (except default Open behavior described above).",
-		"**Category mapping & disambiguation:** If user says 'persistent volume' prefer rule_name IN ('pv_rightsize','unused_pvc') OR category `K8sPersistentVolumeRecommendation` depending on wording; when ambiguous include both or ask for clarification.",
 		"**Summarize JSON:** Summarize `recommendation` JSON to a 1–2 line excerpt by default. Return full JSON only if the user explicitly requests raw JSON output.",
 		"**Zero results & errors:** If zero rows or an error, include the executed SQL, explain why (e.g., overly strict filters), and propose one or two alternative broader queries.",
-		"**Read-only & Safety:** This agent is read-only for `recommendation_view` and `recommendation_resolution_view`. Refuse any DML/DDL (INSERT/UPDATE/DELETE). If user asks for changes, explain that only SELECT is allowed and suggest safe SELECT-based checks.",
 	}
+	// The SQL-construction rules, view schema and canonical query shapes live on
+	// the tools (single source; the FinOps agent renders the same lines), so the
+	// two paths to this data cannot drift apart.
+	instructions = append(instructions, tools.RecommendationExecuteTool{}.ToolPrompt()...)
+	instructions = append(instructions, tools.RecommendationResolutionExecuteTool{}.ToolPrompt()...)
 
 	constraints := []string{
 		"You are a PostgreSQL expert for `recommendation_view` and `recommendation_resolution_view` and MUST ONLY run read-only SELECT queries.",
@@ -106,71 +96,6 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 		"Fit the first column to the rows: Namespace applies only to Kubernetes recommendations (service = 'kubernetes'). When the rows are cloud-resource recommendations (namespace NULL, service = a cloud service), replace Namespace with Service and render the short service name (AmazonRDS -> RDS, AmazonEC2 -> EC2); when the result set mixes both, show both columns with \"—\" where a value does not apply. " +
 		"Sort rows by estimated_saving descending (nulls last). For a null/zero estimated_saving show \"—\", never \"$0.00\". A negative estimated_saving means resolving it ADDS cost (e.g. growing nearly-full storage) — render it as added cost (e.g. \"+$12/mo cost\"), never as savings. " +
 		"After the table, add one line: the row count and total quantified savings (sum of positive estimated_saving only). Append [recommendation_execute] after the table heading."
-	schema := []string{
-		"**recommendation_view:** This view contains comprehensive information about Nudgebee recommendations across various categories.",
-		"",
-		"**Core Fields:**",
-		"- cloud_account_id (STRING): Unique identifier for the cloud account, matches accountId parameter",
-		"- namespace (STRING): Kubernetes workload namespace where the resource is deployed. NULL for cloud-resource recommendations (RDS, EC2, ...) — they have no namespace",
-		"- service (STRING): Source service of the resource — 'kubernetes' for K8s workload recommendations, the cloud service name for cloud-resource recommendations (e.g. AmazonRDS, AmazonEC2, AmazonS3)",
-		"- resource_name (STRING): Name of the specific workload/resource being analyzed",
-		"- controller_name (STRING): Kubernetes controller name (Deployment, StatefulSet, DaemonSet, etc.); NULL for cloud resources",
-		"",
-		"**Financial Fields:**",
-		"- estimated_saving (DOUBLE PRECISION): Estimated MONTHLY cost savings in USD if recommendation is implemented",
-		"- is_primary_recommendation (BOOLEAN): TRUE for the highest-saving LIVE row within its dedupe_group (or per resource+category when no group); retired rows never outrank an open one. REQUIRED filter on every savings SUM — see the aggregation rules",
-		"- cloud_account_id (TEXT): a UUID, NOT the account name — `account` holds the human name. Results are ALREADY scoped to the account the user selected, so do NOT add an account filter of your own; filtering on a name here matches nothing and silently returns zero rows.",
-		"- Rounding a savings total needs a cast: ROUND(SUM(estimated_saving)::numeric, 2). ROUND(SUM(estimated_saving), 2) errors",
-		"- dedupe_group (STRING): Marks rows that are alternative ways to act on the SAME opportunity, e.g. 'aws_commitment:<account>:AmazonEC2' for the 1yr/3yr × All/No-Upfront purchase variants of one Savings Plan. NULL for standalone recommendations",
-		"",
-		"**Safety / Impact Fields (blast radius from the dependency graph):**",
-		"- safety_band (STRING): How safe it is to act — 'safe', 'review', 'risky', 'unknown'; NULL when impact has not been computed yet",
-		"- safety_reason (STRING): One-line reason behind the band (e.g. '2 production dependent(s) would be affected')",
-		"- dependent_count (INT), production_dependents (INT): Number of dependent services, and how many are production",
-		"- dependents (JSON): Compact list of the dependent services (name, namespace, hops away); select only when the caller asks for the blast radius in detail",
-		"- finops_score (INT 0-100), finops_band (STRING): Priority score and band ('Act Now', 'Critical', 'High', 'Medium', 'Low') — prioritization, NOT apply-safety; safety_band is the safety verdict",
-		"",
-		"**Temporal Fields:**",
-		"- created_at (TIMESTAMP): When the recommendation was first created",
-		"- updated_at (TIMESTAMP): When the recommendation was last modified",
-		"",
-		"**Content Fields:**",
-		"- recommendation (JSON/TEXT): Detailed recommendation data including specific actions and metrics",
-		"",
-		"**Classification Fields:**",
-		"- category (ENUM): Type of recommendation - Configuration, RightSizing, InfraUpgrade, Security, K8sSpotRecommendation",
-		"- severity (ENUM): Impact level - Critical, High, Medium, Low, Info (ordered by priority)",
-		"- status (ENUM): Current state - Open (actionable), InProgress (being worked on), Closed (resolved), Dismissed (user-suppressed), Archive (no longer relevant)",
-		"- is_dismissed (BOOLEAN), dismissed_reason (STRING), snoozed_until (TIMESTAMP): Dismissal details. A snoozed recommendation is Dismissed with snoozed_until set and returns to Open automatically when the timestamp passes; snoozed_until NULL means a permanent dismissal.",
-		"",
-		"**Rule Classifications:**",
-		"- category and rule_name mapping for specific recommendation types",
-		"  * Security: image_scan, CIS, k8s-cis-1.23",
-		"  * RightSizing: pod_right_sizing, replica_right_sizing, pv_rightsize, abandoned_resource, unused_pvc",
-		"  * InfraUpgrade: k8s_helm_compatibility, helm_chart_upgrade, kube_proxy_version, k8s_api_deprecated, eks_cluster_upgrade, eks_add_ons_version",
-		"  * Configuration: certificate_expiry, clusterroles_misconfigurations, configmaps_misconfigurations, daemonsets_misconfigurations, deployments_misconfigurations, horizontalpodautoscalers_misconfigurations, misconfigurations, namespaces_misconfigurations, networkpolicies_misconfigurations, nodes_misconfigurations, persistentvolumeclaims_misconfigurations, persistentvolumes_misconfigurations, poddisruptionbudgets_misconfigurations, pods_misconfigurations, rolebindings_misconfigurations, roles_misconfigurations, serviceaccounts_misconfigurations, services_misconfigurations, statefulsets_misconfigurations",
-		"  * K8sSpotRecommendation: 'Spot instance recommendation'",
-		"- Cloud-resource recommendations use provider-prefixed rule_names (aws_*, gcp_*, azure_* — e.g. aws_rds_instance_reserved, aws_ec2_underutilized) across the same categories; identify them by service (not 'kubernetes') or the rule_name prefix.",
-		"",
-		"**Query Tips:**",
-		"- Use 'Open' status for actionable recommendations",
-		"- Filter by category for specific recommendation types",
-		"- Order by created_at DESC for latest recommendations",
-		"- Use severity filtering for prioritization (Critical > High > Medium > Low > Info)",
-		"- Combine category and rule_name for precise filtering",
-		"",
-		"**recommendation_resolution_view:** One row per resolution attempt on a recommendation (how it is being, or was, resolved). Queried via the 'recommendation_resolution_execute' tool.",
-		"- recommendation_id (STRING): The recommendation the attempt belongs to (join key with recommendation_view id)",
-		"- type (ENUM): Artifact created - PullRequest, Ticket, DeploymentChange, CloudResource, WorkflowExecution, EventResolution",
-		"- type_reference_id (STRING): Reference to that artifact - PR URL, ticket id, change id",
-		"- resolver_type (ENUM): Who initiated it - User, AutoOptimize, AutoRunbook, NBLLM (the AI agent)",
-		"- status (ENUM): Attempt state - InProgress (artifact open, work ongoing), Success (completed), Failed (rejected or errored)",
-		"- status_message (STRING): Human-readable outcome detail (failure reason, close note)",
-		"- pr_lifecycle_state (STRING): For PullRequest attempts, the PR's lifecycle state if tracked",
-		"- recommendation_status (ENUM): Current status of the parent recommendation",
-		"- resource_name, rule_name, category, severity (STRING/ENUM): Context from the parent recommendation",
-		"- created_at, updated_at (TIMESTAMP): When the attempt was registered and last updated",
-	}
 	// Four structurally-distinct examples, one per query shape. They teach the
 	// patterns (explicit columns, status filter, aggregation, financial threshold,
 	// nulls-last savings ordering) the agent generalizes from — not an exhaustive
@@ -222,7 +147,6 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 		Constraints:  constraints,
 		ToolUsage:    toolUsage,
 		OutputFormat: outputFormat,
-		Schema:       schema,
 		Examples:     examples,
 		Rag: core.NBAgentPromptRag{
 			Module: "recommendations",

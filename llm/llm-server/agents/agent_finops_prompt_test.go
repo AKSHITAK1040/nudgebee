@@ -35,7 +35,8 @@ func TestFinOpsPrompt_MentionsOnlyRealTools(t *testing.T) {
 		tools.ToolSpendSummary:                         true,
 		tools.ToolSpendForecast:                        true,
 		tools.ToolSpendAllocation:                      true,
-		RecommendationsAgentName:                       true,
+		tools.ToolRecommendationExecuteSql:             true,
+		tools.ToolRecommendationResolutionExecuteSql:   true,
 		DelegateAgentToolName:                          true,
 		MetricsAgentName:                               true,
 		tools.ToolExecuteKubectlCommand:                true,
@@ -50,11 +51,16 @@ func TestFinOpsPrompt_MentionsOnlyRealTools(t *testing.T) {
 	// Referenced in prose as data fields / sub-agent internals, not as tools
 	// FinOps calls itself.
 	allowedNonTools := map[string]bool{
-		"recommendation_id":       true,
-		"recommendation_action":   true,
-		"recommendation_category": true,
-		"recommendation_data":     true,
-		"recommendation_status":   true,
+		// Views and columns from the recommendation_execute ToolPrompt — SQL
+		// identifiers, not callable tools.
+		"recommendation_view":            true,
+		"recommendation_resolution_view": true,
+		"recommendation_count":           true,
+		"recommendation_id":              true,
+		"recommendation_action":          true,
+		"recommendation_category":        true,
+		"recommendation_data":            true,
+		"recommendation_status":          true,
 	}
 
 	seen := map[string]bool{}
@@ -146,4 +152,34 @@ func TestRecommendationsPrompt_AggregateIsTheAnswer(t *testing.T) {
 		"the agent must be told to stop once an aggregate answers the question")
 	assert.Contains(t, flat, "always with a LIMIT",
 		"row listings must carry a limit")
+}
+
+// TestFinOpsAndRecommendationsShareOneSQLContract pins the anti-drift property
+// of the un-nesting: FinOps queries recommendation_view directly now, so the
+// SQL rules and schema it renders must be the very lines the recommendations
+// agent renders — both consume the tools' ToolPrompt(). If either side stops
+// doing so, the two paths to the same data drift apart again.
+func TestFinOpsAndRecommendationsShareOneSQLContract(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	finops := flattenAgentPrompt((&FinOpsAgent{accountId: "test-finops-prompt"}).GetSystemPrompt(ctx, core.NBAgentRequest{}))
+	recs := flattenAgentPrompt(newRecommendationAgent("test-finops-prompt").GetSystemPrompt(ctx, core.NBAgentRequest{}))
+
+	for _, line := range (tools.RecommendationExecuteTool{}).ToolPrompt() {
+		assert.Contains(t, finops, line, "FinOps must render every recommendation_execute ToolPrompt line")
+		assert.Contains(t, recs, line, "the recommendations agent must render every recommendation_execute ToolPrompt line")
+	}
+	for _, line := range (tools.RecommendationResolutionExecuteTool{}).ToolPrompt() {
+		assert.Contains(t, finops, line)
+		assert.Contains(t, recs, line)
+	}
+
+	// The un-nesting itself: FinOps carries the raw tools, not the sub-agent.
+	names := map[string]bool{}
+	for _, tool := range (&FinOpsAgent{accountId: "test-finops-prompt"}).GetSupportedTools(ctx) {
+		names[tool.Name()] = true
+	}
+	assert.True(t, names[tools.ToolRecommendationExecuteSql])
+	assert.True(t, names[tools.ToolRecommendationResolutionExecuteSql])
+	assert.False(t, names[RecommendationsAgentName],
+		"the nested recommendations agent must be gone from FinOps, or every savings answer is composed twice")
 }

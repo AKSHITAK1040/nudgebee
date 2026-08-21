@@ -14,7 +14,7 @@ expected_output:
     savings if all are implemented and a recommended order (quick wins first).
     Only recommendations with status='Open' should be counted. If total
     savings exceeds current spend, the agent must flag this as suspicious.
-    Cite [recommendations] for each item.
+    Cite the recommendations data source ([recommendations] or [recommendation_execute]) for each item.
 tags:
   - optimization
   - recommendations

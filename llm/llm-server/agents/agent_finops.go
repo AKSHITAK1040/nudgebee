@@ -133,7 +133,7 @@ func (a *FinOpsAgent) GetSystemPrompt(ctx *security.RequestContext, query core.N
 	constraints := []string{
 		"You hold no credentials and change nothing except through the platform's typed write tools (recommendation_apply, recommendation_execute_cli, recommendation_record_ticket_resolution, ticket_master_v2), each of which pauses for the user's explicit per-action approval. When the user explicitly asks you to resolve, apply, or fix a recommendation, use the write tools — a review link alone is not an answer to a direct ask.",
 		"Every cost answer MUST include a dollar figure. If data is unavailable, state that explicitly.",
-		"Always cite which tool provided the data (spend_summary, recommendations, metrics, etc.).",
+		"Always cite which tool provided the data (spend_summary, recommendation_execute, metrics, etc.).",
 		"The metrics and kubectl tools are full investigators, not raw query executors: give each a specific, self-contained question (e.g. \"p95 CPU and memory usage for pod X in namespace Y over the last 7 days, with absolute values\", \"find the deployment matching service X\") and they return a synthesized answer with concrete values already extracted -- read the data directly from their response for your tables/charts, do not expect raw JSON or kubectl output back.",
 		"Do not expose internal SQL queries, table names, or database structure to the user.",
 		"When comparing periods, always state the exact date ranges being compared.",
@@ -145,9 +145,9 @@ func (a *FinOpsAgent) GetSystemPrompt(ctx *security.RequestContext, query core.N
 		"For spike/increase questions, NEVER guess the cause. After identifying the top cost driver from spend_summary, use delegate_agent with cloud-specific tools (gcp/aws/azure) to investigate WHAT changed -- new resources, scaling events, usage increases, config changes. An answer like 'likely due to increased usage' without tool-verified evidence is insufficient.",
 		"Only count recommendations with status='Open' as actionable savings. Archive/Closed recommendations were already handled.",
 		"Savings sanity check (MANDATORY): before presenting any savings figure, compare it to the spend it would reduce. If a recommendation's savings exceed that resource's own spend, or total savings exceed total spend, the estimates are unreliable — you MUST surface the discrepancy (⚠ with both numbers, e.g. \"claimed $410/mo savings vs $26/mo actual spend — estimate looks inflated, verify before acting\") and never present such savings as achievable or as 'offsetting' anything.",
-		"To help a user act on a recommendation, ALWAYS first present its safety band (safe/review/risky/unknown), its blast radius (dependent services / production dependents), and the estimated monthly savings — the recommendations tool returns these as safety_band, safety_reason, dependent_count, and production_dependents. If safety_band is NULL, say impact analysis has not run for this recommendation; NEVER substitute other data (strategy settings, replica counts, percentile windows) and present it as the safety band or blast radius. Then either hand off with propose_recommendation_apply (a review-and-apply link) or, when the user asks you to do it, resolve it directly with the typed write tools.",
+		"To help a user act on a recommendation, ALWAYS first present its safety band (safe/review/risky/unknown), its blast radius (dependent services / production dependents), and the estimated monthly savings — select safety_band, safety_reason, dependent_count, and production_dependents from recommendation_view (they are in the default column set). If safety_band is NULL, say impact analysis has not run for this recommendation; NEVER substitute other data (strategy settings, replica counts, percentile windows) and present it as the safety band or blast radius. Then either hand off with propose_recommendation_apply (a review-and-apply link) or, when the user asks you to do it, resolve it directly with the typed write tools.",
 		"Resolution tool selection: recommendation_apply for the platform apply flow (deployment change, pull request, or cloud alarm); recommendation_execute_cli for recommendations resolved by cloud CLI commands (always pass recommendation_id so the run lands in its resolution history); ticket_master_v2 to create a tracking ticket, followed by recommendation_record_ticket_resolution to link that ticket to the recommendation.",
-		"Before recommendation_apply: fetch that recommendation's concrete values first (its `recommendation` details) — the backend applies EXACTLY the `data` payload, with no fallback to the recommendation's own values, so for rightsizing `data` (per-container current → proposed) is required and an empty payload changes nothing. Fill `summary` with the numbers — the approval card shows your summary plus the exact values from `data`.",
+		"Before recommendation_apply: fetch that recommendation's concrete values first (SELECT the `recommendation` column from recommendation_view for that id) — the backend applies EXACTLY the `data` payload, with no fallback to the recommendation's own values, so for rightsizing `data` (per-container current → proposed) is required and an empty payload changes nothing. Fill `summary` with the numbers — the approval card shows your summary plus the exact values from `data`.",
 		"Every write tool pauses for the user's explicit confirmation before running — state what you are about to do, then call the tool and let the platform ask. Never claim a recommendation was applied, executed, or ticketed unless the tool returned success; report failures verbatim.",
 		"For a recommendation whose safety band is 'risky' or 'unknown', call out the impact explicitly and prefer the propose_recommendation_apply hand-off; use the direct write tools only when the user insists after seeing the risk.",
 	}
@@ -159,6 +159,11 @@ func (a *FinOpsAgent) GetSystemPrompt(ctx *security.RequestContext, query core.N
 		"**reference_value JSON fields for cost anomalies:** pct_change (% increase), total_impact ($ spike amount), z_score (statistical severity), start_date, anomaly_days (duration), service_name, baseline_days, anomaly_status (OPEN/CLOSED).",
 		"Cost anomaly query: SELECT name, namespace, anomaly_type, reference_value, evaluated_at FROM anomaly WHERE anomaly_type IN ('CloudSpendService', 'CloudSpendAccount') AND evaluated_at >= '[[Time:-30d]]' ORDER BY evaluated_at DESC LIMIT 20",
 	}
+	// recommendation_execute / recommendation_resolution_execute SQL rules and
+	// view schema come from the tools themselves — the same lines the
+	// recommendations agent renders, so the two paths cannot drift apart.
+	schema = append(schema, tools.RecommendationExecuteTool{}.ToolPrompt()...)
+	schema = append(schema, tools.RecommendationResolutionExecuteTool{}.ToolPrompt()...)
 
 	outputFormat := `Lead with the headline, not the methodology. A Markdown TABLE is the primary carrier of every multi-data-point answer; prose is supplementary.
 
@@ -173,7 +178,7 @@ func (a *FinOpsAgent) GetSystemPrompt(ctx *security.RequestContext, query core.N
 4. **Always show the absolute, not just the delta.** For any sizing/capacity finding show the current allocated amount (provisioned), observed usage (with percentile), utilization %, and a concrete recommended target — e.g. "150Gi provisioned, 34Gi used (23%), resize to 50Gi"; never just "116Gi unused" or a bare "downsize". Gather absolute provisioned AND used, not only their difference.
 5. **One short paragraph after the table** — headline finding + top 1-2 next steps. No bullet lists restating rows.
 6. **Surface data quality.** Null or clearly-wrong values render as "—"/"⚠" with a footnote; never present corrupt data as fact, never silently drop it.
-7. **Cite inline.** Append the source tool in the cell or header: [spend_summary], [recommendations], [anomaly_execute], [metrics], [kubectl_execute].
+7. **Cite inline.** Append the source tool in the cell or header: [spend_summary], [recommendation_execute], [anomaly_execute], [metrics], [kubectl_execute].
 8. **Make rows clickable.** For optimization/rightsizing/recommendation tables, the Action cell is a Markdown link [<label>](<url>): <label> is a DYNAMIC, intent-aware next step for that row (e.g. "Resize to 10Gi ▸", "Delete unused PVC ▸" — derive it, don't use a fixed string); <url> is the optimize deep-link base from your account context with <Category> and <workload_name> filled in for that row. <workload_name> MUST be the workload/controller name (the row's 'name'), NEVER a pod name (pod_name) — the optimise recommendations table is keyed by workload, so a pod name with a ReplicaSet hash suffix (e.g. 'web-7d9f8b6c5-abcde') matches zero recommendations. If a row is a pod, use its owning workload's name. One click takes the user into the optimise workflow filtered to that resource. Omit the link for purely informational rows. A summary-level link for a whole table follows the same substitution rule: set <Category> to the rows' category when every row shares one (drop the category parameter only for genuinely mixed results) and drop the search parameter rather than leaving it empty. NEVER emit a link with an unreplaced placeholder or an empty parameter value like 'category=&search=' — the page must open filtered to what your table shows.
 9. **Chart when it helps.** When a visual makes the finding land faster, embed ONE ` + "```nb-chart" + ` fenced JSON block right after the table, choosing type and data DYNAMICALLY: bar (compare a measure across resources, e.g. provisioned vs used), doughnut/pie (share of a total, e.g. spend by service), line/area (trend over time). Spec: {"type":"bar","title":"...","labels":[...],"series":[{"key":"Provisioned","data":[...]},{"key":"Used","data":[...]}],"format":"gi|usd|percent|number"} — doughnut/pie use "values":[...] instead of series. Keep it ≤12 labels / ≤4 series and reuse the table's own numbers (never raw time-series). Skip the chart for single-row, clarification, or pure-text answers.
 
@@ -520,8 +525,16 @@ func (a *FinOpsAgent) GetSupportedTools(ctx *security.RequestContext) []toolcore
 		tools.ToolSpendForecast,
 		tools.ToolSpendAllocation,
 
+		// Recommendation data via the raw SQL tools rather than the nested
+		// recommendations agent: the sub-agent composed its own full answer that
+		// this agent then re-synthesized, doubling the model work on every savings
+		// question. The SQL rules and schema the sub-agent's prompt carried come
+		// from the tools' ToolPrompt(), rendered into this prompt's schema below —
+		// the same single source that agent still renders for the router path.
+		tools.ToolRecommendationExecuteSql,
+		tools.ToolRecommendationResolutionExecuteSql,
+
 		// Existing agents-as-tools (reused unchanged)
-		RecommendationsAgentName,
 		DelegateAgentToolName,
 		// Routed through their specialist agents rather than the raw tools: each
 		// wrapping agent carries guardrails (PromQL construction, kubectl safety

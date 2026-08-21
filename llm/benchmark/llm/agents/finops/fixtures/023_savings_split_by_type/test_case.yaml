@@ -16,7 +16,7 @@ expected_output:
 
     The agent must also state that the two are not additive in practice:
     commitments are sized against current usage, so right-sizing first reduces
-    what is worth committing to. Cite [recommendations].
+    what is worth committing to. Cite the recommendations data source ([recommendations] or [recommendation_execute]).
 tags:
   - optimization
   - savings
