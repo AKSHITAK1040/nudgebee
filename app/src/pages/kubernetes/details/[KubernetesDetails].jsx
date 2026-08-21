@@ -94,7 +94,6 @@ import {
   AnomalyIcon,
   SLOInspectionIcon,
   GrafanaIconBlue,
-  GithubIcon,
 } from '@assets';
 import PropTypes from 'prop-types';
 import apiKubernetes1 from '@api1/kubernetes1';
@@ -128,7 +127,6 @@ const DefaultAutoScaler = dynamic(() => import('@components/k8s/details/DefaultA
 const KubernetesAutoScalerNodePool = dynamic(() => import('@components/k8s/details/KubernetesAutoScalerNodePool'), { ssr: false });
 const KubernetesDbmsTable = dynamic(() => import('@components/k8s/details/KubernetesDbms'), { ssr: false });
 const KubernetesQueueTable = dynamic(() => import('@components/k8s/details/KubernetesQueue'), { ssr: false });
-const KubernetesGithubRunners = dynamic(() => import('@components/k8s/details/KubernetesGithubRunners'), { ssr: false });
 const KubernetesAlertManager = dynamic(() => import('@components/k8s/details/KubernetesAlertManager'), { ssr: false });
 const TriageRulesManager = dynamic(() => import('@components/triage/TriageRulesManager'), { ssr: false });
 const KubernetesTracesListing = dynamic(() => import('@components/k8s/details/KubernetesTracesListing'), { ssr: false });
@@ -351,7 +349,6 @@ const KubernetesDetails = () => {
         },
         { id: 'slo', text: 'SLO', value: 8, fragment: 'slo', icon: SLOInspectionIcon, tabName: 'Others' },
         { id: 'grafana', text: 'Grafana', value: 9, fragment: 'grafana', icon: GrafanaIconBlue, tabName: 'Others' },
-        { id: 'github-runners', text: 'GitHub Runners', value: 10, fragment: 'github-runners', icon: GithubIcon, tabName: 'Others' },
       ],
     },
     {
@@ -1174,7 +1171,6 @@ const KubernetesDetails = () => {
               {selectedSubTab == 7 && <KubernetesTracesCrossZoneListing accountId={kubeId} />}
               {selectedSubTab == 8 && <KubernetesSLOConfigs accountId={kubeId} />}
               {selectedSubTab == 9 && kubeId && hasReadAccess(kubeId) && <GrafanaIframe accountId={kubeId} />}
-              {selectedSubTab == 10 && <KubernetesGithubRunners accountId={kubeId} />}
             </>
           )}
           {[tabOptions[5].value].includes(selectedTab) && (
