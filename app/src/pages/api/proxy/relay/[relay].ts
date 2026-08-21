@@ -161,7 +161,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
         relaySpan.recordException(err);
         relaySpan.setStatus({ code: SpanStatusCode.ERROR, message: err.message });
         status = 'FAILURE';
-        res.status(500).json({ error: 'internal_error', message: err.message });
+        res.status(500).json({ error: 'internal_error' });
       } finally {
         relaySpan.end();
       }
@@ -210,7 +210,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
   } catch (error: any) {
     span.recordException(error);
     span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-    res.status(500).json({ error: 'internal_server_error', message: error.message });
+    res.status(500).json({ error: 'internal_server_error' });
   } finally {
     span.end();
   }
