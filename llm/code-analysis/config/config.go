@@ -104,7 +104,6 @@ type AgentConfig struct {
 	ReActMaxIterations int           `mapstructure:"react_max_iterations"`
 	MaxLogLines        int           `mapstructure:"max_log_lines"`
 	MaxSearchResults   int           `mapstructure:"max_search_results"`
-	BuildVerifyEnabled bool          `mapstructure:"build_verify_enabled"`
 	BuildVerifyTimeout time.Duration `mapstructure:"build_verify_timeout"`
 	// HarnessVerify switches fix-mode verification from LLM-run builds (graded by
 	// pattern-matching the fixer's command history) to a deterministic harness-run
@@ -208,7 +207,6 @@ func LoadConfig() (*Config, error) {
 	viper.SetDefault("agent.react_max_iterations", 30)
 	viper.SetDefault("agent.max_log_lines", 50)
 	viper.SetDefault("agent.max_search_results", 20)
-	viper.SetDefault("agent.build_verify_enabled", true)
 	viper.SetDefault("agent.build_verify_timeout", "5m")
 	viper.SetDefault("agent.harness_verify", false)
 	viper.SetDefault("agent.inloop_verify", false)
