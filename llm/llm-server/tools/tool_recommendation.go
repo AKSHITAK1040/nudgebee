@@ -19,17 +19,15 @@ func init() {
 // Rows sharing a dedupe_group are alternative ways to act on the same thing —
 // AWS Cost Explorer returns a commitment purchase as 1yr/3yr × All/No-Upfront
 // per plan type, and a second producer writes its own row for the same
-// opportunity. Only one is purchasable, so summing them overstates savings: on
-// a live account 11 EC2 rows summed to $1,257.94 where the best single
-// purchase saves $174.89.
+// opportunity. Only one is purchasable, so summing them overstates savings by
+// roughly the number of variants.
 //
 // This MUST stay identical to recommendation_groupings_v2's window in
 // api-server (services/query/metadata.go) — same partition key, same
 // highest-savings-wins ordering. That is what keeps the AI's savings total and
 // the Optimise page's Total Savings card equal by construction rather than by
 // coincidence. TestPrimaryRecommendationRankShape pins the shape here; changing
-// one side without the other reopens the 2.2x cross-surface disagreement in
-// #36673.
+// one side without the other makes the two surfaces disagree again.
 //
 // Multi-cloud note: the providers are not treated symmetrically, and that is a
 // wart, not a design. AWS producers set dedupe_group; Azure does not, so it
@@ -47,12 +45,10 @@ func PrimaryRecommendationRank(alias, accountAlias string) string {
 					WHEN %[1]s.dedupe_group IS NOT NULL AND %[1]s.dedupe_group <> '' THEN %[1]s.dedupe_group
 					WHEN %[1]s.resource_id IS NOT NULL THEN %[1]s.resource_id::text
 					-- Azure ingestion sets neither a dedupe_group nor a resource_id on
-					-- a large share of its recommendations (681 of 1823 open Azure rows
-					-- on dev), so without this branch they each become their own
-					-- partition here while the Optimise page groups them — the exact
-					-- cross-surface disagreement this is meant to end, just moved to
-					-- Azure. Gated on the provider first so non-Azure rows never
-					-- detoast the recommendation jsonb.
+					-- much of its output, so without this branch each such row becomes
+					-- its own partition here while the Optimise page groups them.
+					-- Gated on the provider first so non-Azure rows never detoast the
+					-- recommendation jsonb.
 					WHEN LOWER(%[2]s.cloud_provider) = 'azure' AND %[1]s.recommendation->>'recommendation_type_id' IS NOT NULL
 						THEN %[1]s.cloud_account_id::text || ':'
 							|| COALESCE(%[1]s.recommendation->>'recommendation_type_id', '') || ':'
