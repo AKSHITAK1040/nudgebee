@@ -43,7 +43,9 @@ func TestRecommendationViewExposesDedupe(t *testing.T) {
 	assert.Contains(t, window, "PARTITION BY")
 	assert.Contains(t, window, "r.dedupe_group")
 	assert.Contains(t, window, "r.category")
-	assert.Contains(t, window, "ORDER BY r.estimated_savings DESC, r.updated_at DESC, r.id")
+	assert.Contains(t, window, "CASE WHEN r.status IN ('Archive', 'Closed') THEN 1 ELSE 0 END",
+		"terminal rows must sort last, or one wins its group and marks the live row non-primary")
+	assert.Contains(t, window, "r.estimated_savings DESC, r.updated_at DESC, r.id")
 
 	assert.Contains(t, RecommendationExecuteTool{}.Description(), "is_primary_recommendation",
 		"the tool description must tell callers totals require the dedupe filter")
@@ -63,7 +65,14 @@ func TestPrimaryRecommendationRankShape(t *testing.T) {
 	assert.Contains(t, rank, "WHEN r2.resource_id IS NOT NULL THEN r2.resource_id::text")
 	assert.Contains(t, rank, "ELSE r2.id::text")
 	assert.Contains(t, rank, "r2.category")
-	assert.Contains(t, rank, "ORDER BY r2.estimated_savings DESC, r2.updated_at DESC, r2.id")
+	// Status precedence comes first in the ordering: a terminal row may only
+	// win a group with nothing live in it.
+	assert.Contains(t, rank, "CASE WHEN r2.status IN ('Archive', 'Closed') THEN 1 ELSE 0 END")
+	assert.Contains(t, rank, "r2.estimated_savings DESC, r2.updated_at DESC, r2.id")
+	statusIdx := strings.Index(rank, "CASE WHEN r2.status IN")
+	savingsIdx := strings.Index(rank, "r2.estimated_savings DESC")
+	assert.Less(t, statusIdx, savingsIdx,
+		"status must outrank savings, otherwise a higher-saving archived row still wins")
 
 	// Azure ingestion leaves many rows without a dedupe_group or resource_id;
 	// without this branch they would not group here while the Optimise page

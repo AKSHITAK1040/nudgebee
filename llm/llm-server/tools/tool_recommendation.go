@@ -61,7 +61,13 @@ func PrimaryRecommendationRank(alias, accountAlias string) string {
 					ELSE %[1]s.id::text
 				END,
 				%[1]s.category
-			ORDER BY %[1]s.estimated_savings DESC, %[1]s.updated_at DESC, %[1]s.id
+			ORDER BY
+				-- Terminal rows sort last, so a retired variant can only win a group
+				-- with nothing live in it. Ranked on savings alone it would win
+				-- outright, marking the live row non-primary and removing it from
+				-- every savings total.
+				CASE WHEN %[1]s.status IN ('Archive', 'Closed') THEN 1 ELSE 0 END,
+				%[1]s.estimated_savings DESC, %[1]s.updated_at DESC, %[1]s.id
 		)`, alias, accountAlias)
 }
 

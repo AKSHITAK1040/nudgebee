@@ -3203,7 +3203,11 @@ var table_metadata = map[string]TableDefinition{
 							ELSE r.id::text
 						END,
 						r.category
-					ORDER BY r.estimated_savings DESC, r.updated_at DESC, r.id
+					ORDER BY
+						-- Terminal rows sort last; must match
+						-- tools.PrimaryRecommendationRank in llm-server.
+						CASE WHEN r.status IN ('Archive', 'Closed') THEN 1 ELSE 0 END,
+						r.estimated_savings DESC, r.updated_at DESC, r.id
 				) AS resource_rank` + vulnCols + `
 			FROM recommendation r
 			LEFT JOIN cloud_accounts ca ON ca.id = r.cloud_account_id
@@ -3278,7 +3282,11 @@ var table_metadata = map[string]TableDefinition{
 							ELSE r.id::text
 						END,
 						r.category
-					ORDER BY r.estimated_savings DESC, r.updated_at DESC, r.id
+					ORDER BY
+						-- Terminal rows sort last; must match
+						-- tools.PrimaryRecommendationRank in llm-server.
+						CASE WHEN r.status IN ('Archive', 'Closed') THEN 1 ELSE 0 END,
+						r.estimated_savings DESC, r.updated_at DESC, r.id
 				) AS resource_rank` + vulnCols + `
 			FROM recommendation r
 			LEFT JOIN cloud_resourses cr ON cr.id = r.resource_id
@@ -5227,7 +5235,11 @@ var table_metadata = map[string]TableDefinition{
 										ELSE r.id::text
 									END,
 									r.category
-								ORDER BY r.estimated_savings DESC, r.updated_at DESC, r.id
+								ORDER BY
+						-- Terminal rows sort last; must match
+						-- tools.PrimaryRecommendationRank in llm-server.
+						CASE WHEN r.status IN ('Archive', 'Closed') THEN 1 ELSE 0 END,
+						r.estimated_savings DESC, r.updated_at DESC, r.id
 							) AS resource_rank` + vulnCols + `
 						FROM recommendation r
 						LEFT JOIN cloud_resourses cr ON cr.id = r.resource_id

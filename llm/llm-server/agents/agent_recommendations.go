@@ -116,8 +116,10 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 		"- controller_name (STRING): Kubernetes controller name (Deployment, StatefulSet, DaemonSet, etc.); NULL for cloud resources",
 		"",
 		"**Financial Fields:**",
-		"- estimated_saving (DECIMAL): Estimated MONTHLY cost savings in USD if recommendation is implemented",
-		"- is_primary_recommendation (BOOLEAN): TRUE for the highest-saving row within its dedupe_group (or per resource+category when no group). REQUIRED filter on every savings SUM — see the aggregation rules",
+		"- estimated_saving (DOUBLE PRECISION): Estimated MONTHLY cost savings in USD if recommendation is implemented",
+		"- is_primary_recommendation (BOOLEAN): TRUE for the highest-saving LIVE row within its dedupe_group (or per resource+category when no group); retired rows never outrank an open one. REQUIRED filter on every savings SUM — see the aggregation rules",
+		"- cloud_account_id (TEXT): a UUID, NOT the account name — `account` holds the human name. Results are ALREADY scoped to the account the user selected, so do NOT add an account filter of your own; filtering on a name here matches nothing and silently returns zero rows.",
+		"- Rounding a savings total needs a cast: ROUND(SUM(estimated_saving)::numeric, 2). ROUND(SUM(estimated_saving), 2) errors",
 		"- dedupe_group (STRING): Marks rows that are alternative ways to act on the SAME opportunity, e.g. 'aws_commitment:<account>:AmazonEC2' for the 1yr/3yr × All/No-Upfront purchase variants of one Savings Plan. NULL for standalone recommendations",
 		"",
 		"**Safety / Impact Fields (blast radius from the dependency graph):**",
@@ -183,14 +185,14 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 		// deduplicating alternative purchase options.
 		{
 			Question:    "What are the total estimated savings by category for open recommendations?",
-			Answer:      "SELECT category, COUNT(*) as recommendation_count, ROUND(SUM(estimated_saving), 2) as total_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY category ORDER BY total_savings DESC",
+			Answer:      "SELECT category, COUNT(*) as recommendation_count, ROUND(SUM(estimated_saving)::numeric, 2) as total_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY category ORDER BY total_savings DESC",
 			Explanation: "Aggregates by category; no LIMIT on aggregates; only positive savings summed (NULLs and added-cost negatives excluded); is_primary_recommendation collapses alternative purchase variants so one opportunity counts once.",
 		},
 		// 3. Split total — workload optimizations vs commitment purchases, the
 		// shape every account-level savings answer should take.
 		{
 			Question: "How much can we save in total on this account?",
-			Answer:   "SELECT CASE WHEN dedupe_group LIKE 'aws_commitment%' OR rule_name LIKE 'aws_native_ce%' THEN 'commitment_purchases' ELSE 'workload_optimizations' END AS savings_type, COUNT(*) AS opportunities, ROUND(SUM(estimated_saving), 2) AS monthly_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY 1",
+			Answer:   "SELECT CASE WHEN dedupe_group LIKE 'aws_commitment%' OR rule_name LIKE 'aws_native_ce%' THEN 'commitment_purchases' ELSE 'workload_optimizations' END AS savings_type, COUNT(*) AS opportunities, ROUND(SUM(estimated_saving)::numeric, 2) AS monthly_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY 1",
 			Explanation: "Splits the total into workload optimizations and commitment purchases (they are not additive — commitments are sized against current usage, so right-size first), " +
 				"and dedupes so each commitment counts its best single purchase option rather than every term/payment variant.",
 		},
