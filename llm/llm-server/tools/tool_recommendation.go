@@ -49,7 +49,27 @@ const recommendationView = `
 			r.finops_score_breakdown -> 'impact_summary' ->> 'safety_reason' AS safety_reason,
 			(r.finops_score_breakdown -> 'impact_summary' ->> 'dependent_count')::int AS dependent_count,
 			(r.finops_score_breakdown -> 'impact_summary' ->> 'production_dependents')::int AS production_dependents,
-			r.finops_score_breakdown -> 'impact_summary' -> 'dependents' AS dependents
+			r.finops_score_breakdown -> 'impact_summary' -> 'dependents' AS dependents,
+			r.dedupe_group,
+			-- Alternatives for ONE opportunity share a dedupe_group: AWS Cost
+			-- Explorer returns a commitment purchase as several rows (1yr/3yr ×
+			-- All/No-Upfront, per plan type) and only one can be bought. Summing
+			-- them all overstates savings — on a live account, 11 EC2 variants
+			-- summed to $1,257.94 where the best single purchase saves $174.89.
+			-- The window mirrors recommendation_groupings_v2 (the query engine
+			-- view the Optimise UI reads) exactly — same partition key, same
+			-- highest-savings-wins ordering — so both surfaces dedupe
+			-- identically by construction.
+			(ROW_NUMBER() OVER (
+				PARTITION BY
+					CASE
+						WHEN r.dedupe_group IS NOT NULL AND r.dedupe_group <> '' THEN r.dedupe_group
+						WHEN r.resource_id IS NOT NULL THEN r.resource_id::text
+						ELSE r.id::text
+					END,
+					r.category
+				ORDER BY r.estimated_savings DESC, r.updated_at DESC, r.id
+			) = 1) AS is_primary_recommendation
 		FROM recommendation r
 		LEFT JOIN cloud_resourses cr ON r.resource_id = cr.id
 		JOIN tenant t ON r.tenant_id = t.id
@@ -70,7 +90,8 @@ func (m RecommendationExecuteTool) GetType() core.NBToolType {
 }
 
 func (m RecommendationExecuteTool) Description() string {
-	return "Executes a SQL query for recommendation_view and returns the result. Columns: id, namespace, service, resource_name, estimated_saving, category, severity, status, rule_name, is_dismissed, dismissed_reason, snoozed_until, recommendation, finops_score, finops_band, safety_band, safety_reason, dependent_count, production_dependents, dependents."
+	return "Executes a SQL query for recommendation_view and returns the result. Columns: id, namespace, service, resource_name, estimated_saving, category, severity, status, rule_name, is_dismissed, dismissed_reason, snoozed_until, recommendation, finops_score, finops_band, safety_band, safety_reason, dependent_count, production_dependents, dependents, dedupe_group, is_primary_recommendation. " +
+		"Savings totals MUST filter is_primary_recommendation (rows sharing a dedupe_group are alternative ways to buy ONE opportunity — only one is purchasable, so summing them overstates savings)."
 }
 
 func (m RecommendationExecuteTool) InputSchema() core.ToolSchema {

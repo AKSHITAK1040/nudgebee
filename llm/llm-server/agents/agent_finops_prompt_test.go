@@ -95,3 +95,23 @@ func TestFinOpsPrompt_SafetyBandContract(t *testing.T) {
 	assert.Contains(t, flat, "Savings sanity check",
 		"the savings-vs-spend cross-check constraint must stay in the prompt")
 }
+
+// TestFinOpsPrompt_SavingsDedupeContract pins the two rules that keep an
+// account-level savings total defensible: alternative purchase options for one
+// commitment must be deduplicated (11 EC2 variants summed to $1,257.94 where
+// the best single purchase saves $174.89), and the total must be split into
+// workload optimizations vs commitment purchases, which are not additive.
+func TestFinOpsPrompt_SavingsDedupeContract(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := &FinOpsAgent{accountId: "test-finops-prompt"}
+	flat := flattenAgentPrompt(agent.GetSystemPrompt(ctx, core.NBAgentRequest{}))
+
+	assert.Contains(t, flat, "is_primary_recommendation",
+		"savings totals must be filtered to primary rows")
+	assert.Contains(t, flat, "dedupe_group",
+		"the prompt must explain why alternatives collapse")
+	assert.Contains(t, flat, "not additive",
+		"the commitment-vs-rightsizing non-additivity caveat must stay")
+	assert.Contains(t, flat, "savings_exceeds_spend",
+		"the tool-emitted impossible-savings flag must be honoured")
+}

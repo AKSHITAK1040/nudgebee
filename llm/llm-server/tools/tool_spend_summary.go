@@ -136,6 +136,7 @@ func (t SpendSummaryTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 	var result any
 	var grandTotal float64
 	var rowCount, shownCount int
+	var totalSavings float64
 
 	switch groupBy {
 	case "service":
@@ -143,6 +144,8 @@ func (t SpendSummaryTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 		err = qErr
 		for i := range rows {
 			rows[i].IsNew = rows[i].AmountLast == 0 && rows[i].Amount > 0
+			rows[i].SavingsExceedsSpend = savingsExceedSpend(rows[i].EstimatedSaving, rows[i].Amount)
+			totalSavings += rows[i].EstimatedSaving
 		}
 		result = rows
 		shownCount = len(rows)
@@ -155,6 +158,8 @@ func (t SpendSummaryTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 		err = qErr
 		for i := range rows {
 			rows[i].IsNew = rows[i].AmountLast == 0 && rows[i].Amount > 0
+			rows[i].SavingsExceedsSpend = savingsExceedSpend(rows[i].Saving, rows[i].Amount)
+			totalSavings += rows[i].Saving
 		}
 		result = rows
 		shownCount = len(rows)
@@ -188,6 +193,20 @@ func (t SpendSummaryTool) Call(nbCtx core.NbToolContext, input core.NBToolCallRe
 		slog.Warn("spend_summary: credits query failed", "error", creditsErr, "account_id", accountId)
 	} else {
 		responseMap["credits"] = roundCents(credits)
+	}
+	// Savings that exceed the spend they would reduce are impossible. Emit the
+	// contradiction as data with the instruction attached: the equivalent prose
+	// constraint in the agent prompt was observed being ignored on its first
+	// live trigger ($3,517/mo of savings reported against $863.61/mo of spend,
+	// unremarked). Note the savings shown here are NOT deduplicated across
+	// alternative purchase options — recommendation_view's
+	// is_primary_recommendation is the deduped source for savings totals.
+	if savingsExceedSpend(totalSavings, grandTotal) {
+		responseMap["savings_exceeds_spend"] = true
+		responseMap["savings_warning"] = fmt.Sprintf(
+			"Open savings ($%.2f) exceed this window's spend ($%.2f), which is impossible — the estimates are unreliable. "+
+				"Surface the discrepancy with both figures (⚠) instead of presenting the savings as achievable, and never describe them as 'offsetting' the bill.",
+			roundCents(totalSavings), roundCents(grandTotal))
 	}
 	// When the result is truncated (more groups exist than were returned), tell the
 	// agent so it reports "top N of M" with the true total instead of implying the
@@ -231,6 +250,12 @@ type spendByAccountRow struct {
 	// 0% change: percentage_change is 0 in both cases, and the "<5% = stable"
 	// reading would otherwise mislabel a brand-new spender as stable.
 	IsNew bool `json:"is_new,omitempty" db:"-"`
+	// SavingsExceedsSpend marks a row whose open savings exceed the spend they
+	// would reduce — impossible, so the estimate is unreliable. Emitted as data
+	// because the equivalent prose constraint was observed being ignored: the
+	// agent reported $3,517/mo of savings against $863.61/mo of spend without
+	// remark.
+	SavingsExceedsSpend bool `json:"savings_exceeds_spend,omitempty" db:"-"`
 	// Window aggregates over the full result set (before LIMIT); identical on every
 	// row, read once into the response envelope, excluded from per-row JSON.
 	GrandTotal float64 `json:"-" db:"grand_total"`
@@ -247,6 +272,8 @@ type spendByServiceRow struct {
 	// IsNew disambiguates "no prior-period spend" (a NEW entity) from a genuine
 	// 0% change; see spendByAccountRow.IsNew.
 	IsNew bool `json:"is_new,omitempty" db:"-"`
+	// SavingsExceedsSpend — see spendByAccountRow.SavingsExceedsSpend.
+	SavingsExceedsSpend bool `json:"savings_exceeds_spend,omitempty" db:"-"`
 	// Window aggregates over the full result set (before LIMIT); identical on every
 	// row, read once into the response envelope, excluded from per-row JSON.
 	GrandTotal float64 `json:"-" db:"grand_total"`

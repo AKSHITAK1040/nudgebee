@@ -65,6 +65,10 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 		"**Namespace matching rules:** If user uses short token like 'prod' prefer fuzzy match `namespace ILIKE '%prod%'`. If user explicitly says 'production' or quotes namespace, prefer exact equality `namespace = 'production'` unless user asked fuzzy.",
 		"**Ordering & Limits:** Use `ORDER BY created_at DESC` for recency requests. For interactive row lists, default to `LIMIT 50` and hard cap `LIMIT 100`. Do NOT apply `LIMIT` to aggregates (COUNT/SUM/AVG) or `DISTINCT` queries unless user asks for a limit.",
 		"**Aggregations & NULL handling:** When computing SUM/AVG/PERCENT, exclude NULLs: add `AND estimated_saving IS NOT NULL` to denominators or aggregation WHERE clauses as appropriate. For savings totals, sum only positive values (`AND estimated_saving > 0`) — negative values are added-cost rows (e.g. growing nearly-full storage), not savings.",
+		"**MANDATORY for savings totals — deduplicate alternatives:** every SUM of estimated_saving MUST add `AND is_primary_recommendation` . Rows sharing a `dedupe_group` are alternative ways to act on ONE opportunity (a commitment purchase comes back from AWS as 1yr/3yr × All/No-Upfront variants, and only one can be bought); `is_primary_recommendation` keeps the highest-saving variant of each. Without it a single EC2 commitment counted 11 times and inflated an account total by ~2.4x. Counts of actionable items should use it too. Do NOT apply it when the user asks to see the individual purchase options.",
+		"**Report commitments as one opportunity:** when listing recommendations, show the primary row per dedupe_group and note that other purchase terms exist (e.g. \"best of 11 EC2 Savings Plan options\"), rather than listing every variant as a separate finding.",
+		"**A commitment total is a conservative floor, not an exact figure:** one dedupe_group holds mutually-exclusive options (1yr vs 3yr, All- vs No-Upfront, and a Savings Plan vs Reserved Instances covering the same usage) and sometimes separately-purchasable per-instance-family Reserved Instances. Keeping the best single option per service never overstates, but can understate where per-family purchases would genuinely stack. Call it the \"best available commitment option per service\" and note the realisable figure depends on the purchase mix — never present it as an exact ceiling.",
+		"**Split totals by savings type:** when reporting a total, separate workload optimizations (RightSizing, Configuration, K8sSpotRecommendation, InfraUpgrade) from commitment purchases (rule_name LIKE 'aws_native_ce%' or dedupe_group LIKE 'aws_commitment%'). They are not additive in practice — commitments are sized against CURRENT usage, so rightsizing first reduces what is worth committing to. State that caveat whenever both appear.",
 		"**Date ranges:** Use `updated_at >= 'start' AND updated_at < 'end + 1 day'` semantics for 'between' queries. For 'on date' use `DATE(created_at) = 'YYYY-MM-DD'`.",
 		"**Free-text searches:** For textual matches within `recommendation` or `rule_name` use `ILIKE '%term%'` and avoid adding status unless user requested it (except default Open behavior described above).",
 		"**Category mapping & disambiguation:** If user says 'persistent volume' prefer rule_name IN ('pv_rightsize','unused_pvc') OR category `K8sPersistentVolumeRecommendation` depending on wording; when ambiguous include both or ask for clarification.",
@@ -112,7 +116,9 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 		"- controller_name (STRING): Kubernetes controller name (Deployment, StatefulSet, DaemonSet, etc.); NULL for cloud resources",
 		"",
 		"**Financial Fields:**",
-		"- estimated_saving (DECIMAL): Estimated cost savings in USD if recommendation is implemented",
+		"- estimated_saving (DECIMAL): Estimated MONTHLY cost savings in USD if recommendation is implemented",
+		"- is_primary_recommendation (BOOLEAN): TRUE for the highest-saving row within its dedupe_group (or per resource+category when no group). REQUIRED filter on every savings SUM — see the aggregation rules",
+		"- dedupe_group (STRING): Marks rows that are alternative ways to act on the SAME opportunity, e.g. 'aws_commitment:<account>:AmazonEC2' for the 1yr/3yr × All/No-Upfront purchase variants of one Savings Plan. NULL for standalone recommendations",
 		"",
 		"**Safety / Impact Fields (blast radius from the dependency graph):**",
 		"- safety_band (STRING): How safe it is to act — 'safe', 'review', 'risky', 'unknown'; NULL when impact has not been computed yet",
@@ -173,11 +179,20 @@ func (l RecommendationsAgent) GetSystemPrompt(ctx *security.RequestContext, quer
 			Answer:      "SELECT " + defaultColumns + " FROM recommendation_view WHERE status = 'Open' ORDER BY created_at DESC LIMIT 10",
 			Explanation: "Lists recent Open recommendations using explicit columns (never SELECT *).",
 		},
-		// 2. Aggregate — GROUP BY with COUNT/SUM, excluding NULL savings from the sum.
+		// 2. Aggregate — GROUP BY with COUNT/SUM, excluding NULL savings and
+		// deduplicating alternative purchase options.
 		{
 			Question:    "What are the total estimated savings by category for open recommendations?",
-			Answer:      "SELECT category, COUNT(*) as recommendation_count, ROUND(SUM(estimated_saving), 2) as total_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 GROUP BY category ORDER BY total_savings DESC",
-			Explanation: "Aggregates by category; no LIMIT on aggregates; only positive savings summed (NULLs and added-cost negatives excluded).",
+			Answer:      "SELECT category, COUNT(*) as recommendation_count, ROUND(SUM(estimated_saving), 2) as total_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY category ORDER BY total_savings DESC",
+			Explanation: "Aggregates by category; no LIMIT on aggregates; only positive savings summed (NULLs and added-cost negatives excluded); is_primary_recommendation collapses alternative purchase variants so one opportunity counts once.",
+		},
+		// 3. Split total — workload optimizations vs commitment purchases, the
+		// shape every account-level savings answer should take.
+		{
+			Question: "How much can we save in total on this account?",
+			Answer:   "SELECT CASE WHEN dedupe_group LIKE 'aws_commitment%' OR rule_name LIKE 'aws_native_ce%' THEN 'commitment_purchases' ELSE 'workload_optimizations' END AS savings_type, COUNT(*) AS opportunities, ROUND(SUM(estimated_saving), 2) AS monthly_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY 1",
+			Explanation: "Splits the total into workload optimizations and commitment purchases (they are not additive — commitments are sized against current usage, so right-size first), " +
+				"and dedupes so each commitment counts its best single purchase option rather than every term/payment variant.",
 		},
 		// 3. Multi-criteria with a financial threshold, ranked by savings.
 		{
