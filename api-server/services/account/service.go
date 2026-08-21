@@ -1705,80 +1705,6 @@ func AwsEventBridgeOnboardUrl(context *security.RequestContext, req AwsEventBrid
 	}, nil
 }
 
-func GcpPubSubOnboardUrl(context *security.RequestContext, req GcpPubSubOnboardRequest) (GcpPubSubOnboardResponse, error) {
-	err := common.ValidateStruct(req)
-	if err != nil {
-		return GcpPubSubOnboardResponse{}, err
-	}
-
-	tenantId := context.GetSecurityContext().GetTenantId()
-
-	manager, err := database.GetDatabaseManager(database.Metastore)
-	if err != nil {
-		return GcpPubSubOnboardResponse{}, fmt.Errorf("account: failed to get database manager: %w", err)
-	}
-
-	var account struct {
-		ExternalId    string `db:"external_id"`
-		AccountNumber string `db:"account_number"` // GCP Project ID
-	}
-	err = manager.Db.Get(&account,
-		`SELECT external_id, account_number FROM cloud_accounts
-		WHERE id = $1 AND tenant = $2 AND lower(cloud_provider) = 'gcp' AND status = 'active'
-		LIMIT 1`,
-		req.AccountId, tenantId,
-	)
-	if err != nil {
-		return GcpPubSubOnboardResponse{}, fmt.Errorf("account: gcp account not found: %w", err)
-	}
-
-	if account.ExternalId == "" {
-		return GcpPubSubOnboardResponse{}, fmt.Errorf("account: gcp account has no external_id")
-	}
-
-	templateYamlURL := config.Config.GcpPubSubTemplateURL
-	nudgebeePubSubProjectId := config.Config.GcpProjectID
-	if nudgebeePubSubProjectId == "" {
-		nudgebeePubSubProjectId = account.AccountNumber // fallback to GCP project ID from account if not set in config
-	}
-	nudgebeeSubscriptionName := config.Config.CloudCollectorGcpPubSubSubscriptionID
-
-	if templateYamlURL == "" {
-		return GcpPubSubOnboardResponse{}, fmt.Errorf("account: gcp_pubsub_template_url config is not set")
-	}
-	if nudgebeePubSubProjectId == "" {
-		return GcpPubSubOnboardResponse{}, fmt.Errorf("account: cloud_collector_gcp_pubsub_project_id config is not set")
-	}
-	if nudgebeeSubscriptionName == "" {
-		return GcpPubSubOnboardResponse{}, fmt.Errorf("account: cloud_collector_gcp_pubsub_subscription_id config is not set")
-	}
-
-	// Build GCP Deployment Manager URL
-	// Format: https://console.cloud.google.com/dm/deployments/new?template=<encoded-template-url>&project=<project-id>
-	// Note: GCP Console supports pre-filling project but not template parameters via URL
-	// User must manually paste the external_id token after clicking the link
-	deployURL := fmt.Sprintf(
-		"https://console.cloud.google.com/dm/deployments/new?template=%s&project=%s",
-		url.QueryEscape(templateYamlURL),
-		url.QueryEscape(account.AccountNumber),
-	)
-
-	context.GetLogger().Info("account: generated GCP Pub/Sub Deployment Manager URL",
-		slog.String("account_id", req.AccountId),
-		slog.String("external_id", account.ExternalId),
-		slog.String("project_id", account.AccountNumber),
-		slog.String("pubsub_project_id", nudgebeePubSubProjectId),
-	)
-
-	return GcpPubSubOnboardResponse{
-		DeploymentManagerUrl: deployURL,
-		ExternalId:           account.ExternalId,
-		PubSubProjectId:      nudgebeePubSubProjectId,
-		SubscriptionName:     nudgebeeSubscriptionName,
-		TemplateYamlUrl:      templateYamlURL,
-	}, nil
-}
-
 func SetupGCPMonitoringWebhook(ctx *security.RequestContext, req GcpMonitoringWebhookSetupRequest) (GcpMonitoringWebhookSetupResponse, error) {
 	if !ctx.GetSecurityContext().HasAccountAccess(req.AccountId, security.SecurityAccessTypeUpdate) {
 		return GcpMonitoringWebhookSetupResponse{}, common.ErrorUnauthorized("unauthorized")
@@ -1906,43 +1832,6 @@ func CheckGCPMonitoringPermission(ctx *security.RequestContext, req GcpCheckMoni
 		HasPermission: apiResponse.Data.HasPermission,
 		ErrorDetail:   apiResponse.Data.ErrorDetail,
 	}, nil
-}
-
-func GCPOnBoardUrl(context *security.RequestContext, query AccountCreateRequest) (GCPOnBoardResponse, error) {
-	err := common.ValidateStruct(query)
-	if err != nil {
-		return GCPOnBoardResponse{}, err
-	}
-
-	if query.CloudProvider == "GCP" {
-		createdBy := context.GetSecurityContext().GetUserId()
-		tenant := context.GetSecurityContext().GetTenantId()
-		randomId := common.GenerateUUID()
-		projectName := fmt.Sprintf("nudgebee-project-%s", randomId)
-		bucketName := fmt.Sprintf("nudgebee-gcp-cur-%s", randomId)
-
-		// Construct a GCP deployment manager template URL or marketplace onboarding link
-		baseURL := "https://console.cloud.google.com/dm/deploy/new"
-		params := url.Values{}
-		params.Set("project", projectName)
-		// for now harcoded
-		params.Set("templateUrl", "https://storage.googleapis.com/nudgebee-templates/nudgebee-gcp-cloud-formation.json")
-		params.Set("param_NudgebeeID", tenant)
-		params.Set("param_NudgebeeDomain", config.Config.NUDGEBEE_URL)
-		params.Set("param_NudgebeeIamRole", config.Config.NUDGEBEE_INSTANCE_ROLE)
-		params.Set("param_BucketName", bucketName)
-		params.Set("param_NudgebeeUserId", createdBy)
-		params.Set("param_NudgebeeAccountName", query.AccountName)
-
-		encodedUrl := fmt.Sprintf("%s?%s", baseURL, params.Encode())
-
-		return GCPOnBoardResponse{
-			Url:        encodedUrl,
-			BucketName: bucketName,
-		}, nil
-	}
-
-	return GCPOnBoardResponse{}, fmt.Errorf("account: only for GCP")
 }
 
 func GetResource(ctx *security.RequestContext, id string) (models.Resource, error) {

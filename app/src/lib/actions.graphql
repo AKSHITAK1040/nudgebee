@@ -1241,12 +1241,6 @@ type Mutation {
 }
 
 type Mutation {
-  gcp_get_onboard_pubsub_url(
-    object: GcpPubSubOnboardInput!
-  ): GcpPubSubOnboardOutput
-}
-
-type Mutation {
   ml_generate_node_recommendations(
     account: String!
     tenant: String!
@@ -5429,10 +5423,6 @@ input SetupGcpMonitoringWebhookInput {
   webhook_url: String!
 }
 
-input GcpPubSubOnboardInput {
-  account_id: String!
-}
-
 input NotificationRulesWhereRequest {
   _and: [NotificationRulesWhereRequest]
   _or: [NotificationRulesWhereRequest]
@@ -6109,14 +6099,6 @@ type CheckGcpMonitoringPermissionOutput {
 
 type SetupGcpMonitoringWebhookOutput {
   channel_name: String
-}
-
-type GcpPubSubOnboardOutput {
-  deployment_manager_url: String!
-  external_id: String!
-  pubsub_project_id: String!
-  subscription_name: String!
-  template_yaml_url: String!
 }
 
 type ValidateCloudCredentialsOutput {

@@ -274,18 +274,6 @@ mutation AzureEventGridOnboard($object: AzureEventGridOnboardInput!) {
 }
 `;
 
-export const GCP_PUBSUB_ONBOARD = `
-mutation GcpPubSubOnboard($object: GcpPubSubOnboardInput!) {
-  gcp_get_onboard_pubsub_url(object: $object) {
-    deployment_manager_url
-    external_id
-    pubsub_project_id
-    subscription_name
-    template_yaml_url
-  }
-}
-`;
-
 export const GET_SLO_CONFIGS = `
 query GetSLOConfigs {
   slo_config_v2(where: __WHERE__) {
@@ -715,18 +703,6 @@ const apiKubernetes1 = {
       return response;
     } catch (error) {
       console.error('failed to get azure arm template url-', error);
-      return error;
-    }
-  },
-  async getGcpDeploymentManagerURL(accountId: string) {
-    try {
-      if (accountId === 'demo') return null;
-      const response = await queryGraphQL(GCP_PUBSUB_ONBOARD, 'GcpPubSubOnboard', {
-        object: { account_id: accountId },
-      });
-      return response;
-    } catch (error) {
-      console.error('failed to get gcp deployment manager url-', error);
       return error;
     }
   },

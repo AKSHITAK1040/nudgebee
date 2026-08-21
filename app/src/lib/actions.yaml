@@ -3125,18 +3125,6 @@ actions:
       - role: tenant_admin
       - role: account_admin
     comment: Setup GCP Cloud Monitoring webhook notification channel for real-time alerts
-  - name: gcp_get_onboard_pubsub_url
-    definition:
-      kind: synchronous
-      handler: '{{SERVICE_API_SERVER_URL}}/rpc/account'
-      forward_client_headers: true
-      headers:
-        - name: X-ACTION-TOKEN
-          value_from_env: ACTION_API_SERVER_TOKEN
-    permissions:
-      - role: tenant_admin
-      - role: account_admin
-    comment: Generate GCP Deployment Manager template URL for Pub/Sub real-time integration
   - name: ml_generate_node_recommendations
     definition:
       kind: synchronous
@@ -7239,7 +7227,6 @@ custom_types:
     - name: MetricsQueryUtilisationRequest
     - name: AwsOnboardStatusInput
     - name: AzureEventGridOnboardInput
-    - name: GcpPubSubOnboardInput
     - name: NotificationRulesWhereRequest
     - name: UserGroupsWhereRequest
     - name: IntegrationWhereRequest
@@ -7370,7 +7357,6 @@ custom_types:
     - name: AwsOrgRefreshTokenOutput
     - name: AwsOnboardStatusOutput
     - name: AzureEventGridOnboardOutput
-    - name: GcpPubSubOnboardOutput
     - name: ValidateCloudCredentialsOutput
     - name: PermissionStatusOutput
     - name: get_openai_query_recommendations_output

@@ -136,23 +136,6 @@ type AwsEventBridgeOnboardResponse struct {
 	ExternalId string `json:"external_id" mapstructure:"external_id" validate:"required"`
 }
 
-type GCPOnBoardResponse struct {
-	Url        string `json:"url" mapstructure:"url" validate:"required"`
-	BucketName string `json:"bucket_name" mapstructure:"bucket_name" validate:"required"`
-}
-
-type GcpPubSubOnboardRequest struct {
-	AccountId string `json:"account_id" mapstructure:"account_id" validate:"required"`
-}
-
-type GcpPubSubOnboardResponse struct {
-	DeploymentManagerUrl string `json:"deployment_manager_url" mapstructure:"deployment_manager_url" validate:"required"`
-	ExternalId           string `json:"external_id" mapstructure:"external_id" validate:"required"`
-	PubSubProjectId      string `json:"pubsub_project_id" mapstructure:"pubsub_project_id" validate:"required"`
-	SubscriptionName     string `json:"subscription_name" mapstructure:"subscription_name" validate:"required"`
-	TemplateYamlUrl      string `json:"template_yaml_url" mapstructure:"template_yaml_url" validate:"required"`
-}
-
 type GcpMonitoringWebhookSetupRequest struct {
 	AccountId  string `json:"account_id" mapstructure:"account_id" validate:"required"`
 	WebhookUrl string `json:"webhook_url" mapstructure:"webhook_url" validate:"required"`

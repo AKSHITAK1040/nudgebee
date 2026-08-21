@@ -457,26 +457,6 @@ const AddGcpAccountModal = ({ open, onClose }) => {
         }
       }
 
-      // TODO: Re-enable Pub/Sub onboarding after testing
-      // Fetch Pub/Sub deployment URL for parent account
-      // if (result?.parent_id) {
-      //   setIsFetchingDeployUrl(true);
-      //   try {
-      //     const deployRes = await apiKubernetes1.getGcpDeploymentManagerURL(result.parent_id);
-      //     const deployData = deployRes?.data?.data?.gcp_get_onboard_pubsub_url;
-      //     if (deployData?.deployment_manager_url) {
-      //       setDeploymentManagerUrl(deployData.deployment_manager_url);
-      //       setExternalId(deployData.external_id);
-      //       setPubsubProjectId(deployData.pubsub_project_id || '');
-      //       setSubscriptionName(deployData.subscription_name || '');
-      //     }
-      //   } catch (error) {
-      //     console.error('Failed to fetch GCP Deployment Manager URL:', error);
-      //   } finally {
-      //     setIsFetchingDeployUrl(false);
-      //   }
-      // }
-
       handleCloseModal(true);
     } catch (error) {
       snackbar.error('Failed to onboard GCP projects.');

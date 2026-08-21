@@ -130,10 +130,6 @@ type appConfig struct {
 
 	AzureARMTemplateURL string `mapstructure:"azure_arm_template_url"`
 
-	GcpPubSubTemplateURL                  string `mapstructure:"gcp_pubsub_template_url"`
-	GcpProjectID                          string `mapstructure:"gcp_project_id"`
-	CloudCollectorGcpPubSubSubscriptionID string `mapstructure:"cloud_collector_gcp_pubsub_subscription_id"`
-
 	CloudCollectorServerToken       string `mapstructure:"cloud_collector_server_token"`
 	CloudCollectorServerUrl         string `mapstructure:"cloud_collector_server_url"`
 	CloudCollectorServerTokenHeader string `mapstructure:"cloud_collector_server_token_header"`
@@ -393,10 +389,6 @@ func init() {
 	viper.SetDefault("aws_eventbridge_addon_template_url", "")
 
 	viper.SetDefault("azure_arm_template_url", "")
-
-	viper.SetDefault("gcp_pubsub_template_url", "")
-	viper.SetDefault("gcp_project_id", "")
-	viper.SetDefault("cloud_collector_gcp_pubsub_subscription_id", "")
 
 	viper.SetDefault("cloud_collector_server_url", "http://cloud-collector-servert:8000")
 	viper.SetDefault("cloud_collector_server_token", "")
