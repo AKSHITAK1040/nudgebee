@@ -61,6 +61,13 @@ export const CATEGORY_RULE_LABELS: Record<string, Record<string, string>> = {
 };
 
 export const NON_SECURITY_CATEGORIES = ['RightSizing', 'InfraUpgrade', 'Configuration', 'K8sSpotRecommendation'];
+
+// What the Recommendations tab covers now that Configuration has its own tab:
+// the savings-bearing categories. Deliberately NOT the same as
+// NON_SECURITY_CATEGORIES, which stays the full set and is what the Summary tab
+// still reports on — Summary is a portfolio view and is updated separately, so
+// until then its totals legitimately exceed this tab's.
+export const RECOMMENDATION_CATEGORIES = ['RightSizing', 'InfraUpgrade', 'K8sSpotRecommendation'];
 export const DEFAULT_STATUS = ['Open', 'InProgress'];
 
 // Options for the Status filter. An empty selection means DEFAULT_STATUS, so the

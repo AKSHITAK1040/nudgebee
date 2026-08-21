@@ -121,6 +121,7 @@ export const navSearchPages: NavSearchPage[] = [
   { group: 'Optimize', label: 'Optimize Summary', path: '/optimise#summary' },
   { group: 'Optimize', label: 'Optimize Recommendations', path: '/optimise#recommendations' },
   { group: 'Optimize', label: 'Optimize Resolutions', path: '/optimise#resolutions' },
+  { group: 'Optimize', label: 'Optimize Configuration', path: '/optimise#configuration' },
   { group: 'Optimize', label: 'Security - Image Scan', path: '/optimise#security/image-scan' },
   { group: 'Optimize', label: 'Security - CIS Scan', path: '/optimise#security/cis-scan' },
   { group: 'Optimize', label: 'Security - VM Vulnerabilities', path: '/optimise#security/vm-vulnerabilities' },

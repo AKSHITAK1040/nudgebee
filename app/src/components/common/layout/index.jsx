@@ -43,6 +43,7 @@ import {
   RecommendationIcon,
   RecommendationResolutionIcon,
   SecuritytoolsBlue,
+  ToolIconBlue,
   LLMConsumptionIcon,
   IntegrationsIcon,
   CloudAccountIcon,
@@ -399,6 +400,13 @@ const PageLayout = ({ children }) => {
         id: 'sidenav-optimise-resolutions',
         module: 'recommendations',
         icon: RecommendationResolutionIcon,
+      },
+      {
+        text: 'Configuration',
+        path: '/optimise#configuration',
+        id: 'sidenav-optimise-configuration',
+        module: 'recommendations',
+        icon: ToolIconBlue,
       },
       {
         text: 'Security',

@@ -9,6 +9,7 @@ import {
   RecommendationIcon,
   RecommendationResolutionIcon,
   SecuritytoolsBlue,
+  ToolIconBlue,
   LLMConsumptionIcon,
   IntegrationsIcon,
   AutomateBlue,
@@ -78,11 +79,12 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
         { name: 'Summary', id: 'summary', fragment: 'summary', value: 0, icon: OptimizeSummaryIcon },
         { name: 'Recommendations', id: 'recommendations', fragment: 'recommendations', value: 1, icon: RecommendationIcon, iconSize: 18 },
         { name: 'Resolutions', id: 'resolutions', fragment: 'resolutions', value: 2, icon: RecommendationResolutionIcon, iconSize: 18 },
+        { name: 'Configuration', id: 'configuration', fragment: 'configuration', value: 3, icon: ToolIconBlue, iconSize: 18 },
         {
           name: 'Security',
           id: 'security',
           fragment: 'security',
-          value: 3,
+          value: 4,
           icon: SecuritytoolsBlue,
           tabOptions: [
             { id: 'image-scan', text: 'Image Scan', value: 0, fragment: 'image-scan' },
@@ -95,14 +97,14 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
           name: 'Auto Optimize',
           id: 'auto-optimize',
           fragment: 'auto-optimize',
-          value: 4,
+          value: 5,
           icon: AutomateBlue,
           tabOptions: [
             { id: 'Optimizations', text: 'Optimizations', value: 0, fragment: 'optimizations' },
             { id: 'approvals', text: 'Approvals', value: 1, fragment: 'approvals' },
           ],
         },
-        // Auto Optimize stays at a fixed index 4 so it sits BEFORE this
+        // Auto Optimize stays at a fixed index 5 so it sits BEFORE this
         // feature-flagged tab. AnchorComponent renders sub-tabs via
         // filterOptions[activeDropdownTab] (index === value), so a tab with
         // tabOptions (Security and Auto Optimize above) must keep
@@ -113,7 +115,7 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
             name: 'LLM Analyser',
             id: 'llm-analyser',
             fragment: 'cost-analyser',
-            value: 5,
+            value: 6,
             icon: LLMConsumptionIcon,
             iconSize: 18,
           },
@@ -134,7 +136,7 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
             name: 'AI Gateway',
             id: 'ai-gateway',
             fragment: 'ai-gateway',
-            value: 6,
+            value: 7,
             icon: IntegrationsIcon,
             iconSize: 18,
           },
@@ -159,6 +161,25 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
     if (!hash || !filterOptions.length) {
       setActiveTab(0);
       return;
+    }
+    // Configuration used to be a card on the Recommendations tab, so shared and
+    // bookmarked links still carry ?category=Configuration#recommendations. That
+    // tab no longer queries the category, so honouring the hash would land the
+    // reader on an empty list; send them to the tab that now owns it.
+    const categoryParam = router.query.category;
+    const wantsConfiguration = Array.isArray(categoryParam) ? categoryParam.includes('Configuration') : categoryParam === 'Configuration';
+    if (hash.split('/')[0] === 'recommendations' && wantsConfiguration) {
+      const configurationTab = filterOptions.find((option) => option.fragment === 'configuration');
+      if (configurationTab) {
+        // Rewrite the URL rather than only moving activeTab: the tab strip parses
+        // the hash itself, so leaving #recommendations there would render the
+        // Configuration list under a highlighted Recommendations tab. Dropping
+        // the now-redundant category param keeps the link shareable.
+        const { category: _legacyCategory, ...query } = router.query;
+        router.replace({ pathname: router.pathname, query, hash: 'configuration' }, undefined, { shallow: true });
+        setActiveTab(configurationTab.value);
+        return;
+      }
     }
     const [fragment, subFragment] = hash.split('/');
     const filter = filterOptions.find((option) => option.fragment === fragment);
@@ -187,7 +208,7 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
   };
 
   const createAutoOptimizeButton =
-    activeTab === 4 && hasWriteAccess(router?.query?.accountId) ? (
+    activeTab === 5 && hasWriteAccess(router?.query?.accountId) ? (
       <DsDropdownMenu
         align='end'
         disablePortal={false}
@@ -231,8 +252,9 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
           {activeTab === 0 && <SummaryView />}
           {activeTab === 1 && <OptimizeNewPage />}
           {activeTab === 2 && <ResolutionsView />}
-          {activeTab === 3 && <SecurityView subTab={subTab} />}
-          {activeTab === 4 && (
+          {activeTab === 3 && <OptimizeNewPage lockedCategory='Configuration' />}
+          {activeTab === 4 && <SecurityView subTab={subTab} />}
+          {activeTab === 5 && (
             <AutoOptimizeTabs
               subTab={subTab}
               openCreateAutoOptimize={openCreateAutoOptimize}
@@ -241,8 +263,8 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
               handleCloseCreateAutoOptimize={handleCloseCreateAutoOptimize}
             />
           )}
-          {activeTab === 5 && <CostAnalyser />}
-          {activeTab === 6 && <GatewayUsage gatewayUrl={llmGatewayUrl} />}
+          {activeTab === 6 && <CostAnalyser />}
+          {activeTab === 7 && <GatewayUsage gatewayUrl={llmGatewayUrl} />}
         </ErrorBoundary>
       )}
     </>
