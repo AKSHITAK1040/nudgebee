@@ -364,6 +364,33 @@ func IsDeterministicCostQuery(query string) bool {
 	return deterministicCostRouteRe.MatchString(query)
 }
 
+// shouldDeterministicCostRoute reports whether the deterministic cost pre-route
+// should claim this query, i.e. it is cost-shaped AND the caller did not name an
+// agent itself.
+//
+// The mention check is the important half. RouterAgent.Execute honours
+// "@<agent>" verbatim, but InferAgent returns the FinOps agent before the router
+// ever runs, so without this a caller that explicitly named its agent is
+// overridden by a phrase match on its own payload.
+//
+// Not hypothetical: the auto-optimize apply entrypoint sends
+// `@agent_code_2 {... "query":"Please apply the following Kubernetes resource
+// rightsizing recommendations ..."}`, which matches the right-sizing pattern in
+// deterministicCostRouteRe. Every apply on dev between 2026-08-20 and
+// 2026-08-21 was handed to FinOps, which replied with a clarifying question and
+// left the conversation WAITING — nothing answers questions on a cron path, so
+// the caller polled for 15 minutes, gave up, and no rightsizing pull request was
+// ever raised.
+//
+// Deliberately narrow: the regex is untouched, so no cost-question recall is
+// lost. Only "the caller already told us where to go" wins.
+func shouldDeterministicCostRoute(query string) bool {
+	if mentioned, _ := common.ParseAgentMention(query); mentioned != "" {
+		return false
+	}
+	return IsDeterministicCostQuery(query)
+}
+
 func InferAgent(ctx *security.RequestContext, userId string, accountId string, conversationId string, query string, configs ...core.ConversationSessionRequestConfig) (core.NBAgent, error) {
 	isNewConversation := core.IsNewConversationRequest(configs...)
 
@@ -372,7 +399,8 @@ func InferAgent(ctx *security.RequestContext, userId string, accountId string, c
 	// The LLM router was observed violating its own written cost-routing rule,
 	// and the reuse shortcut then pinned the wrong agent for the rest of the
 	// conversation — a regex decides what a regex can decide.
-	if IsDeterministicCostQuery(query) {
+	// An explicit @mention outranks it — see shouldDeterministicCostRoute.
+	if shouldDeterministicCostRoute(query) {
 		if agent, found := getAgent(ctx, FinOpsAgentName, accountId); found {
 			ctx.GetLogger().Info("router: deterministic cost route to finops", "query_len", len(query))
 			return agent, nil

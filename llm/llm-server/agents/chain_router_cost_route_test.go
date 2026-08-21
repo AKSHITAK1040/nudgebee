@@ -54,3 +54,51 @@ func TestIsDeterministicCostQuery(t *testing.T) {
 		assert.Equal(t, c.want, IsDeterministicCostQuery(c.query), "query: %q", c.query)
 	}
 }
+
+// TestDeterministicCostRouteYieldsToAgentMention pins the precedence between
+// the deterministic cost pre-route and an explicit "@<agent>" mention.
+//
+// InferAgent runs this decision before anything else and returns FinOps
+// directly, so RouterAgent.Execute — the only place that honours a mention —
+// never gets consulted. A caller that named its agent was therefore overridden
+// by a phrase match on its own payload.
+//
+// The live case: the auto-optimize apply entrypoint sends "@agent_code_2 {...}"
+// whose query reads "Please apply the following Kubernetes resource rightsizing
+// recommendations", matching the right-sizing pattern. Every apply on dev
+// between 2026-08-20 and 2026-08-21 went to FinOps, which asked a clarifying
+// question and left the conversation WAITING forever — no rightsizing pull
+// request was raised.
+func TestDeterministicCostRouteYieldsToAgentMention(t *testing.T) {
+	// Verbatim shape of the apply payload, trimmed to the parts that matter.
+	const applyPayload = `@agent_code_2 {"account_id":"a2a30b02","git_repo":` +
+		`"https://github.com/nudgebee/nudgebee-infra","mode":"fix","query":` +
+		`"Please apply the following Kubernetes resource rightsizing recommendations.` +
+		`\n\n**Repository**: nudgebee/nudgebee-infra"}`
+
+	// Precondition: the text really is cost-shaped. If this ever goes false the
+	// test below would pass for the wrong reason.
+	assert.True(t, IsDeterministicCostQuery(applyPayload),
+		"precondition: the payload text is cost-shaped, which is why it was misrouted")
+
+	assert.False(t, shouldDeterministicCostRoute(applyPayload),
+		"an explicit @mention must outrank the cost pre-route, or the caller's own "+
+			"choice of agent is overridden by a phrase match on its payload")
+
+	cases := []struct {
+		name  string
+		query string
+		want  bool
+	}{
+		{"mention wins over cost text", "@agent_code_2 apply the rightsizing recommendations", false},
+		{"mention wins even for a plain cost question", "@k8s what is our monthly cost?", false},
+		{"no mention, cost question still routes", "What are the top rightsizing recommendations by savings?", true},
+		{"no mention, not cost, still no route", "Why is this pod restarting?", false},
+		{"mid-text @ is not a mention", "email cost report to a@b.com, break down the cost by team", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			assert.Equal(t, c.want, shouldDeterministicCostRoute(c.query))
+		})
+	}
+}
