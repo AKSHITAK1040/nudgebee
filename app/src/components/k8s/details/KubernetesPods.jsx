@@ -312,6 +312,7 @@ const KubernetesPodsTable = ({ accountId, defaultQuery = {}, enableFilters = tru
                     hideIcon={true}
                     nameMaxLength={70}
                     namespaceFont={ds.text.small}
+                    showTooltip={true}
                   />
                 </Box>
               ),
