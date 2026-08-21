@@ -9,7 +9,6 @@ import (
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 	toolcore "nudgebee/llm/tools/core"
-	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -343,69 +342,8 @@ func getAgent(ctx *security.RequestContext, agent string, accountId string) (cor
 	return core.GetNBAgent(ctx, agentName, accountId, core.AgentStatusEnabled)
 }
 
-// deterministicCostRouteRe matches questions that are unambiguously about
-// cloud cost/spend. Precision over recall: every pattern here should be a
-// phrase no reasonable SRE/troubleshooting question contains, so anything
-// ambiguous ("expensive query", "cost of downtime") falls through to the LLM
-// router rather than being force-routed. Recall gaps are acceptable — the LLM
-// router and its few-shot examples still catch phrasings this misses.
-var deterministicCostRouteRe = regexp.MustCompile(`(?i)\b(?:` +
-	`(?:aws|gcp|azure|cloud|our|my|the) bill\b|billing|bill (?:went|go(?:ne)? up|spike)|` +
-	`spends?|spending|spent|budgets?|` +
-	`savings? plans?|reserved instances?|commitment coverage|finops|` +
-	`cost (?:anomal\w*|spike|breakdown|saving\w*|by|per)|cloud costs?|monthly cost|` +
-	`potential savings|savings opportunit\w*|save money|run-rate|` +
-	`right-?siz\w* recommendations?` +
-	`)\b`)
-
-// IsDeterministicCostQuery reports whether a query should route to the FinOps
-// agent without consulting the LLM router or the last-agent reuse shortcut.
-func IsDeterministicCostQuery(query string) bool {
-	return deterministicCostRouteRe.MatchString(query)
-}
-
-// shouldDeterministicCostRoute reports whether the deterministic cost pre-route
-// should claim this query, i.e. it is cost-shaped AND the caller did not name an
-// agent itself.
-//
-// The mention check is the important half. RouterAgent.Execute honours
-// "@<agent>" verbatim, but InferAgent returns the FinOps agent before the router
-// ever runs, so without this a caller that explicitly named its agent is
-// overridden by a phrase match on its own payload.
-//
-// Not hypothetical: the auto-optimize apply entrypoint sends
-// `@agent_code_2 {... "query":"Please apply the following Kubernetes resource
-// rightsizing recommendations ..."}`, which matches the right-sizing pattern in
-// deterministicCostRouteRe. Every apply on dev between 2026-08-20 and
-// 2026-08-21 was handed to FinOps, which replied with a clarifying question and
-// left the conversation WAITING — nothing answers questions on a cron path, so
-// the caller polled for 15 minutes, gave up, and no rightsizing pull request was
-// ever raised.
-//
-// Deliberately narrow: the regex is untouched, so no cost-question recall is
-// lost. Only "the caller already told us where to go" wins.
-func shouldDeterministicCostRoute(query string) bool {
-	if mentioned, _ := common.ParseAgentMention(query); mentioned != "" {
-		return false
-	}
-	return IsDeterministicCostQuery(query)
-}
-
 func InferAgent(ctx *security.RequestContext, userId string, accountId string, conversationId string, query string, configs ...core.ConversationSessionRequestConfig) (core.NBAgent, error) {
 	isNewConversation := core.IsNewConversationRequest(configs...)
-
-	// Deterministic cost routing runs before BOTH the last-agent reuse shortcut
-	// and the LLM router: unambiguous cost/spend questions go to FinOps in code.
-	// The LLM router was observed violating its own written cost-routing rule,
-	// and the reuse shortcut then pinned the wrong agent for the rest of the
-	// conversation — a regex decides what a regex can decide.
-	// An explicit @mention outranks it — see shouldDeterministicCostRoute.
-	if shouldDeterministicCostRoute(query) {
-		if agent, found := getAgent(ctx, FinOpsAgentName, accountId); found {
-			ctx.GetLogger().Info("router: deterministic cost route to finops", "query_len", len(query))
-			return agent, nil
-		}
-	}
 
 	// Optimization: If conversation has a last agent in history, try to use it directly to skip routing overhead
 	// But ONLY if this isn't explicitly flagged as a new conversation
