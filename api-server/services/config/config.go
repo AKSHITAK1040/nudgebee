@@ -228,6 +228,12 @@ type appConfig struct {
 	FeatureEventAutoAiSummaryEnabled bool   `mapstructure:"feature_event_auto_ai_summary_enabled"`
 	ServerName                       string `mapstructure:"services_server_name"`
 
+	// When true, events that describe a moment rather than a recoverable condition
+	// (configuration_change) are stored already CLOSED at ingestion — no closer
+	// will ever reach them otherwise (issue #36597). Default on: the current
+	// always-open behavior is the bug.
+	FeatureEventPointInTimeCloseEnabled bool `mapstructure:"feature_event_point_in_time_close_enabled"`
+
 	// Triage scoring: when true, ComputeScore uses the LLM-verdict-per-class + deterministic
 	// policy path instead of the legacy severity*env formula. Default off (legacy formula).
 	FeatureLLMTriageScoringEnabled bool `mapstructure:"feature_llm_triage_scoring_enabled"`
@@ -454,6 +460,7 @@ func init() {
 	viper.SetDefault("nb_anomaly_evaluation_hours", 1)
 
 	viper.SetDefault("feature_event_auto_ai_summary_enabled", true)
+	viper.SetDefault("feature_event_point_in_time_close_enabled", true)
 	viper.SetDefault("webhook_async_execution", true)
 
 	viper.SetDefault("LLM_SERVER_TOOL_SHELL_IMAGE", "ghcr.io/nudgebee/nudgebee-debug:0.3.12")

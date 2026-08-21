@@ -1480,8 +1480,24 @@ func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 	event.SubjectType = strings.ToLower(event.SubjectType)
 	event.SubjectName = truncateStringToMaxBytes(event.SubjectName, maxSubjectNameBytes)
 
-	query := `INSERT INTO events ("id", "finding_id", "title", "description", "source", "aggregation_key", "priority", "subject_type", "subject_name", "subject_namespace", "subject_node", "service_key", "fingerprint", "evidences", "tenant", "cloud_account_id", "status", "finding_type","cluster", "starts_at", "labels", "updated_at", "ends_at", "cloud_resource_id", "category", "created_at", "urgency", "subject_owner", "subject_owner_kind")
-			 VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29)
+	// A configuration_change event describes a moment that has already passed
+	// ("this resource was changed"), not a condition that can recover — no
+	// closer will ever reach it (issue #36597), so store it already closed
+	// rather than leaving it to accumulate in the open-events list forever.
+	// The rest of this codebase already treats configuration_change this way
+	// in several places (playbook enrichment is skipped for it, it's excluded
+	// from workload-recovery closes, it carries a scoring penalty); this is
+	// the one place that decides it at ingestion instead of re-deriving it
+	// per call site. Centralized in InsertEvent (not InvestigateEvent) so
+	// every insert path gets it automatically.
+	isPointInTimeEvent := config.Config.FeatureEventPointInTimeCloseEnabled && event.FindingType == "configuration_change"
+	if isPointInTimeEvent {
+		event.Status = EventStatusClosed
+		event.EndsAt = event.StartsAt
+	}
+
+	query := `INSERT INTO events ("id", "finding_id", "title", "description", "source", "aggregation_key", "priority", "subject_type", "subject_name", "subject_namespace", "subject_node", "service_key", "fingerprint", "evidences", "tenant", "cloud_account_id", "status", "finding_type","cluster", "starts_at", "labels", "updated_at", "ends_at", "cloud_resource_id", "category", "created_at", "urgency", "subject_owner", "subject_owner_kind", "nb_status")
+			 VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30)
 			 ON CONFLICT (tenant, cloud_account_id, finding_id)
 			 DO UPDATE SET
 			 	updated_at = EXCLUDED.updated_at
@@ -1546,8 +1562,13 @@ func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 		event.Urgency = "LOW"
 	}
 
+	nbStatus := triage.NBStatusOpen
+	if isPointInTimeEvent {
+		nbStatus = triage.NBStatusResolved
+	}
+
 	var isInsert bool
-	err = dbms.Db.QueryRow(query, id, event.FindingId, event.Title, event.Description, event.Source, event.AggregationKey, event.Priority, event.SubjectType, event.SubjectName, event.SubjectNamespace, event.SubjectNode, event.ServiceKey, event.Fingerprint, evidences, event.Tenant, event.AccountId, event.Status, event.FindingType, event.Cluster, event.StartsAt, labels, time.Now().UTC(), event.EndsAt, nullableCloudResourceId, event.Category, event.CreatedAt, event.Urgency, event.SubjectOwner, event.SubjectOwnerKind).Scan(&isInsert)
+	err = dbms.Db.QueryRow(query, id, event.FindingId, event.Title, event.Description, event.Source, event.AggregationKey, event.Priority, event.SubjectType, event.SubjectName, event.SubjectNamespace, event.SubjectNode, event.ServiceKey, event.Fingerprint, evidences, event.Tenant, event.AccountId, event.Status, event.FindingType, event.Cluster, event.StartsAt, labels, time.Now().UTC(), event.EndsAt, nullableCloudResourceId, event.Category, event.CreatedAt, event.Urgency, event.SubjectOwner, event.SubjectOwnerKind, nbStatus).Scan(&isInsert)
 	if err != nil {
 		slog.Error("event: failed to insert event", "error", err)
 		return id, err
@@ -1568,7 +1589,8 @@ func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 			common.MqPublishWithBackgroundRetry(),
 			common.MqPublishWithContext(cfg.publishCtx),
 		)
-	} else if !cfg.skipWorkflowRefire && strings.EqualFold(string(event.Status), string(EventStatusFiring)) {
+	} else if !cfg.skipWorkflowRefire &&
+		(strings.EqualFold(string(event.Status), string(EventStatusFiring)) || isPointInTimeEvent) {
 		// Re-fire of an existing event: ON CONFLICT updated an already-present row.
 		// The post-process pipeline (triage/llm/notification) only runs on first
 		// insert, so without this an event-trigger workflow would never see repeat
@@ -1578,6 +1600,10 @@ func InsertEvent(event Event, id string, opts ...InsertOption) (string, error) {
 		// duplicate notifications or investigations. Gated to FIRING so resolve/
 		// close updates don't spuriously trigger, and skipped for non-occurrence
 		// re-persists (WithoutWorkflowRefire, e.g. UpdateEvent metadata edits).
+		// configuration_change events (issue #36597) are born CLOSED and never
+		// pass through FIRING, so they need their own re-fire path here too —
+		// otherwise a second occurrence of the same finding_id goes silent to
+		// event-trigger workflows.
 		_ = common.MqPublish(
 			config.Config.RabbitMqEventPostProcessExchange,
 			config.Config.RabbitMqEventPostProcessQueue,
