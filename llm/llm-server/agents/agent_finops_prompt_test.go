@@ -115,3 +115,35 @@ func TestFinOpsPrompt_SavingsDedupeContract(t *testing.T) {
 	assert.Contains(t, flat, "savings_exceeds_spend",
 		"the tool-emitted impossible-savings flag must be honoured")
 }
+
+// TestFinOpsPrompt_TotalsQuestionSkipsResourceVerification pins the scope of the
+// resource-verification layer. A question asking only for a savings total has no
+// utilization claim to check, so verifying individual resources cannot change the
+// answer — it only spends a kubectl round-trip. The layer stays available for
+// questions that name a resource to act on.
+func TestFinOpsPrompt_TotalsQuestionSkipsResourceVerification(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := &FinOpsAgent{accountId: "test-finops-prompt"}
+	flat := flattenAgentPrompt(agent.GetSystemPrompt(ctx, core.NBAgentRequest{}))
+
+	assert.Contains(t, flat, "total savings potential",
+		"a totals question needs its own layer mapping, or it inherits the optimize-my-spend path")
+	assert.Contains(t, flat, "Only for specific named resources",
+		"the verification layer must state when it does NOT apply")
+}
+
+// TestRecommendationsPrompt_AggregateIsTheAnswer pins the rule that stops the
+// most expensive query this agent runs. Having computed an aggregate that
+// answers the question, the agent was following it with an unlimited
+// ORDER BY over the account's recommendations, which returns nothing the
+// aggregate had not already stated.
+func TestRecommendationsPrompt_AggregateIsTheAnswer(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := newRecommendationAgent("test-recommendations-prompt")
+	flat := flattenAgentPrompt(agent.GetSystemPrompt(ctx, core.NBAgentRequest{}))
+
+	assert.Contains(t, flat, "An aggregate is the answer",
+		"the agent must be told to stop once an aggregate answers the question")
+	assert.Contains(t, flat, "always with a LIMIT",
+		"row listings must carry a limit")
+}

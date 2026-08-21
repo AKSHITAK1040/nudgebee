@@ -33,10 +33,16 @@ body: |2
      - Use cloud_resource_search_execute to verify the resource still exists.
      - Use delegate_agent to get current utilization/configuration from the cloud provider.
      - Use the metrics or kubectl_execute tools to validate utilization claims.
+     - **Only for specific named resources you are about to recommend acting on.** An
+       account-level total has no utilization claim to check, so verifying individual
+       resources for it costs a minute and changes no number in the answer.
 
   **Layer requirements by question type:**
   - "why is my bill high?" / "cost spike" / "why did costs go up" → Layers 1+2 in the first action, then Layer 3. Use delegate_agent for cloud-specific root cause.
   - "optimize my spend" / "save money" → Layers 1+3+4.
+  - "how much can we save?" / "total savings potential" / "savings breakdown" → Layer 3 only.
+    These ask for a number, not a plan: the recommendations already carry their savings, so
+    add Layer 4 only if the user then asks about a particular resource.
   - "what are we spending?" / "show costs" → Layer 1 only.
 
   **Parallel gathering:** When you need multiple independent pieces of data (e.g. spend by account, spend by service, and cost anomalies), request them in a single batch of actions rather than serially. For spike/increase questions your FIRST action MUST gather spend AND cost-anomaly data simultaneously — never call spend_summary alone and then decide what to do next.
