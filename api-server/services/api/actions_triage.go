@@ -22,25 +22,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-// TriageResponse represents the combined triage information for an event
-type TriageResponse struct {
-	EventID          string                   `json:"event_id"`
-	IsDuplicate      bool                     `json:"is_duplicate"`
-	DuplicateInfo    *DuplicateInfo           `json:"duplicate_info,omitempty"`
-	CorrelatedEvents []triage.CorrelatedEvent `json:"correlated_events"`
-	HistoricalStats  *triage.HistoricalStats  `json:"historical_stats"`
-	HourlyTrend      []triage.HourlyBucket    `json:"hourly_trend"`
-	CorrelationCount int                      `json:"correlation_count"`
-}
-
-// DuplicateInfo contains information about duplicate events
-type DuplicateInfo struct {
-	FirstEventID     string                  `json:"first_event_id"`
-	OccurrenceNumber int                     `json:"occurrence_number"`
-	DuplicateChain   []triage.DuplicateEvent `json:"duplicate_chain"`
-	TotalOccurrences int                     `json:"total_occurrences"`
-}
-
 // handleTriageApis registers the triage action endpoint
 func handleTriageApis(router *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logger *slog.Logger) {
 	groupV2 := router.Group("/rpc")
@@ -69,12 +50,8 @@ func handleTriageAction(h *ActionRequest, c *gin.Context, tracer *trace.Tracer, 
 	}
 
 	switch actionName {
-	case "event_get_triage":
-		handleEventGetTriage(h, c, ctx)
 	case "event_get_duplicates":
 		handleEventGetDuplicates(h, c, ctx)
-	case "event_get_correlations":
-		handleEventGetCorrelations(h, c, ctx)
 	case "event_get_timeline":
 		handleEventGetTimeline(h, c, ctx)
 	case "event_get_impact":
@@ -134,88 +111,6 @@ func handleTriageAction(h *ActionRequest, c *gin.Context, tracer *trace.Tracer, 
 	}
 }
 
-// handleEventGetTriage returns comprehensive triage information for an event
-func handleEventGetTriage(h *ActionRequest, c *gin.Context, ctx *security.RequestContext) {
-	eventID, ok := h.Input["event_id"].(string)
-	if !ok || eventID == "" {
-		c.JSON(400, common.ErrorActionBadRequest("event_id is required"))
-		return
-	}
-
-	// Get event to extract fingerprint and account_id
-	ev, err := event.GetEvent(ctx, eventID)
-	if err != nil {
-		ctx.GetLogger().Error("Failed to get event", "error", err, "event_id", eventID)
-		c.JSON(400, common.ErrorActionBadRequest("event not found"))
-		return
-	}
-
-	if ev.CloudAccountId == nil || *ev.CloudAccountId == "" {
-		c.JSON(400, common.ErrorActionBadRequest("event has no account ID"))
-		return
-	}
-
-	if ev.Fingerprint == nil || *ev.Fingerprint == "" {
-		c.JSON(400, common.ErrorActionBadRequest("event has no fingerprint"))
-		return
-	}
-
-	// Get database connection
-	dbms, err := database.GetDatabaseManager(database.Metastore)
-	if err != nil {
-		ctx.GetLogger().Error("Failed to get database manager", "error", err)
-		c.JSON(400, common.ErrorActionBadRequest("database connection failed"))
-		return
-	}
-	response := TriageResponse{
-		EventID: eventID,
-	}
-
-	// Get tenant ID for tenant isolation
-	tenantID := ctx.GetSecurityContext().GetTenantId()
-
-	// 1. Check if this is a duplicate
-	duplicates, err := triage.GetDuplicateChain(ctx.GetContext(), dbms.Db, eventID, tenantID)
-	if err != nil {
-		ctx.GetLogger().Error("Failed to get duplicate chain", "error", err, "event_id", eventID)
-	} else if len(duplicates) > 0 {
-		response.IsDuplicate = true
-		response.DuplicateInfo = &DuplicateInfo{
-			FirstEventID:     duplicates[0].FirstEventID,
-			OccurrenceNumber: duplicates[len(duplicates)-1].OccurrenceNumber,
-			DuplicateChain:   duplicates,
-			TotalOccurrences: len(duplicates),
-		}
-	}
-
-	// 2. Get correlated events
-	correlations, err := triage.GetCorrelatedEvents(ctx.GetContext(), dbms.Db, eventID, tenantID)
-	if err != nil {
-		ctx.GetLogger().Error("Failed to get correlated events", "error", err, "event_id", eventID)
-	} else {
-		response.CorrelatedEvents = correlations
-		response.CorrelationCount = len(correlations)
-	}
-
-	// 3. Get historical stats
-	historicalStats, err := triage.ComputeHistoricalStats(ctx.GetContext(), dbms.Db, *ev.Fingerprint, *ev.CloudAccountId)
-	if err != nil {
-		ctx.GetLogger().Error("Failed to compute historical stats", "error", err, "event_id", eventID)
-	} else {
-		response.HistoricalStats = historicalStats
-	}
-
-	// 4. Get hourly trend
-	hourlyTrend, err := triage.ComputeHourlyTrend(ctx.GetContext(), dbms.Db, *ev.Fingerprint, *ev.CloudAccountId)
-	if err != nil {
-		ctx.GetLogger().Error("Failed to compute hourly trend", "error", err, "event_id", eventID)
-	} else {
-		response.HourlyTrend = hourlyTrend
-	}
-
-	c.JSON(http.StatusOK, response)
-}
-
 // handleEventGetDuplicates returns the duplicate chain for an event
 func handleEventGetDuplicates(h *ActionRequest, c *gin.Context, ctx *security.RequestContext) {
 	eventID, ok := h.Input["event_id"].(string)
@@ -254,38 +149,6 @@ func handleEventGetDuplicates(h *ActionRequest, c *gin.Context, ctx *security.Re
 	}
 
 	c.JSON(http.StatusOK, response)
-}
-
-// handleEventGetCorrelations returns correlated events for an event
-func handleEventGetCorrelations(h *ActionRequest, c *gin.Context, ctx *security.RequestContext) {
-	eventID, ok := h.Input["event_id"].(string)
-	if !ok || eventID == "" {
-		c.JSON(400, common.ErrorActionBadRequest("event_id is required"))
-		return
-	}
-
-	dbms, err := database.GetDatabaseManager(database.Metastore)
-	if err != nil {
-		ctx.GetLogger().Error("Failed to get database manager", "error", err)
-		c.JSON(400, common.ErrorActionBadRequest("database connection failed"))
-		return
-	}
-
-	// Get tenant ID for tenant isolation
-	tenantID := ctx.GetSecurityContext().GetTenantId()
-
-	correlations, err := triage.GetCorrelatedEvents(ctx.GetContext(), dbms.Db, eventID, tenantID)
-	if err != nil {
-		ctx.GetLogger().Error("Failed to get correlated events", "error", err, "event_id", eventID)
-		c.JSON(400, common.ErrorActionBadRequest("failed to retrieve correlations"))
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"event_id":          eventID,
-		"correlated_events": correlations,
-		"correlation_count": len(correlations),
-	})
 }
 
 // handleEventGetTimeline returns a chronological timeline of events related to the given event

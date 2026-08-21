@@ -64,15 +64,18 @@ func ProcessEvent(ctx context.Context, db *sqlx.DB, event *models.Event) error {
 	// leaders participate — re-fires stay collapsed inside their dedup chain, so
 	// a group member stands for its whole chain. Additive: a failure here must
 	// never fail triage.
+	isIncidentChild := false
 	if occurrence == 1 && incidentGroupingEnabled() {
-		if err := attachSameSubjectIncident(ctx, db, event); err != nil {
+		attached, err := attachSameSubjectIncident(ctx, db, event)
+		if err != nil {
 			slog.ErrorContext(ctx, "Failed same-subject incident attach", "error", err, "event_id", event.Id)
 		}
+		isIncidentChild = attached
 	}
 
 	// Step 4: Compute and save score (target: < 50ms)
 	// Apply any score adjustments from rules
-	result, err := ComputeScore(ctx, db, event, occurrence, corrType, corrScore)
+	result, err := ComputeScore(ctx, db, event, occurrence, corrType, corrScore, isIncidentChild)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to compute score", "error", err, "event_id", event.Id)
 		// Continue processing - don't fail entire triage on scoring error
@@ -85,7 +88,8 @@ func ProcessEvent(ctx context.Context, db *sqlx.DB, event *models.Event) error {
 			result.Score = clamp(result.Score+ruleResult.ScoreAdjustment.Adjustment, 0, 100)
 			// Re-assert the LLM verdict's priority band: an additive rule must not push the score
 			// past the ceiling the model chose (a dev disk alert capped at P1 must not land at P0).
-			// No-op for legacy-scored events (no band in factors).
+			// No-op for legacy-scored events (no band in factors). ComputeScore re-clamps after
+			// its own correlation term for the same reason.
 			result.Score = clampToBand(result.Score, result.Factors)
 			result.Priority = scoreToPriority(result.Score)
 			slog.InfoContext(ctx, "Applied score adjustment from rule",

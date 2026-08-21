@@ -195,11 +195,17 @@ func decideSameSubjectAttach(
 // attachSameSubjectIncident links a just-triaged chain-leader event to its
 // subject's open group, if one exists. Failures are returned for logging but
 // must never fail triage — grouping is additive.
-func attachSameSubjectIncident(ctx context.Context, db sqlx.ExtContext, event *models.Event) error {
+//
+// Reports whether the event attached as a group CHILD. Scoring consumes that
+// directly rather than re-reading event_correlations: the caller writes the
+// link here, in Step 3b, and scores in Step 4, so a second query would only
+// re-read what this function just decided — and, because the legacy pairwise
+// rows share the table, would sometimes read the wrong row back.
+func attachSameSubjectIncident(ctx context.Context, db sqlx.ExtContext, event *models.Event) (bool, error) {
 	if event == nil || event.Tenant == nil || *event.Tenant == "" ||
 		event.CloudAccountId == nil || *event.CloudAccountId == "" ||
 		event.StartsAt == nil || event.AggregationKey == nil || *event.AggregationKey == "" {
-		return nil // not groupable
+		return false, nil // not groupable
 	}
 	identity := eventAlertIdentity(event)
 	// Derived signals (SLO violations, anomaly detections) neither lead nor
@@ -207,12 +213,12 @@ func attachSameSubjectIncident(ctx context.Context, db sqlx.ExtContext, event *m
 	// statistical echoes of concrete failures, and replay showed an
 	// SLOViolation leading a crashloop group it did not cause.
 	if isDerivedSignal(identity) {
-		return nil
+		return false, nil
 	}
 	seedKey := SubjectKey(identity)
 	ns, roughSubj := chronicSubjectIdentity(event)
 	if roughSubj == "" || strings.HasSuffix(seedKey, "|") {
-		return nil // no subject identity — cluster-scoped alerts never group here
+		return false, nil // no subject identity — cluster-scoped alerts never group here
 	}
 	start := *event.StartsAt
 
@@ -243,7 +249,7 @@ func attachSameSubjectIncident(ctx context.Context, db sqlx.ExtContext, event *m
 		start.Add(-time.Hour), start.Add(-ChronicLookback), start, event.Id,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to load subject pair rates: %w", err)
+		return false, fmt.Errorf("failed to load subject pair rates: %w", err)
 	}
 	chronicPairs := make(map[string]bool, len(rates))
 	var seedStats ChronicStats
@@ -261,7 +267,7 @@ func attachSameSubjectIncident(ctx context.Context, db sqlx.ExtContext, event *m
 	// Chronic seeds neither declare nor extend — unless bursting far past
 	// their own baseline (+1 counts the seed firing itself).
 	if seedStats.Chronic() && !seedStats.IsBursting(seedLastHour+1) {
-		return nil
+		return false, nil
 	}
 
 	// Chain-first candidates on the subject's namespace inside the absorption
@@ -300,7 +306,7 @@ func attachSameSubjectIncident(ctx context.Context, db sqlx.ExtContext, event *m
 		start.Add(-IncidentAbsorptionCap), start, event.Id, event.Fingerprint,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to load group candidates: %w", err)
+		return false, fmt.Errorf("failed to load group candidates: %w", err)
 	}
 
 	deref := func(p *string) string {
@@ -339,11 +345,14 @@ func attachSameSubjectIncident(ctx context.Context, db sqlx.ExtContext, event *m
 
 	leaderID, offset, ok, err := resolveOpenGroupLeader(ctx, db, event, seed, members, memberStarts, chronicPairs)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if ok {
-		return insertGroupLink(ctx, db, event, leaderID, offset, 0,
-			fmt.Sprintf("same subject (%s) within incident attach window", seedKey))
+		if err := insertGroupLink(ctx, db, event, leaderID, offset, 0,
+			fmt.Sprintf("same subject (%s) within incident attach window", seedKey)); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	// The subject's own group is closed (window/cap) — a neighbor subject's
 	// group may still be the story (slice 2).
@@ -466,17 +475,17 @@ func tryTopologyAttach(
 	seed groupCandidate,
 	seedKey string,
 	start time.Time,
-) error {
+) (bool, error) {
 	if !topologyGroupingEnabled() {
-		return nil
+		return false, nil
 	}
 	graph, err := parseServiceMapFromEvent(event)
 	if err != nil || graph == nil {
-		return nil // no stored topology — nothing to reason with
+		return false, nil // no stored topology — nothing to reason with
 	}
 	seedSvcKey := getServiceKeyFromEvent(event)
 	if seedSvcKey == "" {
-		return nil
+		return false, nil
 	}
 
 	// Account-wide chain-leader candidates in the absorption window, any
@@ -512,7 +521,7 @@ func tryTopologyAttach(
 		start.Add(-IncidentAbsorptionCap), start, event.Id, event.Fingerprint,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to load topology candidates: %w", err)
+		return false, fmt.Errorf("failed to load topology candidates: %w", err)
 	}
 
 	deref := func(p *string) string {
@@ -581,7 +590,7 @@ func tryTopologyAttach(
 		}
 	}
 	if len(neighbors) == 0 {
-		return nil
+		return false, nil
 	}
 
 	// Most recently active neighbor subject is the story we join; determinism
@@ -616,7 +625,7 @@ func tryTopologyAttach(
 		start.Add(-ChronicLookback), start,
 	)
 	if err != nil {
-		return fmt.Errorf("failed to load neighbor pair rates: %w", err)
+		return false, fmt.Errorf("failed to load neighbor pair rates: %w", err)
 	}
 	neighborChronic := make(map[string]bool, len(rates))
 	for _, r := range rates {
@@ -627,11 +636,14 @@ func tryTopologyAttach(
 
 	leaderID, offset, ok, err := resolveOpenGroupLeader(ctx, db, event, seed, best.members, best.memberStarts, neighborChronic)
 	if err != nil {
-		return err
+		return false, err
 	}
 	if !ok {
-		return nil
+		return false, nil
 	}
-	return insertGroupLink(ctx, db, event, leaderID, offset, 1,
-		fmt.Sprintf("calls edge between %s and %s within incident attach window", seedKey, bestKey))
+	if err := insertGroupLink(ctx, db, event, leaderID, offset, 1,
+		fmt.Sprintf("calls edge between %s and %s within incident attach window", seedKey, bestKey)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
