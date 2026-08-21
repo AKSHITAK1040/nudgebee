@@ -30,7 +30,7 @@ const SEVERITY_TO_DS_LEVEL = {
 };
 const toDsSeverityLevel = (s) => SEVERITY_TO_DS_LEVEL[String(s || '').toLowerCase()] || 'info';
 import PRLink, { resolutionsDeepLink } from '@shared/links/PRLink';
-import LinearLoader from '@components/k8s/common/LinearLoader';
+import { ProgressLinear } from '@ui/ProgressLinear';
 import apiTickets from '@api1/tickets';
 import k8sApi from '@api1/kubernetes';
 import { PrOpenIcon } from '@assets';
@@ -508,7 +508,7 @@ const KubernetesSecurityDetails = (props) => {
       <Modal width='md' open={openCreatePR} handleClose={closeCreatePRModal} title='Create Pull Request'>
         {prLoading && (
           <Box sx={{ position: 'absolute', top: 0, left: 0, right: 0, zIndex: 9999 }}>
-            <LinearLoader />
+            <ProgressLinear surface='page-top' />
           </Box>
         )}
         {isGitReposLoading || filteredGitIntegrations.length > 0 ? (
