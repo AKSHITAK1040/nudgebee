@@ -2108,6 +2108,13 @@ const apiKubernetes1 = {
     // daily_volume: a fingerprint that fires on Monday and again on Thursday is
     // one issue but lands in two day buckets, so summing the buckets over-counts.
     //
+    // chains groups by fingerprint ONLY — never by computed_priority or
+    // subject_name. Both vary within a single chain (triage rescores over time; a
+    // chain spans every pod that hit the same problem), so grouping by them
+    // splits one issue into several rows that are visibly the same issue with
+    // different labels. Priority comes from latest_computed_priority (the most
+    // recent verdict) and the workload count from count_subject_name.
+    //
     // chains is capped: it feeds the "what keeps coming back" list, which only
     // ever shows the worst offenders, and an uncapped per-fingerprint scan on a
     // large tenant is a very different query. The cap is deliberately larger
@@ -2170,16 +2177,17 @@ const apiKubernetes1 = {
 
       chains: event_groupings_v2(
         where: __WHERE__,
-        group_by: ["fingerprint", "aggregation_key", "subject_name", "computed_priority"],
-        columns: ["fingerprint", "aggregation_key", "subject_name", "computed_priority", "fingerprint_event_count", "fingerprint_first_seen_at", "event_count"],
+        group_by: ["fingerprint", "aggregation_key"],
+        columns: ["fingerprint", "aggregation_key", "latest_computed_priority", "count_subject_name", "distinct_subject_name", "fingerprint_event_count", "fingerprint_first_seen_at", "event_count"],
         order_by: [{column: "fingerprint_event_count", order: desc}],
         limit: 200
       ) {
         rows {
           fingerprint
           aggregation_key
-          subject_name
-          computed_priority
+          latest_computed_priority
+          count_subject_name
+          distinct_subject_name
           fingerprint_event_count
           fingerprint_first_seen_at
           event_count

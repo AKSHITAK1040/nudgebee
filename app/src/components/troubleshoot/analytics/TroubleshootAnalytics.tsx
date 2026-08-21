@@ -43,6 +43,9 @@ interface Row {
   count_analysed_issues?: number;
   minutes_to_first_analysis?: number;
   computed_priority?: string;
+  latest_computed_priority?: string;
+  count_subject_name?: number;
+  distinct_subject_name?: string;
   aggregation_key?: string;
   subject_name?: string;
   fingerprint?: string;
@@ -66,6 +69,23 @@ const dayLabel = (key: string): string => {
 const dayBounds = (key: string): { start: string; end: string } => {
   const start = Date.parse(`${key}T00:00:00Z`);
   return { start: String(start), end: String(start + 86399999) };
+};
+
+/**
+ * The single workload behind a chain, when there is exactly one.
+ *
+ * distinct_subject_name comes back as a JSON array rendered to text by the query
+ * engine, so it needs parsing rather than reading. Returns '' when the chain
+ * spans several workloads — the caller shows a count instead.
+ */
+const firstSubject = (value?: string): string => {
+  if (!value) return '';
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) && parsed.length === 1 && typeof parsed[0] === 'string' ? parsed[0] : '';
+  } catch {
+    return '';
+  }
 };
 
 /** Whole days between a first-seen timestamp and now. Used to age a recurring chain. */
@@ -427,8 +447,13 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
       .map((row) => ({
         fingerprint: row.fingerprint || '',
         aggregationKey: row.aggregation_key || '(unlabelled)',
-        subject: row.subject_name || '',
-        priority: (row.computed_priority || '').toUpperCase(),
+        // Name the workload when the chain only touched one, and count them when
+        // it touched several. Dropping the name entirely made distinct chains
+        // that share an alert name — three separate PostgreSQLCacheHitRatio
+        // problems on different databases — render as identical rows.
+        workloads: num(row.count_subject_name),
+        subject: firstSubject(row.distinct_subject_name),
+        priority: (row.latest_computed_priority || '').toUpperCase(),
         occurrences: num(row.fingerprint_event_count),
         ageDays: ageInDays(row.fingerprint_first_seen_at),
       }))
@@ -512,7 +537,7 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
         key: 'stale',
         headline: `${staleLowRated.length} issue${staleLowRated.length === 1 ? '' : 's'} recurring for over a month, still rated P3`,
         evidence: `Worst: ${worstStale.aggregationKey}${
-          worstStale.subject ? ` on ${worstStale.subject}` : ''
+          worstStale.workloads > 1 ? ` across ${worstStale.workloads} workloads` : worstStale.subject ? ` on ${worstStale.subject}` : ''
         }, ${worstStale.occurrences.toLocaleString()} firings over ${Math.floor(
           (worstStale.ageDays ?? 0) / 7
         )} weeks. Either it matters and the score is wrong, or it should be suppressed.`,
@@ -1090,7 +1115,7 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
                       {chain.aggregationKey}
                     </Typography>
                     <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600] }}>
-                      {chain.subject ? `${chain.subject} · ` : ''}
+                      {chain.workloads > 1 ? `${chain.workloads} workloads · ` : chain.subject ? `${chain.subject} · ` : ''}
                       {ageLabel(chain.ageDays)}
                       {chain.priority ? ` · ${chain.priority}` : ''}
                     </Typography>
