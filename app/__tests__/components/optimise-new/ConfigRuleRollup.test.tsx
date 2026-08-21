@@ -6,6 +6,18 @@ import ConfigRuleRollup from '@components/optimise-new/ConfigRuleRollup';
 const mockListRollup = jest.fn();
 const mockGetDetails = jest.fn();
 
+const lastFindingsProps: Record<string, any> = {};
+jest.mock('@components/optimise-new/ConfigRuleFindings', () => ({
+  __esModule: true,
+  default: (props: any) => {
+    // Cleared, not merged: a prop absent from a later render would otherwise
+    // keep an earlier test's value and quietly assert nothing.
+    Object.keys(lastFindingsProps).forEach((key) => delete lastFindingsProps[key]);
+    Object.assign(lastFindingsProps, props);
+    return <div data-testid='config-rule-findings'>{props.ruleName}</div>;
+  },
+}));
+
 jest.mock('@api1/recommendation', () => ({
   __esModule: true,
   default: {
@@ -30,7 +42,7 @@ describe('ConfigRuleRollup', () => {
   });
 
   const renderView = (props: Partial<React.ComponentProps<typeof ConfigRuleRollup>> = {}) =>
-    render(<ConfigRuleRollup accountId={['acct-a', 'acct-b']} status={['Open']} onSelectRule={jest.fn()} {...props} />);
+    render(<ConfigRuleRollup accountId={['acct-a', 'acct-b']} status={['Open']} onSelectRecommendation={jest.fn()} {...props} />);
 
   it('collapses per-resource findings into one row per check', async () => {
     renderView();
@@ -71,14 +83,32 @@ describe('ConfigRuleRollup', () => {
     expect(screen.getByText('aws_lambda_tracing')).toBeInTheDocument();
   });
 
-  it('drills into the check that was clicked', async () => {
-    const onSelectRule = jest.fn();
-    renderView({ onSelectRule });
+  it('expands a check in place rather than navigating away', async () => {
+    renderView();
+
+    await waitFor(() => expect(screen.getByText('aws_tags')).toBeInTheDocument());
+    // The group is not itself a destination — nothing is open until it expands.
+    expect(screen.queryByTestId('config-rule-findings')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('aws_tags'));
+
+    await waitFor(() => expect(screen.getByTestId('config-rule-findings')).toBeInTheDocument());
+    expect(lastFindingsProps.ruleName).toBe('aws_tags');
+  });
+
+  it('hands the expanded findings the scope the list is filtered to', async () => {
+    const onSelectRecommendation = jest.fn();
+    renderView({ severity: ['Low'], onSelectRecommendation });
 
     await waitFor(() => expect(screen.getByText('aws_tags')).toBeInTheDocument());
     fireEvent.click(screen.getByText('aws_tags'));
 
-    expect(onSelectRule).toHaveBeenCalledWith('aws_tags');
+    await waitFor(() => expect(screen.getByTestId('config-rule-findings')).toBeInTheDocument());
+    expect(lastFindingsProps.accountId).toEqual(['acct-a', 'acct-b']);
+    expect(lastFindingsProps.status).toEqual(['Open']);
+    expect(lastFindingsProps.severity).toEqual(['Low']);
+    // The individual finding, not the group, is what opens the panel.
+    expect(lastFindingsProps.onSelectRecommendation).toBe(onSelectRecommendation);
   });
 
   it('narrows to the selected severity without re-querying', async () => {

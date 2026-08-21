@@ -4,31 +4,29 @@ import CustomTable from '@shared/tables/CustomTable';
 import Text from '@shared/format/Text';
 import recommendationApi from '@api1/recommendation';
 import { useLatestRequest } from '@components/vm/common';
-import SeverityBadge, { type SeverityLevel } from './SeverityBadge';
+import { SeverityIcon } from '@ui/SeverityIcon';
+import { toSeverityLevel } from '@utils/common';
+import ConfigRuleFindings from './ConfigRuleFindings';
 import { formatRuleName } from './utils';
 import { type ConfigRule, foldConfigRules } from './configRollup';
 
 const TABLE_ID = 'optimise-config-rules';
 
 const HEADERS = [
-  { name: 'Severity', width: '12%' },
-  { name: 'Check', width: '52%' },
+  { name: 'Severity', width: '8%' },
+  { name: 'Check', width: '56%' },
   { name: 'Accounts', width: '16%' },
   { name: 'Findings', width: '20%' },
 ];
-
-const SEVERITY_LEVELS: SeverityLevel[] = ['Critical', 'High', 'Medium', 'Low', 'Info'];
-
-const toSeverityLevel = (severity: string): SeverityLevel =>
-  (SEVERITY_LEVELS.find((level) => level.toLowerCase() === (severity || '').toLowerCase()) as SeverityLevel) || 'Info';
 
 interface ConfigRuleRollupProps {
   /** Accounts in view — the page's Account filter, or every account when unset. */
   accountId: string | string[];
   status: string[];
   severity?: string[];
-  /** Opens the flat, per-resource list for one check. */
-  onSelectRule: (ruleName: string) => void;
+  accounts?: Record<string, { name: string; cloud_provider: string }>;
+  /** Opens one finding's detail panel, from inside an expanded check. */
+  onSelectRecommendation: (rec: any) => void;
 }
 
 /**
@@ -39,7 +37,7 @@ interface ConfigRuleRollupProps {
  * ninety distinct checks, none of which carry savings. Grouping by check restores
  * the scale a reader can act on; the row drills into the resources.
  */
-const ConfigRuleRollup = ({ accountId, status, severity, onSelectRule }: ConfigRuleRollupProps) => {
+const ConfigRuleRollup = ({ accountId, status, severity, accounts, onSelectRecommendation }: ConfigRuleRollupProps) => {
   const [rules, setRules] = useState<ConfigRule[]>([]);
   const [loading, setLoading] = useState(false);
   const beginRequest = useLatestRequest();
@@ -98,7 +96,7 @@ const ConfigRuleRollup = ({ accountId, status, severity, onSelectRule }: ConfigR
           {
             component: (
               <Box sx={{ display: 'flex', justifyContent: 'center' }}>
-                <SeverityBadge severity={toSeverityLevel(rule.severity)} />
+                <SeverityIcon level={toSeverityLevel(rule.severity)} aria-label={rule.severity || '-'} />
               </Box>
             ),
             drilldownQuery: { ruleName: rule.ruleName },
@@ -129,7 +127,26 @@ const ConfigRuleRollup = ({ accountId, status, severity, onSelectRule }: ConfigR
       rowsPerPage={tableData.length}
       totalRows={tableData.length}
       tableHeadingCenter={['Severity']}
-      onRowClick={(query: any) => query?.ruleName && onSelectRule(query.ruleName)}
+      showExpandable
+      expandable={{
+        tabs: [
+          {
+            text: 'Findings',
+            value: 0,
+            key: 'optimise-config-rule-findings',
+            componentFn: (_option: any, drilldownQuery: any) => (
+              <ConfigRuleFindings
+                ruleName={drilldownQuery?.ruleName}
+                accountId={accountId}
+                status={status}
+                severity={severity}
+                accounts={accounts}
+                onSelectRecommendation={onSelectRecommendation}
+              />
+            ),
+          },
+        ],
+      }}
       showUpdatedEmptyData={tableData.length === 0}
       emptyHeading='No configuration findings'
       emptySubHeading='Checks appear here once an account has been scanned.'

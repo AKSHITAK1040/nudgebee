@@ -8,15 +8,7 @@ import PropTypes from 'prop-types';
 import Text from '@shared/format/Text';
 import CustomTable from '@shared/tables/CustomTable2';
 import { SeverityIcon } from '@ui/SeverityIcon';
-
-const SEVERITY_TO_DS_LEVEL = {
-  critical: 'critical',
-  high: 'high',
-  medium: 'medium',
-  low: 'low',
-  info: 'info',
-};
-const toDsSeverityLevel = (s) => SEVERITY_TO_DS_LEVEL[String(s || '').toLowerCase()] || 'info';
+import { toSeverityLevel } from '@utils/common';
 
 const KubernetesSecurityCVE = (props) => {
   const [loading, setLoading] = useState(false);
@@ -69,7 +61,7 @@ const KubernetesSecurityCVE = (props) => {
             component: <Text value={item?.count} />,
           });
           data.push({
-            component: <SeverityIcon level={toDsSeverityLevel(item?.severity)} aria-label={item?.severity || '-'} />,
+            component: <SeverityIcon level={toSeverityLevel(item?.severity)} aria-label={item?.severity || '-'} />,
             data: item?.severity,
           });
           return data;

@@ -28,8 +28,8 @@ import { ds } from '@utils/colors';
 // let Severity (a badge) and the version columns starve Last Seen until its
 // relative time wrapped to three lines.
 const HEADERS = [
-  { name: 'Severity', width: '6%' },
-  { name: 'Vulnerability', width: '18%' },
+  { name: 'Severity', width: '8%' },
+  { name: 'Vulnerability', width: '16%' },
   { name: 'Package', width: '19%' },
   { name: 'Installed', width: '17%' },
   { name: 'Fixed In', width: '17%' },
@@ -42,7 +42,7 @@ const HEADERS = [
 // owning account named first. Widths trimmed from the two widest text columns.
 const HEADERS_WITH_ACCOUNT = [
   { name: 'Account', width: '12%' },
-  { name: 'Severity', width: '6%' },
+  { name: 'Severity', width: '8%' },
   { name: 'Vulnerability', width: '15%' },
   { name: 'Package', width: '16%' },
   { name: 'Installed', width: '15%' },
@@ -391,6 +391,7 @@ const VmVulnerabilities = ({
       pageNumber={page + 1}
       totalRows={total}
       onPageChange={changePage}
+      tableHeadingCenter={['Severity']}
       showExpandable={isGrouped}
       onRowClick={isGrouped ? undefined : (query: any) => query?.finding && setPanelFinding(query.finding)}
       expandable={

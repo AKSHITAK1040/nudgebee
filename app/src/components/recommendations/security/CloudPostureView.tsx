@@ -6,6 +6,7 @@ import DownloadButton from '@shared/buttons/DownloadButton';
 import CustomTable from '@shared/tables/CustomTable';
 import Text from '@shared/format/Text';
 import { SeverityIcon } from '@ui/SeverityIcon';
+import { toSeverityLevel } from '@utils/common';
 import { ds } from '@utils/colors';
 import recommendationApi from '@api1/recommendation';
 import { useLatestRequest } from '@components/vm/common';
@@ -16,19 +17,14 @@ import CloudRulePanel from './CloudRulePanel';
 const TABLE_ID = 'cloud-posture-rules';
 
 const HEADERS = [
-  { name: 'Severity', width: '10%' },
-  { name: 'Check', width: '46%' },
+  { name: 'Severity', width: '8%' },
+  { name: 'Check', width: '48%' },
   { name: 'Accounts', width: '14%' },
   { name: 'Resources', width: '14%' },
   { name: 'Provider', width: '16%' },
 ];
 
 const SEVERITY_OPTIONS = ['Critical', 'High', 'Medium', 'Low', 'Info'].map((s) => ({ label: s, value: s }));
-
-const toSeverityLevel = (s: string) => {
-  const n = normalizeSeverity(s).toLowerCase();
-  return ['critical', 'high', 'medium', 'low', 'info'].includes(n) ? n : 'info';
-};
 
 interface CloudPostureViewProps {
   /** Cloud accounts in view. */
@@ -91,7 +87,7 @@ const CloudPostureView = ({ accountId, accountsById, providerById, leadingFilter
           {
             component: (
               <Box sx={{ display: 'flex', justifyContent: 'center' }}>
-                <SeverityIcon level={toSeverityLevel(rule.severity) as any} aria-label={normalizeSeverity(rule.severity)} />
+                <SeverityIcon level={toSeverityLevel(rule.severity)} aria-label={normalizeSeverity(rule.severity)} />
               </Box>
             ),
             drilldownQuery: { rule },
