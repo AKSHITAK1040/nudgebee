@@ -2306,7 +2306,7 @@ func handleTokenLimitError(rc *retryContext) (*llms.ContentResponse, *LLMCallMet
 		// early-exit at iteration 1 and surface a misleading internal-error
 		// response.
 		if !summarizedAnyMessage {
-			largestIdx, largestTokens := largestTextMessageIndex(rc.promptMessages, msgTokenCounts)
+			largestIdx, largestTokens := largestTextMessageIndex(rc.promptMessages, msgTokenCounts, -1)
 			if largestIdx < 0 {
 				ctx.GetLogger().Warn("No text messages available to summarize but total still exceeds limit",
 					"iteration", iteration,
@@ -2402,10 +2402,18 @@ func handleTokenLimitError(rc *retryContext) (*llms.ContentResponse, *LLMCallMet
 // with the highest token count whose first part is a TextContent (the only
 // kind we know how to summarise), or -1 if no such message exists.
 // Caller passes a parallel slice of pre-computed token counts.
-func largestTextMessageIndex(messages []llms.MessageContent, tokens []int) (int, int) {
+//
+// protectIdx is skipped entirely; pass -1 to consider every message. The
+// pre-flight cap uses it to keep the user's turn out of a byte-slicing trim —
+// that message carries the question, and losing it makes the model answer
+// something nobody asked.
+func largestTextMessageIndex(messages []llms.MessageContent, tokens []int, protectIdx int) (int, int) {
 	bestIdx := -1
 	bestTokens := -1
 	for i, msg := range messages {
+		if i == protectIdx {
+			continue
+		}
 		if len(msg.Parts) == 0 {
 			continue
 		}
@@ -2418,6 +2426,24 @@ func largestTextMessageIndex(messages []llms.MessageContent, tokens []int) (int,
 		}
 	}
 	return bestIdx, bestTokens
+}
+
+// lastHumanTextMessageIndex returns the index of the final human turn, or -1.
+// That turn holds the user's question (and, in ReAct, the scratchpad appended
+// to it), so it is the one message a size-driven trim must not silently drop.
+func lastHumanTextMessageIndex(messages []llms.MessageContent) int {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role != llms.ChatMessageTypeHuman {
+			continue
+		}
+		if len(messages[i].Parts) == 0 {
+			continue
+		}
+		if _, ok := messages[i].Parts[0].(llms.TextContent); ok {
+			return i
+		}
+	}
+	return -1
 }
 
 // fallbackCause records why the fallback path was entered. Quota exhaustion and
