@@ -1256,12 +1256,7 @@ func (o *NBReActPlanner3) persistNotebook(content string, turnIdx int, stats not
 	}
 
 	// Subsequent updates: patch the same row.
-	if err := conversationDAO.UpdateConversationAgentResponse(
-		o.notebookAgentID,
-		content,
-		AgentExecutionStatusSuccess,
-		"", breadcrumb, "", "",
-	); err != nil {
+	if err := updateConversationNotebook(conversationDAO, o.notebookAgentID, content, breadcrumb); err != nil {
 		if logger != nil {
 			logger.Error("reactagent3: failed to update notebook agent record",
 				"error", err.Error(),
@@ -1269,6 +1264,18 @@ func (o *NBReActPlanner3) persistNotebook(content string, turnIdx int, stats not
 				"turn_idx", turnIdx)
 		}
 	}
+}
+
+type conversationNotebookUpdater interface {
+	UpdateConversationNotebook(agentID, response, responseSummary string) error
+}
+
+func updateConversationNotebook(dao IConversationDao, agentID, content, breadcrumb string) error {
+	updater, ok := dao.(conversationNotebookUpdater)
+	if !ok {
+		return errors.New("conversation DAO does not support notebook updates")
+	}
+	return updater.UpdateConversationNotebook(agentID, content, breadcrumb)
 }
 
 // processToolActions extracts MULTIPLE tool actions from the <actions> (plural)

@@ -4,11 +4,40 @@ import (
 	"errors"
 	"testing"
 
+	"nudgebee/llm/security"
 	toolcore "nudgebee/llm/tools/core"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/tmc/langchaingo/llms"
 )
+
+type react4NotebookDAO struct {
+	IConversationDao
+	createdID       uuid.UUID
+	createCalls     int
+	updateCalls     int
+	createdAgent    string
+	createdResponse string
+	updatedResponse string
+	createErr       error
+}
+
+func (d *react4NotebookDAO) SaveCompletedConversationAgentCall(_ uuid.UUID, _, _, _, _, agentName, _, _, _, response, _ string, _ toolcore.NBQueryConfig, _ AgentExecutionStatus, _ string) (uuid.UUID, error) {
+	d.createCalls++
+	d.createdAgent = agentName
+	d.createdResponse = response
+	if d.createErr != nil {
+		return uuid.Nil, d.createErr
+	}
+	return d.createdID, nil
+}
+
+func (d *react4NotebookDAO) UpdateConversationNotebook(_ string, response, _ string) error {
+	d.updateCalls++
+	d.updatedResponse = response
+	return nil
+}
 
 func toolCall(id, name, args string) llms.ToolCall {
 	return llms.ToolCall{
@@ -157,9 +186,9 @@ func TestReAct4_ExtractNotebookContent(t *testing.T) {
 func TestReAct4_RefreshNotebookFromSteps_PicksLatest(t *testing.T) {
 	o := &NBReActPlanner4{}
 	steps := []NBAgentPlannerToolActionStep{
-		{Action: NBAgentPlannerToolAction{Tool: toolcore.NotebookToolName, ToolInput: `{"content":"first"}`}},
+		{Action: NBAgentPlannerToolAction{Tool: toolcore.NotebookToolName, ToolInput: `{"content":"first"}`}, Status: ToolStatusSuccess},
 		{Action: NBAgentPlannerToolAction{Tool: "kubectl", ToolInput: `{"command":"get pods"}`}, Observation: "pods"},
-		{Action: NBAgentPlannerToolAction{Tool: toolcore.NotebookToolName, ToolInput: `{"content":"second"}`}},
+		{Action: NBAgentPlannerToolAction{Tool: toolcore.NotebookToolName, ToolInput: `{"content":"second"}`}, Status: ToolStatusSuccess},
 	}
 	o.refreshNotebookFromSteps(steps)
 	assert.Equal(t, "second", o.Notebook)
@@ -315,4 +344,158 @@ func TestReAct4_AgentNameIsNilSafe(t *testing.T) {
 	o := &NBReActPlanner4{}
 	assert.NotPanics(t, func() { _ = o.agentName() })
 	assert.Equal(t, "", o.agentName())
+}
+
+func TestReAct4_RefreshNotebookPersistsSuccessfulReplacement(t *testing.T) {
+	originalDAO := GetConversationDao()
+	dao := &react4NotebookDAO{createdID: uuid.MustParse("11111111-1111-1111-1111-111111111111")}
+	SetConversationDao(dao)
+	t.Cleanup(func() { SetConversationDao(originalDAO) })
+
+	planner := &NBReActPlanner4{
+		ctx: security.NewRequestContextForTenantAccountAdmin(
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			[]string{"cccccccc-cccc-cccc-cccc-cccccccccccc"},
+		),
+		request: NBAgentRequest{
+			ConversationId: "conversation-id",
+			MessageId:      "message-id",
+			AccountId:      "account-id",
+			UserId:         "user-id",
+		},
+	}
+	first := "[DOING] inspect pods"
+	planner.refreshNotebookFromSteps([]NBAgentPlannerToolActionStep{{
+		Action: NBAgentPlannerToolAction{Tool: "update_notebook", ToolInput: `{"content":"` + first + `"}`},
+		Status: ToolStatusSuccess,
+	}})
+
+	assert.Equal(t, first, planner.Notebook)
+	assert.Equal(t, 1, dao.createCalls)
+	assert.Equal(t, notebookDummyAgent, dao.createdAgent)
+	assert.Equal(t, first, dao.createdResponse)
+	assert.Equal(t, dao.createdID.String(), planner.notebookAgentID)
+
+	second := "[DONE] inspect pods"
+	planner.refreshNotebookFromSteps([]NBAgentPlannerToolActionStep{{
+		Action: NBAgentPlannerToolAction{Tool: "update_notebook", ToolInput: `{"content":"` + second + `"}`},
+		Status: ToolStatusSuccess,
+	}})
+	assert.Equal(t, second, planner.Notebook)
+	assert.Equal(t, 1, dao.createCalls, "later replacements must update the same synthetic row")
+	assert.Equal(t, 1, dao.updateCalls)
+	assert.Equal(t, second, dao.updatedResponse)
+}
+
+func TestReAct4_RefreshNotebookIgnoresFailedAndDuplicateSteps(t *testing.T) {
+	originalDAO := GetConversationDao()
+	dao := &react4NotebookDAO{createdID: uuid.MustParse("22222222-2222-2222-2222-222222222222")}
+	SetConversationDao(dao)
+	t.Cleanup(func() { SetConversationDao(originalDAO) })
+
+	planner := &NBReActPlanner4{Notebook: "existing"}
+	planner.refreshNotebookFromSteps([]NBAgentPlannerToolActionStep{{
+		Action: NBAgentPlannerToolAction{Tool: "update_notebook", ToolInput: `{"content":"failed replacement"}`},
+		Status: ToolStatusFailure,
+	}})
+	planner.refreshNotebookFromSteps([]NBAgentPlannerToolActionStep{{
+		Action: NBAgentPlannerToolAction{Tool: "update_notebook", ToolInput: `{"content":"existing"}`},
+		Status: ToolStatusSuccess,
+	}})
+
+	assert.Equal(t, "existing", planner.Notebook)
+	assert.Zero(t, dao.createCalls)
+	assert.Zero(t, dao.updateCalls)
+}
+
+func TestReAct4_NotebookPersistenceStateSurvivesResume(t *testing.T) {
+	original := &NBReActPlanner4{
+		Notebook:            "current notebook",
+		notebookAgentID:     "notebook-agent-id",
+		notebookUpdateCount: 3,
+		persistedNotebook:   "current notebook",
+	}
+	state, err := original.Marshal()
+	assert.NoError(t, err)
+
+	restored := &NBReActPlanner4{}
+	assert.NoError(t, restored.Unmarshal(state))
+	assert.Equal(t, original.Notebook, restored.Notebook)
+	assert.Equal(t, original.notebookAgentID, restored.notebookAgentID)
+	assert.Equal(t, original.notebookUpdateCount, restored.notebookUpdateCount)
+	assert.Equal(t, original.persistedNotebook, restored.persistedNotebook)
+}
+
+func TestReAct4_NotebookPersistenceRetriesAfterTransientFailure(t *testing.T) {
+	originalDAO := GetConversationDao()
+	dao := &react4NotebookDAO{
+		createdID: uuid.MustParse("33333333-3333-3333-3333-333333333333"),
+		createErr: errors.New("temporary database failure"),
+	}
+	SetConversationDao(dao)
+	t.Cleanup(func() { SetConversationDao(originalDAO) })
+
+	planner := &NBReActPlanner4{
+		ctx: security.NewRequestContextForTenantAccountAdmin(
+			"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+			"bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+			[]string{"cccccccc-cccc-cccc-cccc-cccccccccccc"},
+		),
+		request: NBAgentRequest{ConversationId: "conversation-id", MessageId: "message-id"},
+	}
+	steps := []NBAgentPlannerToolActionStep{{
+		Action: NBAgentPlannerToolAction{Tool: "update_notebook", ToolInput: `{"content":"retry me"}`},
+		Status: ToolStatusSuccess,
+	}}
+	planner.refreshNotebookFromSteps(steps)
+	assert.Equal(t, "retry me", planner.Notebook)
+	assert.Empty(t, planner.persistedNotebook)
+
+	dao.createErr = nil
+	planner.refreshNotebookFromSteps(steps)
+	assert.Equal(t, 2, dao.createCalls)
+	assert.Equal(t, "retry me", planner.persistedNotebook)
+}
+
+func TestReAct4_NeedsClarificationContinuation(t *testing.T) {
+	clarification := NBAgentPlannerToolActionStep{
+		Action: NBAgentPlannerToolAction{Tool: "ask_clarification"},
+		Status: ToolStatusSuccess,
+	}
+	assert.True(t, needsClarificationContinuation([]NBAgentPlannerToolActionStep{clarification}))
+	assert.True(t, needsClarificationContinuation([]NBAgentPlannerToolActionStep{
+		clarification,
+		{Action: NBAgentPlannerToolAction{Tool: "update_notebook"}, Status: ToolStatusSuccess},
+	}), "notebook updates are control state, not investigation evidence")
+	assert.False(t, needsClarificationContinuation([]NBAgentPlannerToolActionStep{
+		clarification,
+		{Action: NBAgentPlannerToolAction{Tool: "kubectl_execute"}, Status: ToolStatusSuccess},
+	}), "a post-clarification tool result satisfies the continuation invariant")
+	assert.False(t, needsClarificationContinuation([]NBAgentPlannerToolActionStep{{
+		Action: NBAgentPlannerToolAction{Tool: "ask_clarification"},
+		Status: ToolStatusFailure,
+	}}))
+}
+
+func TestReAct4_ClarificationContinuationMessageRejectsUnsupportedInspection(t *testing.T) {
+	messages := clarificationContinuationMessages("I inspected the deployment.")
+	assert.Len(t, messages, 2)
+	assert.Equal(t, llms.ChatMessageTypeAI, messages[0].Role)
+	assert.Equal(t, llms.ChatMessageTypeHuman, messages[1].Role)
+	text := messages[1].Parts[0].(llms.TextContent).Text
+	assert.Contains(t, text, "no investigation tool has run")
+	assert.Contains(t, text, "Do not claim")
+	assert.Contains(t, text, "call the appropriate native tool")
+}
+
+func TestReAct4_ClarificationContinuationInputRestoresOriginalTask(t *testing.T) {
+	got := clarificationContinuationInput(
+		"Check why my pod is unhealthy.",
+		"Check the llm-server deployment in nudgebee.",
+	)
+	assert.Contains(t, got, "Original task:\nCheck why my pod is unhealthy.")
+	assert.Contains(t, got, "User's clarification response:\nCheck the llm-server deployment in nudgebee.")
+	assert.Equal(t, "selected-pod", clarificationContinuationInput("", "selected-pod"))
+	assert.Equal(t, "same", clarificationContinuationInput("same", "same"))
 }

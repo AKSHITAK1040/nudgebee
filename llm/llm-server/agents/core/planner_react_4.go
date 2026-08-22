@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"nudgebee/llm/security"
 	toolcore "nudgebee/llm/tools/core"
 
+	"github.com/google/uuid"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/prompts"
 )
@@ -69,6 +71,12 @@ type NBReActPlanner4 struct {
 	// model always sees current state. It is also serialized in Marshal so it
 	// survives a suspend/resume round-trip before the first replay rebuilds it.
 	Notebook string
+	// notebookAgentID identifies the synthetic llm_conversation_agent row used
+	// to expose the evolving notebook in the UI. notebookUpdateCount is carried
+	// with it so suspend/resume updates the same row and preserves its breadcrumb.
+	notebookAgentID     string
+	notebookUpdateCount int
+	persistedNotebook   string
 
 	stepCount int
 
@@ -319,14 +327,20 @@ func (o *NBReActPlanner4) GetNotebook() string { return o.Notebook }
 // refinementData is stored so a refinement that triggered a write-approval
 // suspend keeps its critique redirect on resume.
 type react4PersistentState struct {
-	Notebook       string             `json:"notebook"`
-	RefinementData []refinementRecord `json:"refinement_data,omitempty"`
+	Notebook            string             `json:"notebook"`
+	NotebookAgentID     string             `json:"notebook_agent_id,omitempty"`
+	NotebookUpdateCount int                `json:"notebook_update_count,omitempty"`
+	PersistedNotebook   string             `json:"persisted_notebook,omitempty"`
+	RefinementData      []refinementRecord `json:"refinement_data,omitempty"`
 }
 
 func (o *NBReActPlanner4) Marshal() ([]byte, error) {
 	return common.MarshalJson(react4PersistentState{
-		Notebook:       o.Notebook,
-		RefinementData: o.refinementData,
+		Notebook:            o.Notebook,
+		NotebookAgentID:     o.notebookAgentID,
+		NotebookUpdateCount: o.notebookUpdateCount,
+		PersistedNotebook:   o.persistedNotebook,
+		RefinementData:      o.refinementData,
 	})
 }
 
@@ -339,6 +353,9 @@ func (o *NBReActPlanner4) Unmarshal(data []byte) error {
 		return fmt.Errorf("react4: unmarshal planner state: %w", err)
 	}
 	o.Notebook = state.Notebook
+	o.notebookAgentID = state.NotebookAgentID
+	o.notebookUpdateCount = state.NotebookUpdateCount
+	o.persistedNotebook = state.PersistedNotebook
 	o.refinementData = state.RefinementData
 	return nil
 }
@@ -378,8 +395,14 @@ func (o *NBReActPlanner4) Plan(
 	o.stepCount = len(intermediateSteps)
 	o.refreshNotebookFromSteps(intermediateSteps)
 
-	messages := o.buildMessages(input, intermediateSteps)
+	clarificationContinuationPending := needsClarificationContinuation(intermediateSteps)
+	plannerInput := input
+	if clarificationContinuationPending {
+		plannerInput = clarificationContinuationInput(o.request.QueryConfig.OriginalUserQuery, input)
+	}
+	messages := o.buildMessages(plannerInput, intermediateSteps)
 	messages = AppendImagesToLastHumanMessage(messages, o.request.Images)
+	clarificationContinuationRetried := false
 
 	for {
 		// Only advertise tools when there is at least one: several providers
@@ -415,6 +438,13 @@ func (o *NBReActPlanner4) Plan(
 		if perr != nil || finish == nil {
 			return actions, finish, perr
 		}
+		if clarificationContinuationPending && !clarificationContinuationRetried {
+			clarificationContinuationRetried = true
+			messages = append(messages, clarificationContinuationMessages(finish.Data)...)
+			o.ctx.GetLogger().Info("react4: rejected first terminal answer after clarification without subsequent evidence",
+				"agent", o.agentName())
+			continue
+		}
 
 		if !o.shouldCritique() || len(o.refinementData) >= o.maxRefinementAttempts {
 			// Log the gate inputs on the skip path, exactly as react_3 does
@@ -437,7 +467,7 @@ func (o *NBReActPlanner4) Plan(
 			return nil, finish, nil
 		}
 
-		decision, feedback := o.runCritique(input, o.flattenTranscript(intermediateSteps), finish.Data, intermediateSteps)
+		decision, feedback := o.runCritique(plannerInput, o.flattenTranscript(intermediateSteps), finish.Data, intermediateSteps)
 		if !strings.EqualFold(decision, "refine") || strings.TrimSpace(feedback) == "" {
 			o.ctx.GetLogger().Info("react4: critique accepted answer",
 				"decision", decision, "attempts", len(o.refinementData), "agent", o.agentName())
@@ -458,6 +488,48 @@ func (o *NBReActPlanner4) Plan(
 		})
 		o.ctx.GetLogger().Info("react4: critique requested refinement", "attempt", len(o.refinementData))
 		messages = append(messages, o.refinementMessages(finish.Data, feedback)...)
+	}
+}
+
+// needsClarificationContinuation reports whether the latest substantive step is
+// a successful ask_clarification result. On resume that result contains the
+// user's answer, but it is not evidence that the requested inspection happened.
+// ReAct4 previously accepted an immediate final answer at this point and could
+// claim it had inspected resources while executing zero post-clarification
+// tools. Notebook control steps are ignored because they add no external
+// evidence; any other later step clears the guard.
+func needsClarificationContinuation(steps []NBAgentPlannerToolActionStep) bool {
+	for i := len(steps) - 1; i >= 0; i-- {
+		step := &steps[i]
+		if isNotebookToolName(step.Action.Tool) {
+			continue
+		}
+		return strings.EqualFold(step.Action.Tool, "ask_clarification") && step.Status == ToolStatusSuccess
+	}
+	return false
+}
+
+func clarificationContinuationInput(originalQuery, clarificationResponse string) string {
+	originalQuery = strings.TrimSpace(originalQuery)
+	clarificationResponse = strings.TrimSpace(clarificationResponse)
+	if originalQuery == "" || strings.EqualFold(originalQuery, clarificationResponse) {
+		return clarificationResponse
+	}
+	return "Original task:\n" + originalQuery + "\n\nUser's clarification response:\n" + clarificationResponse
+}
+
+func clarificationContinuationMessages(rejectedAnswer string) []llms.MessageContent {
+	return []llms.MessageContent{
+		{
+			Role:  llms.ChatMessageTypeAI,
+			Parts: []llms.ContentPart{llms.TextContent{Text: rejectedAnswer}},
+		},
+		{
+			Role: llms.ChatMessageTypeHuman,
+			Parts: []llms.ContentPart{llms.TextContent{Text: "The user has answered your clarification, but no investigation tool has run since that answer. " +
+				"Do not claim that you inspected or verified anything without evidence. Continue the original task now: call the appropriate native tool(s) if the answer supplied the missing target. " +
+				"If no tool is actually needed, answer directly and explicitly avoid claiming an inspection occurred."}},
+		},
 	}
 }
 
@@ -952,13 +1024,87 @@ func (o *NBReActPlanner4) renderObservation(step *NBAgentPlannerToolActionStep, 
 // carries the content the model wrote.
 func (o *NBReActPlanner4) refreshNotebookFromSteps(steps []NBAgentPlannerToolActionStep) {
 	for i := len(steps) - 1; i >= 0; i-- {
-		if isNotebookToolName(steps[i].Action.Tool) {
-			if content := extractNotebookContent(steps[i].Action.ToolInput); content != "" {
-				o.Notebook = content
-			}
+		step := &steps[i]
+		if !isNotebookToolName(step.Action.Tool) || step.Status != ToolStatusSuccess {
+			continue
+		}
+		content := extractNotebookContent(step.Action.ToolInput)
+		if content == "" {
 			return
 		}
+		if content != o.Notebook {
+			o.Notebook = content
+			o.notebookUpdateCount++
+		}
+		if content != o.persistedNotebook && o.persistNotebook(content, i, analyzeNotebook(content)) {
+			o.persistedNotebook = content
+		}
+		return
 	}
+}
+
+// persistNotebook mirrors ReAct3's notebook visibility contract without
+// changing its execution path: create one synthetic notebook agent row on the
+// first successful update, then patch that row for later replacements. Errors
+// are observability-only and never fail planning.
+func (o *NBReActPlanner4) persistNotebook(content string, turnIdx int, stats notebookStats) bool {
+	if o.request.ConversationId == "" || o.request.MessageId == "" {
+		return false
+	}
+	conversationDAO := GetConversationDao()
+	if conversationDAO == nil {
+		return false
+	}
+
+	var logger *slog.Logger
+	if o.ctx != nil {
+		logger = o.ctx.GetLogger()
+	}
+	breadcrumb := fmt.Sprintf(
+		"turn=%d updates=%d done=%d doing=%d next=%d todo=%d blocked=%d skip=%d plan=%t findings=%t",
+		turnIdx, o.notebookUpdateCount,
+		stats.DoneCount, stats.DoingCount, stats.NextCount, stats.TodoCount,
+		stats.BlockedCount, stats.SkipCount,
+		stats.HasPlanSection, stats.HasFindings,
+	)
+
+	if o.notebookAgentID == "" {
+		agentID, err := conversationDAO.SaveCompletedConversationAgentCall(
+			uuid.Nil,
+			o.request.ConversationId,
+			o.request.MessageId,
+			o.request.AccountId,
+			o.request.UserId,
+			notebookDummyAgent,
+			o.request.ParentAgentId,
+			o.request.Query,
+			"",
+			content,
+			o.request.ConversationContext,
+			o.request.QueryConfig,
+			AgentExecutionStatusSuccess,
+			breadcrumb,
+		)
+		if err != nil {
+			if logger != nil {
+				logger.Error("react4: failed to save notebook agent record", "error", err, "turn_idx", turnIdx)
+			}
+			return false
+		}
+		o.notebookAgentID = agentID.String()
+		if logger != nil {
+			logger.Info("react4: notebook record created", "notebook_agent_id", o.notebookAgentID, "turn_idx", turnIdx)
+		}
+		return true
+	}
+
+	if err := updateConversationNotebook(conversationDAO, o.notebookAgentID, content, breadcrumb); err != nil {
+		if logger != nil {
+			logger.Error("react4: failed to update notebook agent record", "error", err, "notebook_agent_id", o.notebookAgentID, "turn_idx", turnIdx)
+		}
+		return false
+	}
+	return true
 }
 
 // extractNotebookContent pulls the notebook body from a native tool-call

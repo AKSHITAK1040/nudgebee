@@ -1258,6 +1258,54 @@ func (chat *ConversationDao) UpdateConversationAgentResponse(agenId, response st
 	return nil
 }
 
+// UpdateConversationNotebook updates the synthetic notebook agent row after it
+// has already reached success. The generic agent response updater intentionally
+// rejects terminal rows, so notebook replacements need this narrower contract.
+// The agent-name predicate prevents this escape hatch from mutating ordinary
+// completed agent calls.
+func (chat *ConversationDao) UpdateConversationNotebook(agentID, response, responseSummary string) error {
+	if len(responseSummary) > 250 {
+		responseSummary = common.TruncateHead(responseSummary, 250)
+	}
+	_, err := chat.dbManager.DoInTransaction(func(tx *sqlx.Tx) (any, error) {
+		var messageStatus, conversationStatus string
+		if err := tx.QueryRow(
+			`SELECT m.status, c.status
+			 FROM llm_conversation_agent AS a
+			 JOIN llm_conversation_messages AS m ON m.id = a.message_id
+			 JOIN llm_conversations AS c ON c.id = m.conversation_id
+			 WHERE a.id = $1 AND a.agent_name = $2
+			 FOR UPDATE OF m, c`,
+			agentID, notebookDummyAgent,
+		).Scan(&messageStatus, &conversationStatus); err != nil {
+			return nil, fmt.Errorf("history: failed to lock notebook parent state: %w", err)
+		}
+		if strings.EqualFold(messageStatus, string(ConversationStatusTerminated)) ||
+			strings.EqualFold(conversationStatus, string(ConversationStatusKilled)) {
+			return nil, errors.New("history: notebook parent is terminated")
+		}
+
+		result, err := tx.Exec(
+			`UPDATE llm_conversation_agent
+			 SET response = $2, response_summary = $3, updated_at = now()
+			 WHERE id = $1 AND agent_name = $4 AND status = 'success'`,
+			agentID, response, responseSummary, notebookDummyAgent,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("history: failed to update notebook agent: %w", err)
+		}
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("history: failed to verify notebook agent update: %w", err)
+		}
+		if rowsAffected != 1 {
+			return nil, fmt.Errorf("history: notebook agent update affected %d rows", rowsAffected)
+		}
+		return nil, nil
+	})
+	return err
+}
+
 // maxWaitingAncestorSweepHops caps how far up the parent chain the sweep walks.
 // Real chains are 1–2 hops (orchestrator → delegate_agent → child); the cap is
 // a runaway-loop backstop for a corrupted parent_agent_id chain. Sized to match
