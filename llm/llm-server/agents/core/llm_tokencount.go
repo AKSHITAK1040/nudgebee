@@ -136,6 +136,19 @@ func countFallbackTokens(text string) (int, error) {
 
 // GetLlmMaxTokenLength returns a safe max token length for common/famous models.
 // Add new models in the obvious places or extend the substring checks.
+// claudeLargeContextRE matches the Claude generations that document a
+// 1,000,000 window; everything older is 200,000. Mirrors the CASE in V885 so
+// the catalog and this fallback cannot disagree — a split that had gpt-4o at
+// 32,000 here and 128,000 there.
+var claudeLargeContextRE = regexp.MustCompile(`claude-(fable|mythos|opus|sonnet)-5\b|claude-(opus|sonnet)-4[.-]([6-9]|[1-9][0-9]{1,2})([^0-9]|$)`)
+
+// gpt5LargeContextRE matches GPT-5.4 and newer, which document a 1,050,000
+// window; plain GPT-5 documents 400,000. Keyed on the generation rather than a
+// fixed list of ids so a future point release cannot fall through to the
+// smaller window — the exact hole this table exists to close. The trailing
+// ([^0-9]|$) stops a dated id like claude-opus-4-20250514 matching on "20".
+var gpt5LargeContextRE = regexp.MustCompile(`gpt-5[.-]([4-9]|[1-9][0-9]{1,2})([^0-9]|$)`)
+
 func GetLlmMaxTokenLength(model string) int {
 	n := normalizeModel(model)
 
@@ -154,6 +167,15 @@ func GetLlmMaxTokenLength(model string) int {
 	// substring / family-based fallbacks (covers platform variants)
 	switch {
 	// OpenAI newer families
+	case gpt5LargeContextRE.MatchString(n):
+		// GPT-5.4 and newer point releases → 1,050,000 window, 922,000 max input
+		return 1_050_000
+	case strings.Contains(n, "gpt-5"):
+		// GPT-5 / GPT-5-mini / GPT-5-nano → 400,000 total window, 272,000 max input
+		return 400_000
+	case strings.Contains(n, "gpt-4o"):
+		// GPT-4o / GPT-4o-mini → 128,000
+		return 128_000
 	case strings.Contains(n, "gpt-4.1"):
 		// GPT-4.1 / GPT-4.1-mini / GPT-4.1-nano → up to ~1,000,000 tokens
 		return 1_000_000
@@ -162,10 +184,12 @@ func GetLlmMaxTokenLength(model string) int {
 		return 200_000
 
 	// Anthropic Claude family (Opus / Sonnet long-context)
-	case strings.Contains(n, "claude-opus-4-1") || strings.Contains(n, "claude-opus-4") || strings.Contains(n, "claude-sonnet-4"):
-		return 200_000
+	case claudeLargeContextRE.MatchString(n):
+		// Claude 4.6 generation onward → 1,000,000
+		return 1_000_000
 	case strings.Contains(n, "claude"):
-		return 100_000
+		// Every earlier Claude generation → 200,000
+		return 200_000
 
 	// Amazon Titan (Bedrock)
 	case strings.Contains(n, "titan-text-premier") || strings.Contains(n, "amazon-titan-text-premier"):
