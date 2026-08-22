@@ -2,11 +2,13 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"nudgebee/llm-gateway/auth"
 	"nudgebee/llm-gateway/config"
 	"nudgebee/llm-gateway/engine"
 	"nudgebee/llm-gateway/metering"
@@ -41,6 +43,49 @@ func TestHandleChat_UnresolvableModelIs400(t *testing.T) {
 	require.Len(t, sink.Events(), 1)
 	assert.Equal(t, 400, sink.Events()[0].StatusCode)
 	assert.Contains(t, sink.Events()[0].Attributes, "unknown_model")
+}
+
+func TestHandleModels_IncludesTenantMappingsBeforeAdvisoryCatalog(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previous := modelCatalogResolverHook
+	RegisterModelCatalogResolver(func(tenantID string) []ModelCatalogEntry {
+		assert.Equal(t, "tenant-1", tenantID)
+		return []ModelCatalogEntry{
+			{ID: "gemini-fast", Provider: schemas.Gemini, ServedModel: "gemini-2.5-flash", Integration: "team-gemini"},
+			// A tenant mapping wins when its callable name overlaps the static catalog.
+			{ID: "openai/gpt-5", Provider: schemas.OpenAI, ServedModel: "gpt-5", Integration: "team-openai"},
+		}
+	})
+	t.Cleanup(func() { modelCatalogResolverHook = previous })
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest("GET", "/v1/models", nil)
+	c.Set("nb_identity", auth.Identity{TenantID: "tenant-1"})
+
+	(&handler{}).handleModels(c)
+
+	require.Equal(t, 200, rec.Code)
+	var body struct {
+		Data []struct {
+			ID          string `json:"id"`
+			OwnedBy     string `json:"owned_by"`
+			ServedModel string `json:"served_model"`
+			Integration string `json:"integration"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.GreaterOrEqual(t, len(body.Data), 2)
+	assert.Equal(t, "gemini-fast", body.Data[0].ID)
+	assert.Equal(t, "gemini-2.5-flash", body.Data[0].ServedModel)
+	assert.Equal(t, "team-gemini", body.Data[0].Integration)
+	var overlapCount int
+	for _, m := range body.Data {
+		if m.ID == "openai/gpt-5" {
+			overlapCount++
+		}
+	}
+	assert.Equal(t, 1, overlapCount)
 }
 
 // TestHandleChat_CustomUpstreamBeatsProviderAlias locks the resolution precedence: a model

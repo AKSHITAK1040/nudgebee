@@ -134,9 +134,32 @@ func credResolver() CredResolver {
 // vertex_openai upstream that must dial Vertex's openapi path.
 var modelResolverHook func(tenantID, model string) (schemas.ModelProvider, schemas.Key, string, string, bool)
 
+// ModelCatalogEntry describes one tenant-configured callable model name. The generic
+// /v1/models endpoint merges these entries with its static advisory catalog.
+type ModelCatalogEntry struct {
+	ID          string
+	Provider    schemas.ModelProvider
+	ServedModel string
+	Integration string
+}
+
+var modelCatalogResolverHook func(tenantID string) []ModelCatalogEntry
+
 // RegisterModelResolver registers the provider-independent model-mapping resolver (EE).
 func RegisterModelResolver(fn func(tenantID, model string) (schemas.ModelProvider, schemas.Key, string, string, bool)) {
 	modelResolverHook = fn
+}
+
+// RegisterModelCatalogResolver registers the EE tenant model catalog provider.
+func RegisterModelCatalogResolver(fn func(tenantID string) []ModelCatalogEntry) {
+	modelCatalogResolverHook = fn
+}
+
+func resolveModelCatalog(tenantID string) []ModelCatalogEntry {
+	if modelCatalogResolverHook == nil {
+		return nil
+	}
+	return modelCatalogResolverHook(tenantID)
 }
 
 // resolveModelMapping consults the registered tenant model-mapping resolver, if any.

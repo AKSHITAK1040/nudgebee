@@ -260,15 +260,29 @@ var genericModelCatalog = []struct{ id, ownedBy string }{
 // OpenAI-compatible tools populate. It is a static metadata call (not metered).
 func (h *handler) handleModels(c *gin.Context) {
 	type model struct {
-		ID      string `json:"id"`
-		Object  string `json:"object"`
-		OwnedBy string `json:"owned_by"`
+		ID          string `json:"id"`
+		Object      string `json:"object"`
+		OwnedBy     string `json:"owned_by"`
+		ServedModel string `json:"served_model,omitempty"`
+		Integration string `json:"integration,omitempty"`
 	}
-	data := make([]model, 0, len(genericModelCatalog))
+	tenantModels := resolveModelCatalog(auth.FromContext(c).TenantID)
+	data := make([]model, 0, len(genericModelCatalog)+len(tenantModels))
+	seen := make(map[string]bool, cap(data))
+	for _, m := range tenantModels {
+		data = append(data, model{
+			ID: m.ID, Object: "model", OwnedBy: string(m.Provider),
+			ServedModel: m.ServedModel, Integration: m.Integration,
+		})
+		seen[m.ID] = true
+	}
 	for _, m := range genericModelCatalog {
 		// Don't advertise the tier aliases when tiering is disabled deployment-wide
 		// (the tier rows are the "nudgebee"-owned entries).
 		if m.ownedBy == "nudgebee" && !config.Config.TiersEnabled {
+			continue
+		}
+		if seen[m.id] {
 			continue
 		}
 		data = append(data, model{ID: m.id, Object: "model", OwnedBy: m.ownedBy})
