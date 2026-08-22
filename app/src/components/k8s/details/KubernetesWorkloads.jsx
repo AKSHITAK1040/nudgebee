@@ -20,8 +20,9 @@ import ScaleIcon from '@assets/application/scale-new.svg';
 import KubernetesScaleUpdateForm from '@components/recommendations/KubernetesScaleUpdateForm';
 import ReactLink from 'next/link';
 import { DeleteIconRed as DeleteIcon } from '@assets';
-import { Typography, Box, Grid, Divider, FormControlLabel, Switch, CircularProgress, IconButton } from '@mui/material';
+import { Typography, Box, Grid, Divider, CircularProgress, IconButton } from '@mui/material';
 import { Input } from '@ui/Input';
+import { Switch } from '@ui/Switch';
 import OpenInNewIcon from '@mui/icons-material/OpenInNew';
 import { hasWriteAccess } from '@lib/auth';
 import LogFileIcon from '@assets/application/logs-new.svg';
@@ -1917,21 +1918,18 @@ const KubernetesWorkloadsTable = ({ accountId, resource_ids = [] }) => {
                     Repository containing deployment configs (Helm charts, values files) for PR creation
                   </Typography>
 
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={gitDetails.ciRepoSameAsCode}
-                        onChange={(e) => {
-                          setGitDetails((prev) => ({ ...prev, ciRepoSameAsCode: e.target.checked, ciRepo: '' }));
-                          // Reset CI repo integration state when toggle changes
-                          setSelectedCiGitIntegration('');
-                          setCiReposFromIntegration([]);
-                        }}
-                      />
-                    }
-                    label='CI repo is same as code repo'
-                    sx={{ mb: 2 }}
-                  />
+                  <Box sx={{ mb: 2 }}>
+                    <Switch
+                      label='CI repo is same as code repo'
+                      checked={gitDetails.ciRepoSameAsCode}
+                      onChange={(e) => {
+                        setGitDetails((prev) => ({ ...prev, ciRepoSameAsCode: e.target.checked, ciRepo: '' }));
+                        // Reset CI repo integration state when toggle changes
+                        setSelectedCiGitIntegration('');
+                        setCiReposFromIntegration([]);
+                      }}
+                    />
+                  </Box>
 
                   {/* CI Repo selection (only if different from code repo) */}
                   {!gitDetails.ciRepoSameAsCode && (
@@ -2511,12 +2509,7 @@ function PodsWithChart({ accountId, drilldownQuery }) {
   return (
     <ListingLayout id='workloadDetails'>
       <ListingLayout.Toolbar
-        actions={
-          <FormControlLabel
-            control={<Switch checked={showReplicaTrend} onChange={(e) => setShowReplicaTrend(e.target.checked)} />}
-            label='Show Replica Trend'
-          />
-        }
+        actions={<Switch label='Show Replica Trend' checked={showReplicaTrend} onChange={(e) => setShowReplicaTrend(e.target.checked)} />}
       />
       <ListingLayout.Body>
         <>
@@ -2579,9 +2572,7 @@ function WorkloadDetails({ accountId, drilldownQuery }) {
 
   return (
     <ListingLayout id='workloadDetails'>
-      <ListingLayout.Toolbar
-        actions={<FormControlLabel control={<Switch checked={showYaml} onChange={(e) => setShowYaml(e.target.checked)} />} label='Show Yaml' />}
-      />
+      <ListingLayout.Toolbar actions={<Switch label='Show Yaml' checked={showYaml} onChange={(e) => setShowYaml(e.target.checked)} />} />
       <ListingLayout.Body>
         {showYaml ? (
           <KubernetesPodYaml

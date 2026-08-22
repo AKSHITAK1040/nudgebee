@@ -1,5 +1,6 @@
 import React, { Fragment, useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Box, Typography, Switch, Dialog, Chip, Tabs, Tab, Autocomplete, TextField, Alert } from '@mui/material';
+import { Box, Typography, Switch as MuiSwitch, Dialog, Chip, Tabs, Tab, Autocomplete, TextField, Alert } from '@mui/material';
+import { Switch } from '@ui/Switch';
 import { Button } from '@ui/Button';
 import { Modal } from '@ui/Modal';
 import { PlayArrow, Timer, Storage, GridView, ErrorOutline, Close, AltRoute, Check } from '@mui/icons-material';
@@ -3106,13 +3107,14 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
               {isRequired && <span style={{ color: ds.red[500] }}> *</span>}
             </Typography>
             <Box sx={{ flex: '1 1 300px', minWidth: '200px', display: 'flex', flexDirection: 'column' }}>
-              <Switch
-                id={`action-sidebar-bool-${fieldName}-switch`}
-                checked={fieldValue || false}
-                onChange={(e) => handleDataChange(fieldName, e.target.checked)}
-                disabled={isReadOnly || viewOnlyMode}
-                sx={{ alignSelf: 'flex-start', ml: -1 }}
-              />
+              <Box sx={{ alignSelf: 'flex-start' }}>
+                <Switch
+                  id={`action-sidebar-bool-${fieldName}-switch`}
+                  checked={fieldValue || false}
+                  onChange={(e) => handleDataChange(fieldName, e.target.checked)}
+                  disabled={isReadOnly || viewOnlyMode}
+                />
+              </Box>
               {fieldSchema.description && (
                 <Typography
                   sx={{
@@ -4429,7 +4431,9 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                   : 'Skip this task without deleting it. The workflow will be rerouted: predecessors connect directly to successors. Re-enable to restore the original chain.'}
               </Typography>
             </Box>
-            <Switch
+            {/* Stays on MUI Switch: ds/Switch does not forward data-* props, and dropping this testid
+                would break the automation contract with app-e2e-tests. */}
+            <MuiSwitch
               data-testid='task-disable-switch'
               checked={!!taskConfig.disabled}
               onChange={(e) => handleDisableToggle(e.target.checked)}
