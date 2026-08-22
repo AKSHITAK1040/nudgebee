@@ -4,7 +4,6 @@ import { useEffectiveRecommendation } from '@hooks/useEffectiveRecommendation';
 import { Select as DsSelect } from '@ui/Select';
 import { ds } from 'src/utils/colors';
 import ArrowForwardIcon from '@mui/icons-material/ArrowForward';
-import DragHandleIcon from '@mui/icons-material/DragHandle';
 import ConfirmationNumberOutlinedIcon from '@mui/icons-material/ConfirmationNumberOutlined';
 import TipsAndUpdatesOutlinedIcon from '@mui/icons-material/TipsAndUpdatesOutlined';
 import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
@@ -43,6 +42,7 @@ import { hasWriteAccess } from '@lib/auth';
 import InterpretationPanel from './interpretation/InterpretationPanel';
 import { buildInterpretation } from './interpretation/buildInterpretation';
 import { extractContainerData, summarizeCloudRightSizing, formatCloudTargetSpec } from './rightSizingData';
+import { ResourceChangeCell } from './ResourceChangeCell';
 import ConfigIssuesList, { summarizeConfigIssues, LEVEL_TONE, LEVEL_NAME } from './evidence/configIssues';
 
 interface DetailsPanelProps {
@@ -1072,54 +1072,6 @@ const InstanceBadge = ({ label, value, variant }: { label: string; value: string
 // Right-sizing container parsing is shared with the interpretation adapter.
 
 // Memory values from the K8s collector are always in bytes
-const formatMemValue = (val: number | null | undefined): string => {
-  if (val == null) return '—';
-  const mi = val / (1024 * 1024);
-  if (mi >= 1024) return (mi / 1024).toFixed(1) + ' Gi';
-  return Math.round(mi) + ' Mi';
-};
-
-const formatCpuValue = (val: number | null | undefined): string => {
-  if (val == null) return '—';
-  if (val < 1) return Math.round(val * 1000) + 'm';
-  return Number(val).toFixed(3);
-};
-
-const ResourceChangeCell = ({ current, recommended, isMem }: { current: number | null; recommended: number | null; isMem: boolean }) => {
-  const fmt = isMem ? formatMemValue : formatCpuValue;
-  const isChanged = current != null && recommended != null && current !== recommended;
-  const pct = current != null && recommended != null && Math.abs(current) > 1e-10 ? Math.round(((current - recommended) / current) * 100) : null;
-
-  return (
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space.mul(0, 3), flexWrap: 'nowrap' }}>
-      <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], whiteSpace: 'nowrap' }}>{fmt(current)}</Typography>
-      {isChanged ? (
-        <ArrowForwardIcon sx={{ fontSize: ds.text.bodyLg, color: ds.gray[400], flexShrink: 0 }} />
-      ) : (
-        <DragHandleIcon sx={{ fontSize: ds.text.bodyLg, color: ds.gray[400], flexShrink: 0 }} />
-      )}
-      <Typography
-        sx={{
-          fontSize: ds.text.small,
-          fontWeight: isChanged ? ds.weight.semibold : ds.weight.regular,
-          color: ds.gray[700],
-          whiteSpace: 'nowrap',
-        }}
-      >
-        {fmt(recommended)}
-      </Typography>
-      {pct != null && pct !== 0 && (
-        <Typography
-          sx={{ fontSize: ds.text.caption, color: pct > 0 ? ds.green[600] : ds.red[600], fontWeight: ds.weight.medium, whiteSpace: 'nowrap' }}
-        >
-          {pct > 0 ? '-' : '+'}
-          {Math.abs(pct)}%
-        </Typography>
-      )}
-    </Box>
-  );
-};
-
 // ─── Fallback content extraction from recommendation JSONB ───
 
 interface FallbackContent {

@@ -514,3 +514,21 @@ export const cardKeyDown = (activate: () => void) => (e: KeyboardEvent) => {
     activate();
   }
 };
+
+/**
+ * Chrome for a detail panel's sticky footer action bar — the bar that holds what
+ * you can DO about the thing the panel is describing. Shared so the resolution
+ * panel's footer sits at the same height, tone and rhythm as the recommendation
+ * panel's, rather than approximating it.
+ */
+export const panelActionBarSx = {
+  borderTop: `1px solid ${ds.gray[200]}`,
+  backgroundColor: ds.background[100],
+  flexShrink: 0,
+  px: ds.space[4],
+  py: ds.space.mul(0, 6),
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: ds.space[2],
+};

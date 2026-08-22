@@ -17,10 +17,12 @@ import { OptimizeLocators } from "./OptimizeLocators";
 // So the Recommendations chip rows, the Resolutions toolbar and the Security states
 // are reached by testid; everything the app leaves untestid'd falls to its id.
 
-// CustomTable renders `${id}` on the table and `${id}-body` on the tbody. The
-// Resolutions table passes showExpandable, which emits a second <tr> per data row to
-// hold the collapsed drill-down — it is in the DOM open or closed and carries a single
-// colSpan cell, so requiring a second cell is what stops every count doubling.
+// CustomTable renders `${id}` on the table and `${id}-body` on the tbody. A table that
+// passes showExpandable emits a second <tr> per data row to hold the collapsed
+// drill-down — it is in the DOM open or closed and carries a single colSpan cell, so
+// requiring a second cell is what stops every count doubling. Neither table below
+// passes it any more (Resolutions moved to a row-click side panel), but the guard
+// stays: it costs nothing and the next expandable table would silently double.
 const DATA_ROW = "tr:has(td:nth-child(2))";
 
 export const RECOMMENDATIONS_TABLE = "optimize-recommendations-table";

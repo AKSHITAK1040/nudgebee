@@ -6,6 +6,7 @@ import ResolutionsView from '@components/optimise-new/ResolutionsView';
 const mockGetResolutions = jest.fn();
 const mockGetStatusCounts = jest.fn();
 const mockGetDistinct = jest.fn();
+const mockRetry = jest.fn();
 
 jest.mock('@api1/recommendation', () => ({
   __esModule: true,
@@ -13,7 +14,7 @@ jest.mock('@api1/recommendation', () => ({
     getRecommendationResolution: (...args: any[]) => mockGetResolutions(...args),
     getRecommendationResolutionStatusCounts: (...args: any[]) => mockGetStatusCounts(...args),
     getDistinctResolverTypes: (...args: any[]) => mockGetDistinct(...args),
-    retryRecommendationResolution: jest.fn(),
+    retryRecommendationResolution: (...args: any[]) => mockRetry(...args),
   },
 }));
 
@@ -37,6 +38,43 @@ jest.mock('@components/cloudaccount/CommandExecutionHistory', () => ({
   default: () => <div data-testid='command-history' />,
 }));
 
+const lastPanelProps: Record<string, any> = {};
+jest.mock('@components/optimise-new/ResolutionDetailPanel', () => ({
+  __esModule: true,
+  default: (props: any) => {
+    Object.keys(lastPanelProps).forEach((key) => delete lastPanelProps[key]);
+    Object.assign(lastPanelProps, props);
+    return props.open ? <div data-testid='resolution-panel'>{props.resolution?.id}</div> : null;
+  },
+}));
+
+// One listing row, in the shape the api layer hands back.
+const ROW = {
+  id: 'res-1',
+  recommendation_id: 'rec-1',
+  account_id: 'acct-a',
+  status: 'Failed',
+  status_message: 'Failed to execute code agent: llm: max retry attempts reached',
+  resolver_type: 'AutoOptimize',
+  type: 'PullRequest',
+  type_reference_id: 'cli_execution',
+  data: {},
+  created_at: '2026-08-21T10:00:00Z',
+  updated_at: '2026-08-21T10:15:00Z',
+  recommendation: {
+    recommendation: {},
+    rule_name: 'pod_right_sizing',
+    severity: 'Critical',
+    estimated_savings: 16.2,
+    status: 'InProgress',
+    cloud_resourse: { name: 'workflow-server', meta: {} },
+  },
+};
+
+const listingWithRow = {
+  data: { data: { recommendation_resolution: [ROW], recommendation_resolution_aggregate: { aggregate: { count: 1 } } } },
+};
+
 const emptyListing = {
   data: { data: { recommendation_resolution: [], recommendation_resolution_aggregate: { aggregate: { count: 0 } } } },
 };
@@ -47,6 +85,7 @@ describe('ResolutionsView status cards', () => {
     mockGetResolutions.mockResolvedValue(emptyListing);
     mockGetDistinct.mockResolvedValue({ data: { data: { recommendation_resolution: [] } } });
     mockGetStatusCounts.mockResolvedValue({ Success: 1100, InProgress: 12, Failed: 7 });
+    mockRetry.mockResolvedValue({ errors: [] });
   });
 
   const card = (testid: string) => screen.getByTestId(testid);
@@ -125,6 +164,32 @@ describe('ResolutionsView status cards', () => {
     // The contrast is the point: a card that does respond still says so.
     fireEvent.mouseOver(screen.getByLabelText('Info about In Progress'));
     expect(await screen.findByRole('tooltip')).toHaveTextContent('Click to filter');
+  });
+
+  it('opens a resolution in a panel rather than expanding it in place', async () => {
+    mockGetResolutions.mockResolvedValue(listingWithRow);
+    render(<ResolutionsView />);
+
+    await waitFor(() => expect(screen.getByText('Pod Right Sizing')).toBeInTheDocument());
+    // A resolution is an individual record, so nothing is open until one is picked.
+    expect(screen.queryByTestId('resolution-panel')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Pod Right Sizing'));
+
+    await waitFor(() => expect(screen.getByTestId('resolution-panel')).toBeInTheDocument());
+    expect(lastPanelProps.resolution.id).toBe('res-1');
+  });
+
+  it('retries from the row without also opening the panel', async () => {
+    mockGetResolutions.mockResolvedValue(listingWithRow);
+    render(<ResolutionsView />);
+
+    await waitFor(() => expect(screen.getByText('Retry')).toBeInTheDocument());
+    fireEvent.click(screen.getByText('Retry'));
+
+    // Retry is an action on the row, not a way into it.
+    await waitFor(() => expect(mockRetry).toHaveBeenCalledWith('acct-a', 'res-1'));
+    expect(screen.queryByTestId('resolution-panel')).not.toBeInTheDocument();
   });
 
   it('renders the cards rather than failing the tab when the split cannot be loaded', async () => {

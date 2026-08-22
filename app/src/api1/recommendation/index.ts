@@ -2275,6 +2275,10 @@ const apiRecommendations = {
           rec_estimated_savings
           rec_resource_name
           rec_resource_meta
+          rec_status
+          rec_category
+          rec_recommendation_action
+          created_at
           updated_at
           type
         }
@@ -2348,6 +2352,12 @@ const apiRecommendations = {
               rule_name: r.rec_rule_name,
               severity: r.rec_severity,
               estimated_savings: r.rec_estimated_savings,
+              // The recommendation's OWN status, distinct from the resolution's.
+              // A Success resolution sitting on a still-Open recommendation is the
+              // disconnect in #35490, and is invisible unless both are carried.
+              status: r.rec_status,
+              category: r.rec_category,
+              recommendation_action: r.rec_recommendation_action,
               cloud_resourse: {
                 name: r.rec_resource_name,
                 meta: typeof r.rec_resource_meta === 'string' ? safeJSONParse(r.rec_resource_meta) : r.rec_resource_meta,

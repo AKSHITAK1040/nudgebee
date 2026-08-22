@@ -22,7 +22,7 @@ import { cardTabSx, cardKeyDown } from './utils';
 import { SeverityIcon, type SeverityLevel } from '@ui/SeverityIcon';
 import DownloadButton from '@shared/buttons/DownloadButton';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
-import CommandExecutionHistory from '@components/cloudaccount/CommandExecutionHistory';
+import ResolutionDetailPanel from './ResolutionDetailPanel';
 
 const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
@@ -45,77 +45,6 @@ const statusToTone = (status: string): LabelTone => {
     default:
       return 'neutral';
   }
-};
-
-// Guard against unexpectedly deep payloads — beyond this nesting level we dump
-// the remaining subtree as raw JSON rather than risk unbounded recursion.
-const KEY_VALUE_MAX_DEPTH = 10;
-
-/**
- * Render an object as a structured key/value tree. Top-level keys (entity
- * identifiers such as container / workload names) are rendered verbatim;
- * nested field names are snake_case → Title Cased. Nested objects recurse into
- * an indented sub-list (rather than dumping raw JSON), so resource specs like
- * `{ cpu: { request }, memory: { limit, request } }` read as a labelled tree.
- * Arrays and remaining scalars render inline. Recursion is capped at
- * KEY_VALUE_MAX_DEPTH (deeper subtrees fall back to a raw JSON dump). Returns
- * null for non-object / empty input so the caller can decide the empty state.
- */
-const KeyValueList = ({ data, depth = 0 }: { data: unknown; depth?: number }) => {
-  if (data === null || typeof data !== 'object' || Array.isArray(data)) {
-    return null;
-  }
-  if (depth >= KEY_VALUE_MAX_DEPTH) {
-    return <Typography sx={{ fontSize: ds.text.body, color: ds.gray[700], wordBreak: 'break-word' }}>{JSON.stringify(data)}</Typography>;
-  }
-  const entries = Object.entries(data);
-  if (entries.length === 0) {
-    return null;
-  }
-
-  const isNestedObject = (value: unknown): value is Record<string, unknown> =>
-    value !== null && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0;
-
-  const formatScalar = (value: unknown) => {
-    if (value === null || value === undefined || value === '') return '—';
-    if (typeof value === 'boolean') return value ? 'Yes' : 'No';
-    if (typeof value === 'number') return Number.isFinite(value) ? String(value) : '—';
-    if (Array.isArray(value)) return value.map((v) => (v !== null && typeof v === 'object' ? JSON.stringify(v) : String(v))).join(', ');
-    if (typeof value === 'object') return JSON.stringify(value);
-    return String(value);
-  };
-
-  return (
-    <Box
-      sx={{
-        display: 'flex',
-        flexDirection: 'column',
-        rowGap: ds.space[3],
-        ...(depth > 0 && { pl: ds.space[4], borderLeft: `1px solid ${ds.gray[200]}` }),
-      }}
-    >
-      {entries.map(([key, value]) => {
-        // Top-level keys are entity identifiers (e.g. container / workload names) —
-        // render them verbatim. Only the structured field names nested below
-        // (cpu, memory, request, limit, …) get snake_case → Title Case.
-        const label = depth === 0 ? key : snakeToTitleCase(key);
-        return isNestedObject(value) ? (
-          <Box key={key} sx={{ display: 'flex', flexDirection: 'column', rowGap: ds.space[2] }}>
-            <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.medium, color: ds.gray[600] }}>{label}</Typography>
-            <KeyValueList data={value} depth={depth + 1} />
-          </Box>
-        ) : (
-          <Box
-            key={key}
-            sx={{ display: 'grid', gridTemplateColumns: 'minmax(140px, max-content) 1fr', columnGap: ds.space[4], alignItems: 'baseline' }}
-          >
-            <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.medium, color: ds.gray[600] }}>{label}</Typography>
-            <Typography sx={{ fontSize: ds.text.body, color: ds.gray[700], wordBreak: 'break-word' }}>{formatScalar(value)}</Typography>
-          </Box>
-        );
-      })}
-    </Box>
-  );
 };
 
 const RESOLUTION_HEADERS = [
@@ -163,6 +92,11 @@ const ResolutionsView = () => {
   const [rowsPerPage, setRowsPerPage] = useState(apiUser.getUserPreferencesTablePageSize());
   const [rawRows, setRawRows] = useState<any[]>([]);
   const [totalCount, setTotalCount] = useState(0);
+
+  // The resolution whose panel is open. A resolution is one attempt at one
+  // recommendation — an individual record, so it opens a drawer rather than
+  // expanding in place. See docs/architecture-decisions.md.
+  const [panelResolution, setPanelResolution] = useState<any>(null);
 
   // Resolution counts per status, for the stat cards above the listing.
   const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
@@ -403,14 +337,7 @@ const ResolutionsView = () => {
                 )}
               </Box>
             ),
-            drilldownQuery: {
-              recommendation: rr,
-              message: rr.status_message,
-              recommendationId: rr.recommendation_id,
-              typeReferenceId: rr.type_reference_id,
-              resolutionId: rr.id,
-              accountId: rr.account_id,
-            },
+            drilldownQuery: { resolution: rr },
           },
           {
             component: <SeverityIcon level={toSeverityLevel(rr.recommendation.severity)} size={14} />,
@@ -432,7 +359,11 @@ const ResolutionsView = () => {
                     size='small'
                     variant='text'
                     disabled={!!retryingId}
-                    onClick={() => handleRetry(rr.id, rr.account_id)}
+                    onClick={(e: React.MouseEvent) => {
+                      // The row opens the panel; Retry is an action on the row, not a way in.
+                      e.stopPropagation();
+                      handleRetry(rr.id, rr.account_id);
+                    }}
                     sx={{ alignSelf: 'flex-start', p: 0, minWidth: 0, fontSize: ds.text.small, textTransform: 'none' }}
                   >
                     {retryingId === rr.id ? 'Retrying…' : 'Retry'}
@@ -622,93 +553,19 @@ const ResolutionsView = () => {
             onPageChange={changePage}
             pageNumber={page + 1}
             loading={loading}
-            showExpandable={true}
-            expandable={{
-              tabs: [
-                {
-                  text: 'Details',
-                  componentFn: (_option: any, drilldownQuery: any) => {
-                    if (drilldownQuery?.typeReferenceId === 'cli_execution' && drilldownQuery?.recommendationId) {
-                      return (
-                        <CommandExecutionHistory
-                          accountId={drilldownQuery.accountId}
-                          recommendationId={drilldownQuery.recommendationId}
-                          resolutionId={drilldownQuery.resolutionId}
-                        />
-                      );
-                    }
-
-                    const raw = drilldownQuery?.recommendation?.data?.data;
-                    let parsed = raw;
-                    if (typeof raw === 'string') {
-                      try {
-                        parsed = JSON.parse(raw);
-                      } catch {
-                        parsed = raw;
-                      }
-                    }
-
-                    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length > 0) {
-                      return (
-                        <Box
-                          sx={{
-                            padding: ds.space[4],
-                            backgroundColor: ds.background[100],
-                            borderRadius: ds.radius.sm,
-                            border: `1px solid ${ds.gray[300]}`,
-                          }}
-                        >
-                          <KeyValueList data={parsed} />
-                        </Box>
-                      );
-                    }
-
-                    const fallbackText = parsed ? (typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2)) : 'No Details Available';
-                    return (
-                      <Typography
-                        sx={{
-                          padding: ds.space[4],
-                          backgroundColor: ds.background[100],
-                          borderRadius: ds.radius.sm,
-                          border: `1px solid ${ds.gray[300]}`,
-                          fontSize: ds.text.body,
-                          color: ds.gray[700],
-                          whiteSpace: 'pre-wrap',
-                          wordBreak: 'break-word',
-                        }}
-                      >
-                        {fallbackText}
-                      </Typography>
-                    );
-                  },
-                },
-                {
-                  text: 'Message',
-                  componentFn: (_option: any, drilldownQuery: any) => {
-                    const messageData = drilldownQuery?.message || 'No Message Available';
-                    return (
-                      <Typography
-                        sx={{
-                          padding: ds.space[4],
-                          backgroundColor: ds.background[100],
-                          borderRadius: ds.radius.sm,
-                          border: `1px solid ${ds.gray[300]}`,
-                          fontSize: ds.text.body,
-                          color: ds.gray[700],
-                          whiteSpace: 'pre-wrap',
-                          wordBreak: 'break-word',
-                        }}
-                      >
-                        {messageData}
-                      </Typography>
-                    );
-                  },
-                },
-              ],
-            }}
+            onRowClick={(query: any) => query?.resolution && setPanelResolution(query.resolution)}
           />
         </ListingLayout.Body>
       </ListingLayout>
+
+      <ResolutionDetailPanel
+        open={Boolean(panelResolution)}
+        onClose={() => setPanelResolution(null)}
+        resolution={panelResolution}
+        accounts={accounts}
+        onRetry={handleRetry}
+        retrying={Boolean(retryingId)}
+      />
     </Box>
   );
 };
