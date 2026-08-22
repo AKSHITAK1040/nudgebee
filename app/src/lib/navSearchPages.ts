@@ -119,7 +119,7 @@ export const navSearchPages: NavSearchPage[] = [
   { group: 'Dashboards', label: 'Application Grouping', path: '/dashboards#groups' },
 
   { group: 'Optimize', label: 'Optimize Summary', path: '/optimise#summary' },
-  { group: 'Optimize', label: 'Optimize Recommendations', path: '/optimise#recommendations' },
+  { group: 'Optimize', label: 'Optimize Cost', path: '/optimise#recommendations' },
   { group: 'Optimize', label: 'Optimize Resolutions', path: '/optimise#resolutions' },
   { group: 'Optimize', label: 'Optimize Configuration', path: '/optimise#configuration' },
   { group: 'Optimize', label: 'Security - Image Scan', path: '/optimise#security/image-scan' },

@@ -6,7 +6,7 @@ import SummaryView from '@components/optimise-new/summary/SummaryView';
 import { useRouter } from 'next/router';
 import {
   OptimizeSummaryIcon,
-  RecommendationIcon,
+  DollarIcon,
   RecommendationResolutionIcon,
   SecuritytoolsBlue,
   ToolIconBlue,
@@ -77,7 +77,10 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
     () =>
       [
         { name: 'Summary', id: 'summary', fragment: 'summary', value: 0, icon: OptimizeSummaryIcon },
-        { name: 'Recommendations', id: 'recommendations', fragment: 'recommendations', value: 1, icon: RecommendationIcon, iconSize: 18 },
+        // Labelled "Cost" but keyed 'recommendations': the fragment is the deep-link
+        // contract every notification, the FinOps agent prompt and the apply CTA
+        // already write, and it is independent of what the strip displays.
+        { name: 'Cost', id: 'recommendations', fragment: 'recommendations', value: 1, icon: DollarIcon, iconSize: 18 },
         { name: 'Resolutions', id: 'resolutions', fragment: 'resolutions', value: 2, icon: RecommendationResolutionIcon, iconSize: 18 },
         { name: 'Configuration', id: 'configuration', fragment: 'configuration', value: 3, icon: ToolIconBlue, iconSize: 18 },
         {

@@ -21,7 +21,7 @@ test.beforeEach(() => {
 
 test.describe("Optimize", () => {
   test(
-    "Optimize sanity - land on the Optimize page with no fragment, verify the tab strip lists Summary, Recommendations, Resolutions, Security and Auto Optimize and opens on Summary",
+    "Optimize sanity - land on the Optimize page with no fragment, verify the tab strip lists Summary, Cost, Resolutions, Security and Auto Optimize and opens on Summary",
     { tag: ["@dev", "@sanity", "@functional"] },
     async ({ page }) => {
       const locators = await landOnOptimize(page);
@@ -32,7 +32,9 @@ test.describe("Optimize", () => {
         // would test the flag rather than the module.
         const strip = [
           { tab: locators.SummaryTab, name: "Summary" },
-          { tab: locators.RecommendationsTab, name: "Recommendations" },
+          // The strip labels this tab "Cost"; its id and fragment stay
+          // `recommendations`, which is what RecommendationsTab locates it by.
+          { tab: locators.RecommendationsTab, name: "Cost" },
           { tab: locators.ResolutionsTab, name: "Resolutions" },
           { tab: locators.securityTab, name: "Security" },
           { tab: locators.AutoOptimizeTab, name: "Auto Optimize" },
@@ -78,7 +80,7 @@ test.describe("Optimize", () => {
   );
 
   test(
-    "Optimize Recommendations - open the Recommendations tab, verify the five severity chips, the four safety chips and all five listing filters render",
+    "Optimize Cost - open the Cost tab, verify the five severity chips, the four safety chips and all five listing filters render",
     { tag: ["@dev", "@smoke", "@functional"] },
     async ({ page }) => {
       const locators = await openOptimizeTab(page, "recommendations");
@@ -114,7 +116,7 @@ test.describe("Optimize", () => {
   );
 
   test(
-    "Optimize Recommendations - search for a resource name that cannot exist, verify the table empties and the listing reports that no recommendations match these filters",
+    "Optimize Cost - search for a resource name that cannot exist, verify the table empties and the listing reports that no recommendations match these filters",
     { tag: ["@dev", "@regression", "@negative", "@search"] },
     async ({ page }) => {
       const locators = await openOptimizeTab(page, "recommendations");
@@ -143,7 +145,7 @@ test.describe("Optimize", () => {
   );
 
   test(
-    "Optimize Recommendations - search for a resource name that cannot exist, reload the page, verify the search term and its filtered empty result both survive the reload",
+    "Optimize Cost - search for a resource name that cannot exist, reload the page, verify the search term and its filtered empty result both survive the reload",
     { tag: ["@dev", "@regression", "@functional", "@search"] },
     async ({ page }) => {
       const locators = await openOptimizeTab(page, "recommendations");
@@ -158,7 +160,7 @@ test.describe("Optimize", () => {
       // This is the module's only persistence: OptimizeNewPage writes every filter into
       // router.query (updateUrl) and re-seeds its state from router.query on mount, so a
       // reload is what proves the filter was stored rather than held in React state.
-      await test.step("The reloaded page comes back on Recommendations with the term still applied", async () => {
+      await test.step("The reloaded page comes back on Cost with the term still applied", async () => {
         await expectSelectedTab(locators.RecommendationsTab);
         await waitForRecommendations(locators);
         await expect(locators.recommendationsSearch).toHaveValue(term, { timeout: 60000 });
@@ -172,7 +174,7 @@ test.describe("Optimize", () => {
   );
 
   test(
-    "Optimize Recommendations - apply a no-match search on top of the default severity filter, click Clear all, verify the search leaves the field, the URL and the empty-state message",
+    "Optimize Cost - apply a no-match search on top of the default severity filter, click Clear all, verify the search leaves the field, the URL and the empty-state message",
     { tag: ["@dev", "@regression", "@functional", "@search"] },
     async ({ page }) => {
       const locators = await openOptimizeTab(page, "recommendations");
@@ -274,13 +276,13 @@ test.describe("Optimize", () => {
   );
 
   test(
-    "Optimize - click Recommendations on the tab strip then click back to Summary, verify each click moves both the selected tab and the URL fragment",
+    "Optimize - click Cost on the tab strip then click back to Summary, verify each click moves both the selected tab and the URL fragment",
     { tag: ["@dev", "@regression", "@functional"] },
     async ({ page }) => {
       const locators = await landOnOptimize(page);
       await expectSelectedTab(locators.SummaryTab);
 
-      await test.step("Clicking Recommendations opens it and writes its fragment", async () => {
+      await test.step("Clicking Cost opens it and writes its fragment", async () => {
         await locators.RecommendationsTab.click();
         await parkCursor(page);
         await expectSelectedTab(locators.RecommendationsTab);

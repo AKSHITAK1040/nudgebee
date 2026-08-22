@@ -48,9 +48,7 @@ describe('Optimise tab registration', () => {
   it('parses the tab list it is asserting on', () => {
     const tabs = parseTabs();
     expect(tabs.length).toBeGreaterThanOrEqual(6);
-    expect(tabs.map((t) => t.name)).toEqual(
-      expect.arrayContaining(['Summary', 'Recommendations', 'Resolutions', 'Configuration', 'Security', 'Auto Optimize'])
-    );
+    expect(tabs.map((t) => t.name)).toEqual(expect.arrayContaining(['Summary', 'Cost', 'Resolutions', 'Configuration', 'Security', 'Auto Optimize']));
     expect(tabs.filter((t) => t.hasSubTabs).map((t) => t.name)).toEqual(['Security', 'Auto Optimize']);
   });
 

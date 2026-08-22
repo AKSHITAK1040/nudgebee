@@ -40,7 +40,7 @@ import {
   dashboardIcon1,
   PlayCircleIcon,
   OptimizeSummaryIcon,
-  RecommendationIcon,
+  DollarIcon,
   RecommendationResolutionIcon,
   SecuritytoolsBlue,
   ToolIconBlue,
@@ -388,11 +388,11 @@ const PageLayout = ({ children }) => {
     const optimizeSections = [
       { text: 'Summary', path: '/optimise#summary', id: 'sidenav-optimise-summary', module: 'recommendations', icon: OptimizeSummaryIcon },
       {
-        text: 'Recommendations',
+        text: 'Cost',
         path: '/optimise#recommendations',
         id: 'sidenav-optimise-recommendations',
         module: 'recommendations',
-        icon: RecommendationIcon,
+        icon: DollarIcon,
       },
       {
         text: 'Resolutions',
