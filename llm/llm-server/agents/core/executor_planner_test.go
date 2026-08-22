@@ -1309,7 +1309,14 @@ func TestUnmarshal_DropsWaitingStepsOnResume(t *testing.T) {
 			},
 		},
 		currentAction: []NBAgentPlannerToolAction{
-			{ToolID: "pending-1", Tool: "github_execute", ToolInput: "gh issue create ..."},
+			{
+				ToolID:           "pending-1",
+				Tool:             "github_execute",
+				ToolInput:        "gh issue create ...",
+				DisplayID:        "E2",
+				TurnID:           "turn-2",
+				ThoughtSignature: []byte{0x01, 0x02, 0xfe, 0xff},
+			},
 		},
 		toolCallCache: turnToolCallCache{cache: make(map[string]NBAgentPlannerToolActionStep)},
 	}
@@ -1343,7 +1350,11 @@ func TestUnmarshal_DropsWaitingStepsOnResume(t *testing.T) {
 	// currentAction is the source of truth for what to re-run on resume;
 	// it must be preserved.
 	assert.Len(t, restored.currentAction, 1)
-	assert.Equal(t, "pending-1", restored.currentAction[0].ToolID)
+	restoredAction := restored.currentAction[0]
+	assert.Equal(t, "pending-1", restoredAction.ToolID)
+	assert.Equal(t, "E2", restoredAction.DisplayID)
+	assert.Equal(t, "turn-2", restoredAction.TurnID)
+	assert.Equal(t, []byte{0x01, 0x02, 0xfe, 0xff}, restoredAction.ThoughtSignature)
 }
 
 // TestGetToolInvocations_SkipsWaitingSteps is the defense-in-depth check:

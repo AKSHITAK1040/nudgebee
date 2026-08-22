@@ -3406,6 +3406,20 @@ func (e *plannerExecutor) Unmarshal(previousState []byte) error {
 				Log:        logValue,
 				Dependency: dependencies,
 				Condition:  actionCondition,
+				DisplayID:  toString(getVal(actionMap, "display_id")),
+				TurnID:     toString(getVal(actionMap, "turn_id")),
+			}
+			// currentAction is the source of truth for a WAITING tool when resume
+			// drops its placeholder step. Preserve the provider signature here just
+			// as we do for completed steps; otherwise Gemini rejects the resumed
+			// function-call replay before the planner can continue.
+			if sig, ok := getVal(actionMap, "thought_signature").(string); ok && sig != "" {
+				if decoded, decErr := base64.StdEncoding.DecodeString(sig); decErr == nil {
+					action.ThoughtSignature = decoded
+				} else {
+					e.ctx.GetLogger().Warn("plannerexecutor: could not decode current action thought signature on resume",
+						"toolId", action.ToolID, "error", decErr)
+				}
 			}
 			e.currentAction = append(e.currentAction, action)
 		}
