@@ -214,7 +214,7 @@ test.describe("Optimize", () => {
   );
 
   test(
-    "Optimize Resolutions - open the Resolutions tab, verify its Account, Status, Recommendation and Resolver filters render and the table shows either resolution rows or its empty state",
+    "Optimize Resolutions - open the Resolutions tab, verify its Account, Severity, Type and Resolver filters render and the table shows either resolution rows or its empty state",
     { tag: ["@dev", "@regression", "@functional"] },
     async ({ page }) => {
       const locators = await openOptimizeTab(page, "resolutions");
@@ -222,9 +222,11 @@ test.describe("Optimize", () => {
       await test.step("The resolutions toolbar renders all four filters", async () => {
         await expect(locators.resolutionsToolbar).toBeVisible({ timeout: 60000 });
         await expect(locators.resolutionsAccountFilter).toBeVisible();
-        await expect(locators.resolutionsStatusFilter).toBeVisible();
+        await expect(locators.resolutionsSeverityFilter).toBeVisible();
         await expect(locators.resolutionsRecommendationFilter).toBeVisible();
         await expect(locators.resolutionsResolverFilter).toBeVisible();
+        // Status is filtered by the stat cards above the listing, not by a
+        // dropdown — the toolbar carries no Status control to assert.
       });
 
       await test.step("The table settles on rows or on its empty state, never on a skeleton", async () => {

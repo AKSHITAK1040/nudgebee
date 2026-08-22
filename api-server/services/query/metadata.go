@@ -9022,7 +9022,17 @@ var table_metadata = map[string]TableDefinition{
 			rr.created_at,
 			rr.updated_at,
 			rr.status_message,
-			CASE WHEN rr.data IS NOT NULL THEN jsonb_build_object('data', rr.data->'data', 'provider_config', rr.data->'provider_config') END as data,
+			-- ticket_id/ticket_key are stored at the TOP level of data by
+			-- services/recommendation/ticket_resolution.go, so a projection naming
+			-- only 'data' and 'provider_config' dropped both, and every ticket
+			-- resolution read out as {"data": null, "provider_config": null} — the
+			-- key was written on creation and then visible to nothing.
+			CASE WHEN rr.data IS NOT NULL THEN jsonb_build_object(
+				'data', rr.data->'data',
+				'provider_config', rr.data->'provider_config',
+				'ticket_id', rr.data->'ticket_id',
+				'ticket_key', rr.data->'ticket_key'
+			) END as data,
 			r.tenant_id as tenant_id,
 			r.cloud_account_id as account_id,
 			CASE WHEN r.recommendation IS NOT NULL THEN jsonb_build_object('spec', r.recommendation->'spec', 'metadata', r.recommendation->'metadata', 'namespace', r.recommendation->'namespace') END as rec_recommendation,
@@ -9069,9 +9079,13 @@ var table_metadata = map[string]TableDefinition{
 		},
 	},
 	"recommendation_resolution_groupings_v2": {
-		Type:                Aggregate,
-		Source:              database.Metastore,
-		Def:                 "(SELECT rr.*, r.tenant_id, r.cloud_account_id as account_id FROM recommendation_resolution rr LEFT JOIN recommendation r ON r.id = rr.recommendation_id) as rr_agg",
+		Type:   Aggregate,
+		Source: database.Metastore,
+		// rec_severity is joined in so a severity-filtered listing can be COUNTED
+		// as well as listed: the frontend sends one where clause to the listing and
+		// another to this aggregate, and a column missing here would leave
+		// pagination reporting totals for a filter it never applied.
+		Def:                 "(SELECT rr.*, r.tenant_id, r.cloud_account_id as account_id, r.severity as rec_severity FROM recommendation_resolution rr LEFT JOIN recommendation r ON r.id = rr.recommendation_id) as rr_agg",
 		Name:                "recommendation_resolution_groupings_v2",
 		TenantIdColumnName:  "tenant_id",
 		AccountIdColumnName: "account_id",
@@ -9087,6 +9101,7 @@ var table_metadata = map[string]TableDefinition{
 			"recommendation_id": {Type: ColumnDefinitionTypeString},
 			"tenant_id":         {Type: ColumnDefinitionTypeString},
 			"account_id":        {Type: ColumnDefinitionTypeString},
+			"rec_severity":      {Type: ColumnDefinitionTypeString},
 		},
 	},
 	"event_resolution_v2": {

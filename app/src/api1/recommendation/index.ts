@@ -1749,6 +1749,12 @@ const apiRecommendations = {
       where.resolver_type = { _eq: data.resolverType };
       whereAgg.resolver_type = { _eq: data.resolverType };
     }
+    // rec_severity exists on BOTH the listing view and the aggregate — narrowing
+    // one without the other would page over a total the filter never applied to.
+    if (data.severity?.length) {
+      where.rec_severity = { _in: data.severity };
+      whereAgg.rec_severity = { _in: data.severity };
+    }
     const response = await queryGraphQL(GET_ALL_EVENT_RESOLUTIONS, 'AllEventResolutions', {
       where,
       whereAgg,
@@ -2383,11 +2389,13 @@ const apiRecommendations = {
     type,
     resolverType,
     recommendationId,
+    severity,
   }: {
     accountId?: string | string[];
     type?: string;
     resolverType?: string;
     recommendationId?: string;
+    severity?: string[];
   } = {}): Promise<Record<string, number>> {
     if (accountId === 'demo') {
       return {};
@@ -2420,6 +2428,11 @@ const apiRecommendations = {
     }
     if (recommendationId) {
       where.recommendation_id = { _eq: recommendationId };
+    }
+    // Severity scopes the cards too — they describe the listing's scope minus
+    // the one dimension they exist to split.
+    if (severity?.length) {
+      where.rec_severity = { _in: severity };
     }
 
     const response = await queryGraphQL(query, 'RecommendationResolutionStatusCounts', { where });

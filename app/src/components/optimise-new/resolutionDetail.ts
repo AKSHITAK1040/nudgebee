@@ -160,3 +160,92 @@ export const formatDuration = (from: unknown, to: unknown): string | null => {
   const days = Math.floor(hours / 24);
   return `${days}d ${hours % 24}h`;
 };
+
+export type ReferencePlatform = 'github' | 'gitlab' | 'bitbucket' | null;
+
+export interface ResolutionReference {
+  /** The artefact's identifier, when it is one a person can recognise. */
+  detail: string | null;
+  /** Where to open it, when the reference is a link. */
+  href: string;
+  /** True when the resolution should have produced something and did not. */
+  missing: boolean;
+  /**
+   * Which platform holds it, read from the link's host — the only place this is
+   * actually known. A ticket resolution carries a bare id and a null
+   * provider_config, so its platform stays null rather than being guessed.
+   */
+  platform: ReferencePlatform;
+}
+
+const platformOf = (href: string): ReferencePlatform => {
+  const host = /^https?:\/\/([^/]+)/i.exec(href)?.[1]?.toLowerCase() || '';
+  if (host.includes('github')) return 'github';
+  if (host.includes('gitlab')) return 'gitlab';
+  if (host.includes('bitbucket')) return 'bitbucket';
+  return null;
+};
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Not a reference — the marker the CLI path writes into the same column. */
+const SENTINELS = new Set(['cli_execution']);
+
+/**
+ * What a resolution produced, read out of `type_reference_id`.
+ *
+ * That one column holds five different things depending on the resolution type:
+ * a pull-request URL, a bare ticket id, a cloud resource's name, an internal
+ * UUID, or the string `cli_execution`. Only the first three mean anything to a
+ * reader, so the last two report no detail rather than printing an id nobody can
+ * use — "DeploymentChange 9c67786b-e65e-…" is noise wearing the costume of
+ * information.
+ *
+ * `missing` is deliberately narrow: an empty reference on a FAILED resolution
+ * means the attempt never got as far as creating the artefact, which is worth
+ * saying. An empty one elsewhere is just an absence, and is left unremarked.
+ */
+export const describeResolutionReference = (referenceId: unknown, status: string, ticketKey?: unknown): ResolutionReference => {
+  const raw = typeof referenceId === 'string' ? referenceId.trim() : '';
+  const key = typeof ticketKey === 'string' ? ticketKey.trim() : '';
+  const isLink = /^https?:\/\//i.test(raw);
+
+  if (!raw || SENTINELS.has(raw)) {
+    return { detail: null, href: '', missing: !raw && status === 'Failed', platform: null };
+  }
+
+  if (isLink) {
+    const platform = platformOf(raw);
+    const pull = /\/(?:pull|pull-requests)\/(\d+)/.exec(raw);
+    if (pull) return { detail: `#${pull[1]}`, href: raw, missing: false, platform };
+    const merge = /\/merge_requests\/(\d+)/.exec(raw);
+    if (merge) return { detail: `!${merge[1]}`, href: raw, missing: false, platform };
+    // Anything else linkable: the last path segment is the closest thing to a
+    // name it has — a Jira browse URL ends in its key, for instance.
+    const tail = raw.split('?')[0].split('#')[0].split('/').filter(Boolean).pop();
+    return { detail: tail || null, href: raw, missing: false, platform };
+  }
+
+  // An internal id identifies the row to us, not the artefact to a reader.
+  if (UUID.test(raw)) return { detail: null, href: '', missing: false, platform: null };
+  // A bare number is an internal ticket id. The KEY is what a person recognises
+  // and quotes ("NB-1234"), so prefer it when the row carries one — it does not
+  // name the platform, so none is claimed either way.
+  if (/^\d+$/.test(raw)) return { detail: key || `#${raw}`, href: '', missing: false, platform: null };
+  return { detail: raw, href: '', missing: false, platform: null };
+};
+
+/**
+ * A resolution type as a reader would say it: `PullRequest` → "Pull Request".
+ *
+ * The backend spells these in PascalCase, and `snakeToTitleCase` only splits on
+ * underscores, so nothing existing breaks them apart.
+ */
+export const formatResolutionType = (type: unknown): string => {
+  const raw = typeof type === 'string' ? type.trim() : '';
+  if (!raw) return '';
+  return raw
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z\d])([A-Z])/g, '$1 $2')
+    .replace(/\s+/g, ' ')
+    .trim();
+};

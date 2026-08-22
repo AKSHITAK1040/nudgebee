@@ -18,10 +18,10 @@ import { Card } from '@ui/Card';
 import { Button } from '@ui/Button';
 import { Label, type LabelTone } from '@ui/Label';
 import { SeverityIcon } from '@ui/SeverityIcon';
-import { toSeverityLevel, containsLink, snakeToTitleCase, safeJSONParse } from '@utils/common';
+import { toSeverityLevel, snakeToTitleCase, safeJSONParse } from '@utils/common';
 import { ds } from 'src/utils/colors';
 import recommendationApi from '@api1/recommendation';
-import { buildAppliedChanges, formatDuration } from './resolutionDetail';
+import { buildAppliedChanges, describeResolutionReference, formatDuration, formatResolutionType } from './resolutionDetail';
 import { ResourceChangeCell } from './ResourceChangeCell';
 import { getResourceDisplayName, panelActionBarSx } from './utils';
 
@@ -168,7 +168,7 @@ const ResolutionDetailPanel = ({ open, onClose, resolution, accounts, onRetry, r
   // — the row is as old as the last listing fetch.
   const currentRecStatus = fullRecommendation?.status || rec.status;
   const statusMismatch = describeStatusMismatch(status, currentRecStatus);
-  const producedLink = containsLink(resolution.type_reference_id) ? resolution.type_reference_id : '';
+  const reference = describeResolutionReference(resolution.type_reference_id, status, resolution.data?.ticket_key);
   const showHistoryTab = resolution.type_reference_id === 'cli_execution' && Boolean(recommendationId);
 
   return (
@@ -181,7 +181,7 @@ const ResolutionDetailPanel = ({ open, onClose, resolution, accounts, onRetry, r
                 {statusText(status)}
               </Label>
               {rec.severity && <SeverityIcon level={toSeverityLevel(rec.severity)} aria-label={rec.severity} />}
-              <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500] }}>{resolution.type || 'Resolution'}</Typography>
+              <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500] }}>{formatResolutionType(resolution.type) || 'Resolution'}</Typography>
             </Box>
             <Typography
               sx={{ fontSize: ds.text.title, fontWeight: ds.weight.semibold, color: ds.gray[700], lineHeight: 1.3, letterSpacing: '-0.01em' }}
@@ -351,16 +351,23 @@ const ResolutionDetailPanel = ({ open, onClose, resolution, accounts, onRetry, r
                   {resolution.resolver_type || '—'}
                   {resolverName ? ` · ${resolverName}` : ''}
                 </Row>
-                {producedLink && (
+                {(reference.href || reference.detail || reference.missing) && (
                   <Row label='Produced'>
-                    <Link
-                      href={producedLink}
-                      target='_blank'
-                      style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: ds.text.body }}
-                    >
-                      {resolution.type || 'Open'}
-                      <OpenInNewIcon sx={{ fontSize: 14 }} />
-                    </Link>
+                    {reference.href ? (
+                      <Link
+                        href={reference.href}
+                        target='_blank'
+                        style={{ display: 'inline-flex', alignItems: 'center', gap: 4, fontSize: ds.text.body }}
+                      >
+                        {formatResolutionType(resolution.type) || 'Open'}
+                        {reference.detail ? ` ${reference.detail}` : ''}
+                        <OpenInNewIcon sx={{ fontSize: 14 }} />
+                      </Link>
+                    ) : (
+                      <Box component='span' sx={{ color: reference.missing ? ds.gray[500] : ds.gray[700] }}>
+                        {reference.missing ? `No ${formatResolutionType(resolution.type) || 'artefact'} was created` : reference.detail}
+                      </Box>
+                    )}
                   </Row>
                 )}
                 {currentRecStatus && (

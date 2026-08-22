@@ -6,9 +6,15 @@ import Currency from '@shared/format/Currency';
 import Datetime from '@shared/format/Datetime';
 import Text from '@shared/format/Text';
 import { Label, type LabelTone } from '@ui/Label';
+import { Button as DsButton } from '@ui/Button';
+import Tooltip from '@ui/Tooltip';
+import RestartAltOutlinedIcon from '@mui/icons-material/RestartAltOutlined';
 import { toast as snackbar } from '@ui/Toast';
-import { Box, Button, Typography } from '@mui/material';
+import { Box, Typography } from '@mui/material';
 import Link from 'next/link';
+import { Link as DsLink } from '@ui/Link';
+import SafeIcon from '@shared/icons/SafeIcon';
+import { GithubIcon, GitLabIcon, BitBucketIcon } from '@assets';
 import { useRouter } from 'next/router';
 import { ds } from 'src/utils/colors';
 import { containsLink, snakeToTitleCase, safeJSONParse } from 'src/utils/common';
@@ -23,6 +29,7 @@ import { SeverityIcon, type SeverityLevel } from '@ui/SeverityIcon';
 import DownloadButton from '@shared/buttons/DownloadButton';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
 import ResolutionDetailPanel from './ResolutionDetailPanel';
+import { describeResolutionReference, formatResolutionType } from './resolutionDetail';
 
 const renderAccountGroupIcon = (provider: string) => <CloudProviderIcon cloud_provider={provider} width='14px' height='14px' />;
 
@@ -49,25 +56,36 @@ const statusToTone = (status: string): LabelTone => {
 
 const RESOLUTION_HEADERS = [
   { name: 'Account', width: '14%' },
-  { name: 'Recommendation', width: '26%' },
+  { name: 'Recommendation', width: '22%' },
   { name: 'Severity', width: '8%' },
   { name: 'Status', width: '10%' },
   { name: 'Est. Savings', width: '10%' },
-  { name: 'Resolver', width: '12%' },
+  { name: 'Resolver', width: '10%' },
   { name: 'Type', width: '10%' },
-  { name: 'Updated At', width: '10%' },
+  { name: 'Updated At', width: '8%' },
+  // Unnamed trailing actions column, matching the recommendations table. Row
+  // actions belong here rather than inside a data cell.
+  { name: '', width: '8%', align: 'right' as const },
 ];
 
-const STATUS_OPTIONS = [
-  { label: 'All', value: '' },
-  { label: 'In Progress', value: 'InProgress' },
-  { label: 'Success', value: 'Success' },
-  { label: 'Failed', value: 'Failed' },
-];
+// The stat cards above the listing, one per lifecycle status, and the ONLY status
+// filter this tab has — a dropdown beside them would be a second control for one
+// dimension, which is why the recommendations tab carries no Category dropdown
+// next to its category cards either. Ordered the way a reader scans for trouble:
+// what worked, what is still running, what did not.
+// Only where the reference's host actually says which platform holds it. A
+// ticket's reference is a bare id with a null provider_config, so it gets no
+// mark rather than a guessed one.
+const REFERENCE_PLATFORM_ICON: Record<string, any> = {
+  github: GithubIcon,
+  gitlab: GitLabIcon,
+  bitbucket: BitBucketIcon,
+};
 
-// The stat cards above the listing, one per lifecycle status. Ordered the way a
-// reader scans for trouble — what worked, what is still running, what did not —
-// rather than by the STATUS_OPTIONS order, which is the dropdown's.
+// The recommendation's severity, carried onto the resolution — the same bands
+// the listing's Severity column shows.
+const SEVERITY_OPTIONS = ['Critical', 'High', 'Medium', 'Low', 'Info'].map((s) => ({ label: s, value: s }));
+
 const STATUS_CARDS = [
   { status: 'Success', label: 'Success', tooltip: 'Resolutions that completed successfully.' },
   { status: 'InProgress', label: 'In Progress', tooltip: 'Resolutions that have been dispatched and have not finished yet.' },
@@ -110,6 +128,7 @@ const ResolutionsView = () => {
   const [selectedStatus, setSelectedStatus] = useState('');
   const [selectedType, setSelectedType] = useState('');
   const [selectedResolver, setSelectedResolver] = useState('');
+  const [selectedSeverity, setSelectedSeverity] = useState<string[]>([]);
   const [recommendationTypes, setRecommendationTypes] = useState<string[]>([]);
   const [resolverTypes, setResolverTypes] = useState<string[]>([]);
 
@@ -183,6 +202,7 @@ const ResolutionsView = () => {
         type: selectedType,
         resolverType: selectedResolver,
         recommendationId: deepLinkRecId,
+        severity: selectedSeverity,
       })
       .then((counts) => {
         if (active) setStatusCounts(counts);
@@ -196,7 +216,7 @@ const ResolutionsView = () => {
     return () => {
       active = false;
     };
-  }, [selectedAccounts, selectedType, selectedResolver, deepLinkRecId, router.isReady, refreshKey]);
+  }, [selectedAccounts, selectedType, selectedResolver, selectedSeverity, deepLinkRecId, router.isReady, refreshKey]);
 
   useEffect(() => {
     // Wait for router.query hydration so a deep-linked ?id= scopes the first fetch
@@ -216,6 +236,7 @@ const ResolutionsView = () => {
         type: selectedType,
         resolverType: selectedResolver,
         recommendationId: deepLinkRecId,
+        severity: selectedSeverity,
       })
       .then((res: any) => {
         if (!active) return;
@@ -228,7 +249,18 @@ const ResolutionsView = () => {
     return () => {
       active = false;
     };
-  }, [selectedAccounts, selectedStatus, selectedType, selectedResolver, rowsPerPage, page, deepLinkRecId, router.isReady, refreshKey]);
+  }, [
+    selectedAccounts,
+    selectedStatus,
+    selectedType,
+    selectedResolver,
+    selectedSeverity,
+    rowsPerPage,
+    page,
+    deepLinkRecId,
+    router.isReady,
+    refreshKey,
+  ]);
 
   // Build table cells from the fetched rows + accounts map. Kept separate from
   // the fetch so Account labels resolve once accounts load without refetching.
@@ -254,21 +286,37 @@ const ResolutionsView = () => {
         const workloadName =
           rr.recommendation?.cloud_resourse?.meta?.controller || rr.recommendation?.cloud_resourse?.meta?.config?.labels?.['app.kubernetes.io/name'];
 
-        const referenceObj: any = {};
-        if (containsLink(rr.type_reference_id)) {
-          referenceObj.component = (
-            <Link
-              onClick={(e) => e.stopPropagation()}
-              href={rr?.type_reference_id}
-              target='_blank'
-              style={{ fontSize: ds.text.body, fontWeight: ds.weight.regular }}
-            >
-              {rr.type}
-            </Link>
-          );
-        } else {
-          referenceObj.component = <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.regular }}>{rr.type}</Typography>;
-        }
+        // The type, plus what it produced when that is something a reader can use.
+        const reference = describeResolutionReference(rr.type_reference_id, rr.status, rr.data?.ticket_key);
+        // Two lines, like Account and Resolver beside it: what kind of thing on
+        // top, which one underneath. The identifier carries the link, because it
+        // is the part that names a specific artefact.
+        const referenceObj: any = {
+          data: `${formatResolutionType(rr.type)} ${reference.detail || ''}`.trim(),
+          component: (
+            <Box display='flex' flexDirection='column'>
+              <Typography sx={{ fontSize: ds.text.body, fontWeight: ds.weight.regular, color: ds.gray[700] }}>
+                {formatResolutionType(rr.type) || '—'}
+              </Typography>
+              {reference.href && reference.detail && (
+                // The mark sits with the identifier, not the type: #950 is the
+                // thing that lives on GitHub — "Pull Request" is only its kind.
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[1] }}>
+                  {REFERENCE_PLATFORM_ICON[reference.platform ?? ''] && (
+                    <SafeIcon src={REFERENCE_PLATFORM_ICON[reference.platform ?? '']} alt='' width={13} height={13} />
+                  )}
+                  <DsLink href={reference.href} openInNew secondaryText maxWidth='92px'>
+                    {reference.detail}
+                  </DsLink>
+                </Box>
+              )}
+              {!reference.href && reference.detail && (
+                <Text value={reference.detail} secondaryText showAutoEllipsis sx={{ fontSize: ds.text.small }} />
+              )}
+              {reference.missing && <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500] }}>none created</Typography>}
+            </Box>
+          ),
+        };
 
         const statusText = rr.status === 'InProgress' ? 'In Progress' : rr.status;
         const resolverName = rr.resolver_display_name || rr.data?.provider_config?.name;
@@ -354,21 +402,6 @@ const ResolutionsView = () => {
                 {rr.status_message && (rr.status === 'Failed' || (rr.status === 'Success' && !containsLink(rr.type_reference_id))) && (
                   <Text value={rr.status_message} secondaryText showAutoEllipsis sx={{ fontSize: ds.text.small }} />
                 )}
-                {rr.status === 'Failed' && (
-                  <Button
-                    size='small'
-                    variant='text'
-                    disabled={!!retryingId}
-                    onClick={(e: React.MouseEvent) => {
-                      // The row opens the panel; Retry is an action on the row, not a way in.
-                      e.stopPropagation();
-                      handleRetry(rr.id, rr.account_id);
-                    }}
-                    sx={{ alignSelf: 'flex-start', p: 0, minWidth: 0, fontSize: ds.text.small, textTransform: 'none' }}
-                  >
-                    {retryingId === rr.id ? 'Retrying…' : 'Retry'}
-                  </Button>
-                )}
               </Box>
             ),
           },
@@ -399,6 +432,37 @@ const ResolutionsView = () => {
           referenceObj,
           {
             component: <Datetime value={rr.updated_at} />,
+          },
+          {
+            component: (
+              // stopPropagation on the cell, not the button: the row opens the
+              // panel, and the whole action area has to be exempt from that.
+              <Box
+                onClick={(e: React.MouseEvent) => e.stopPropagation()}
+                // Held off the table's right edge rather than flush against it.
+                sx={{ display: 'inline-flex', justifyContent: 'flex-end', width: '100%', pr: ds.space[4] }}
+              >
+                {rr.status === 'Failed' && (
+                  <Tooltip title={retryingId === rr.id ? 'Retrying…' : 'Retry'} placement='top'>
+                    <span>
+                      <DsButton
+                        tone='ghost'
+                        // `lg` is the largest icon-only size the DS offers (18px glyph
+                        // in a 40px target). ds/Button owns its icon sizing and takes
+                        // no sx, so this is the ceiling without overriding the system.
+                        size='lg'
+                        composition='icon-only'
+                        icon={<RestartAltOutlinedIcon />}
+                        aria-label='Retry'
+                        id={`resolution-retry-${rr.id}`}
+                        disabled={!!retryingId}
+                        onClick={() => handleRetry(rr.id, rr.account_id)}
+                      />
+                    </span>
+                  </Tooltip>
+                )}
+              </Box>
+            ),
           },
         ];
       }),
@@ -491,20 +555,23 @@ const ResolutionsView = () => {
             }}
           />
           <FilterDropdown
-            id='resolutions-filter-status'
-            label='Status'
-            options={STATUS_OPTIONS}
-            value={STATUS_OPTIONS.find((o) => o.value === selectedStatus) ?? null}
-            onSelect={(_e: any, item: any) => {
-              setSelectedStatus(item?.value || '');
+            id='resolutions-filter-severity'
+            label='Severity'
+            multiple
+            options={SEVERITY_OPTIONS}
+            value={SEVERITY_OPTIONS.filter((o) => selectedSeverity.includes(o.value))}
+            onSelect={(_e: any, items: any) => {
+              setSelectedSeverity((Array.isArray(items) ? items : []).map((it: any) => it.value));
               setPage(0);
             }}
           />
           <FilterDropdown
             id='resolutions-filter-recommendation'
-            label='Recommendation'
-            options={(recommendationTypes || []).filter(Boolean).map((t) => ({ label: t, value: t }))}
-            value={selectedType ? { label: selectedType, value: selectedType } : null}
+            label='Type'
+            // Labelled the way the Type column labels the same values — the filter
+            // that feeds a column should not spell its options differently.
+            options={(recommendationTypes || []).filter(Boolean).map((t) => ({ label: formatResolutionType(t), value: t }))}
+            value={selectedType ? { label: formatResolutionType(selectedType), value: selectedType } : null}
             onSelect={(_e: any, item: any) => {
               setSelectedType(item?.value || '');
               setPage(0);

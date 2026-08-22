@@ -65,7 +65,7 @@ export class OptimizeModuleLocators extends OptimizeLocators {
   readonly resolutionsToolbar: Locator;
   readonly resolutionsListing: Locator;
   readonly resolutionsAccountFilter: Locator;
-  readonly resolutionsStatusFilter: Locator;
+  readonly resolutionsSeverityFilter: Locator;
   readonly resolutionsRecommendationFilter: Locator;
   readonly resolutionsResolverFilter: Locator;
   readonly resolutionsTable: Locator;
@@ -152,8 +152,8 @@ export class OptimizeModuleLocators extends OptimizeLocators {
     this.resolutionsToolbar = page.getByTestId("resolutions-filter-toolbar");
     this.resolutionsListing = page.locator(`#${RESOLUTIONS_TABLE}-listing-layout`);
     this.resolutionsAccountFilter = this.filterTrigger("resolutions-filter-account", "Account", this.resolutionsListing);
-    this.resolutionsStatusFilter = this.filterTrigger("resolutions-filter-status", "Status", this.resolutionsListing);
-    this.resolutionsRecommendationFilter = this.filterTrigger("resolutions-filter-recommendation", "Recommendation", this.resolutionsListing);
+    this.resolutionsSeverityFilter = this.filterTrigger("resolutions-filter-severity", "Severity", this.resolutionsListing);
+    this.resolutionsRecommendationFilter = this.filterTrigger("resolutions-filter-recommendation", "Type", this.resolutionsListing);
     this.resolutionsResolverFilter = this.filterTrigger("resolutions-filter-resolver", "Resolver", this.resolutionsListing);
     this.resolutionsTable = page.locator(`#${RESOLUTIONS_TABLE}`);
     this.resolutionsRows = page.locator(`#${RESOLUTIONS_TABLE}-body ${DATA_ROW}`);

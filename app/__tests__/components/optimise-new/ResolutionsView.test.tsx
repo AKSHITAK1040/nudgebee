@@ -180,16 +180,43 @@ describe('ResolutionsView status cards', () => {
     expect(lastPanelProps.resolution.id).toBe('res-1');
   });
 
-  it('retries from the row without also opening the panel', async () => {
+  it('retries from the row action without also opening the panel', async () => {
     mockGetResolutions.mockResolvedValue(listingWithRow);
     render(<ResolutionsView />);
 
-    await waitFor(() => expect(screen.getByText('Retry')).toBeInTheDocument());
-    fireEvent.click(screen.getByText('Retry'));
+    const retry = await screen.findByRole('button', { name: 'Retry' });
+    fireEvent.click(retry);
 
     // Retry is an action on the row, not a way into it.
     await waitFor(() => expect(mockRetry).toHaveBeenCalledWith('acct-a', 'res-1'));
     expect(screen.queryByTestId('resolution-panel')).not.toBeInTheDocument();
+  });
+
+  it('offers no retry on a resolution that did not fail', async () => {
+    mockGetResolutions.mockResolvedValue({
+      data: {
+        data: { recommendation_resolution: [{ ...ROW, status: 'Success' }], recommendation_resolution_aggregate: { aggregate: { count: 1 } } },
+      },
+    });
+    render(<ResolutionsView />);
+
+    await waitFor(() => expect(screen.getByText('Pod Right Sizing')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the status cell describing status, not carrying the action', async () => {
+    mockGetResolutions.mockResolvedValue(listingWithRow);
+    render(<ResolutionsView />);
+
+    // The reason still reads inline; the button that acts on it does not.
+    await waitFor(() => expect(screen.getByText(/Failed to execute code agent/)).toBeInTheDocument());
+    const row = screen.getByText('Pod Right Sizing').closest('tr') as HTMLElement;
+    const statusCell = within(row)
+      .getByText(/Failed to execute code agent/)
+      .closest('td') as HTMLElement;
+
+    expect(within(statusCell).queryByRole('button')).toBeNull();
+    expect(within(row).getAllByRole('button', { name: 'Retry' })).toHaveLength(1);
   });
 
   it('renders the cards rather than failing the tab when the split cannot be loaded', async () => {
