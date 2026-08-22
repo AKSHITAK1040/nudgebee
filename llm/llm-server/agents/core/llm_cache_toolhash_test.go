@@ -64,6 +64,26 @@ func TestHashContent_DifferentToolSetsDiffer(t *testing.T) {
 	assert.NotEqual(t, a, c, "different tool SCHEMAS must produce different hashes")
 }
 
+func TestHashContent_ToolDescriptionChangesTheHash(t *testing.T) {
+	msgs := msgsFor("same system prompt")
+	params := map[string]any{"type": "object"}
+	toolWithDescription := func(description string) llms.Tool {
+		return llms.Tool{
+			Type: "function",
+			Function: &llms.FunctionDefinition{
+				Name:        "kubectl_execute",
+				Description: description,
+				Parameters:  params,
+			},
+		}
+	}
+
+	a := hashContent(msgs, []llms.Tool{toolWithDescription("Read Kubernetes resources")})
+	b := hashContent(msgs, []llms.Tool{toolWithDescription("Write Kubernetes resources")})
+	assert.NotEqual(t, a, b,
+		"tool descriptions are baked into Google cached content, so changed guidance must invalidate the old entry")
+}
+
 // Back-compat: entries that never had tools must keep the hash they had before
 // tools joined the computation, so existing cached content is not invalidated.
 // nil and empty must therefore be indistinguishable.

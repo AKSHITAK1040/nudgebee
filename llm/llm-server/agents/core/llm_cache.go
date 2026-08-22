@@ -1069,7 +1069,7 @@ func hashContent(messages []llms.MessageContent, tools []llms.Tool) string {
 		if t.Function == nil {
 			continue
 		}
-		_, _ = fmt.Fprintf(hasher, "|tool:%s:%v", t.Function.Name, t.Function.Parameters)
+		_, _ = fmt.Fprintf(hasher, "|tool:%s:%s:%s:%v", t.Type, t.Function.Name, t.Function.Description, t.Function.Parameters)
 	}
 	return hex.EncodeToString(hasher.Sum(nil))
 }
