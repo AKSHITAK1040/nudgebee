@@ -23,16 +23,19 @@ export interface ConfigRule {
 
 const SEVERITY_RANK: Record<string, number> = { Critical: 5, High: 4, Medium: 3, Low: 2, Info: 1, Unknown: 0 };
 
-const rank = (s: string) => SEVERITY_RANK[s] ?? 0;
+/** Orders severity bands worst-first. Shared with the list, which re-sorts under a filter. */
+export const rankSeverity = (s: string) => SEVERITY_RANK[s] ?? 0;
 
 /**
  * Fold the per-(rule, severity, account) grouping rows into one row per rule.
  *
- * Ordered by blast radius before severity, the opposite of the cloud posture
- * rollup. Configuration findings carry no savings and — since the rule
- * severities were calibrated to their published baselines — cluster in the lower
- * bands, so the count is what separates "every Lambda in the estate" from a
- * single stray resource. Severity breaks ties.
+ * Worst first, then widest blast radius — the same order the cloud posture
+ * rollup uses, because it is the order a reader triages in. Count led this
+ * ordering while every Lambda rule was hardcoded High and the band carried no
+ * information; now that the severities are calibrated to their published
+ * baselines, a Critical check that fires twice outranks a Low one that fires a
+ * thousand times, and burying it under the noisy check is the failure this
+ * ordering exists to prevent.
  */
 export const foldConfigRules = (rows: any[]): ConfigRule[] => {
   const byRule = new Map<string, ConfigRule>();
@@ -58,12 +61,12 @@ export const foldConfigRules = (rows: any[]): ConfigRule[] => {
     }
     existing.count += count;
     existing.countBySeverity[severity] = (existing.countBySeverity[severity] || 0) + count;
-    if (rank(severity) > rank(existing.severity)) existing.severity = severity;
+    if (rankSeverity(severity) > rankSeverity(existing.severity)) existing.severity = severity;
     if (accountId) {
       existing.countByAccount[accountId] = (existing.countByAccount[accountId] || 0) + count;
       if (!existing.accountIds.includes(accountId)) existing.accountIds.push(accountId);
     }
   }
 
-  return Array.from(byRule.values()).sort((a, b) => b.count - a.count || rank(b.severity) - rank(a.severity));
+  return Array.from(byRule.values()).sort((a, b) => rankSeverity(b.severity) - rankSeverity(a.severity) || b.count - a.count);
 };

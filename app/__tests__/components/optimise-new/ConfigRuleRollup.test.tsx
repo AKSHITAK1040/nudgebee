@@ -156,6 +156,48 @@ describe('ConfigRuleRollup', () => {
     expect(rows[0]).toBe('big_in_band');
   });
 
+  it('names the accounts a check fires in rather than counting them', async () => {
+    renderView({
+      accounts: {
+        'acct-a': { name: 'production-eu', cloud_provider: 'AWS' },
+        'acct-b': { name: 'sandbox', cloud_provider: 'AWS' },
+      },
+    });
+
+    await waitFor(() => expect(screen.getByText('production-eu, sandbox')).toBeInTheDocument());
+    // The two single-account checks name their account as well, rather than showing "1".
+    expect(screen.getAllByText('production-eu')).toHaveLength(2);
+  });
+
+  it('falls back to the account id rather than dropping an account it cannot name', async () => {
+    renderView({ accounts: { 'acct-a': { name: 'production-eu', cloud_provider: 'AWS' } } });
+
+    await waitFor(() => expect(screen.getByText('acct-b, production-eu')).toBeInTheDocument());
+  });
+
+  it('leads with the worst check, however loud the lower bands are', async () => {
+    renderView();
+
+    await waitFor(() => expect(screen.getByText('certificate_expiry')).toBeInTheDocument());
+    const order = screen.getAllByText(/aws_lambda_tracing|aws_tags|certificate_expiry/).map((el) => el.textContent);
+    // 23 Critical findings lead 1,233 Low ones.
+    expect(order[0]).toBe('certificate_expiry');
+  });
+
+  it('badges a filtered row with the worst band in the selection, not the worst it reaches', async () => {
+    mockListRollup.mockResolvedValue([
+      { rule_name: 'misconfigurations', severity: 'Critical', account_id: 'acct-a', count: 2 },
+      { rule_name: 'misconfigurations', severity: 'Medium', account_id: 'acct-a', count: 159 },
+    ]);
+    renderView({ severity: ['Medium'] });
+
+    // The count says 159, so the badge beside it has to say Medium — the two
+    // would otherwise describe different sets of findings on one row.
+    await waitFor(() => expect(screen.getByText('159')).toBeInTheDocument());
+    expect(screen.getByLabelText('Medium')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Critical')).not.toBeInTheDocument();
+  });
+
   it('renders an empty state rather than failing when the query errors', async () => {
     mockListRollup.mockRejectedValue(new Error('boom'));
     const consoleError = jest.spyOn(console, 'error').mockImplementation(() => {});

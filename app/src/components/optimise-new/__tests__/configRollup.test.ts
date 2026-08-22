@@ -42,23 +42,34 @@ describe('foldConfigRules', () => {
     expect(rule.count).toBe(164);
   });
 
-  it('orders by blast radius, then severity', () => {
+  it('orders worst first, however loud the lower bands are', () => {
     const rules = foldConfigRules([
-      { rule_name: 'certificate_expiry', severity: 'Critical', account_id: 'a', count: 23 },
       { rule_name: 'aws_tags', severity: 'Low', account_id: 'a', count: 969 },
+      { rule_name: 'certificate_expiry', severity: 'Critical', account_id: 'a', count: 23 },
       { rule_name: 'aws_lambda_tracing', severity: 'Low', account_id: 'a', count: 1233 },
     ]);
 
-    expect(rules.map((r) => r.ruleName)).toEqual(['aws_lambda_tracing', 'aws_tags', 'certificate_expiry']);
+    // 23 Critical findings outrank 1,233 Low ones — the count only orders within a band.
+    expect(rules.map((r) => r.ruleName)).toEqual(['certificate_expiry', 'aws_lambda_tracing', 'aws_tags']);
   });
 
-  it('breaks a count tie on severity', () => {
+  it('breaks a severity tie on blast radius', () => {
     const rules = foldConfigRules([
-      { rule_name: 'quiet_rule', severity: 'Info', account_id: 'a', count: 10 },
-      { rule_name: 'loud_rule', severity: 'High', account_id: 'a', count: 10 },
+      { rule_name: 'narrow_rule', severity: 'High', account_id: 'a', count: 3 },
+      { rule_name: 'wide_rule', severity: 'High', account_id: 'a', count: 300 },
     ]);
 
-    expect(rules.map((r) => r.ruleName)).toEqual(['loud_rule', 'quiet_rule']);
+    expect(rules.map((r) => r.ruleName)).toEqual(['wide_rule', 'narrow_rule']);
+  });
+
+  it('ranks a multi-band rule by the worst band it reaches', () => {
+    const rules = foldConfigRules([
+      { rule_name: 'busy_low', severity: 'Low', account_id: 'a', count: 500 },
+      { rule_name: 'misconfigurations', severity: 'Medium', account_id: 'a', count: 159 },
+      { rule_name: 'misconfigurations', severity: 'Critical', account_id: 'a', count: 2 },
+    ]);
+
+    expect(rules[0].ruleName).toBe('misconfigurations');
   });
 
   it('ignores rows with no rule name and treats a missing severity as Unknown', () => {

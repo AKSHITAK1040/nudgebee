@@ -8,15 +8,15 @@ import { SeverityIcon } from '@ui/SeverityIcon';
 import { toSeverityLevel } from '@utils/common';
 import ConfigRuleFindings from './ConfigRuleFindings';
 import { formatRuleName } from './utils';
-import { type ConfigRule, foldConfigRules } from './configRollup';
+import { type ConfigRule, foldConfigRules, rankSeverity } from './configRollup';
 
 const TABLE_ID = 'optimise-config-rules';
 
 const HEADERS = [
   { name: 'Severity', width: '8%' },
-  { name: 'Check', width: '56%' },
-  { name: 'Accounts', width: '16%' },
-  { name: 'Findings', width: '20%' },
+  { name: 'Check', width: '46%' },
+  { name: 'Accounts', width: '32%' },
+  { name: 'Findings', width: '14%' },
 ];
 
 interface ConfigRuleRollupProps {
@@ -79,14 +79,38 @@ const ConfigRuleRollup = ({ accountId, status, severity, accounts, onSelectRecom
   const visible = useMemo(() => {
     if (!severity?.length) return rules;
     const matching = rules.reduce<ConfigRule[]>((kept, rule) => {
-      const matched = severity.reduce((sum, band) => sum + (rule.countBySeverity[band] || 0), 0);
-      if (matched > 0) kept.push({ ...rule, count: matched });
+      let matched = 0;
+      let worst = 'Unknown';
+      for (const band of severity) {
+        const inBand = rule.countBySeverity[band] || 0;
+        if (inBand <= 0) continue;
+        matched += inBand;
+        if (rankSeverity(band) > rankSeverity(worst)) worst = band;
+      }
+      // The badge reports the worst band *within the selection*, not the worst
+      // the rule reaches: the count beside it is already the in-selection count,
+      // and a row reading "Critical · 159" for a check with 2 Critical and 159
+      // Medium describes two different sets of findings in one line.
+      if (matched > 0) kept.push({ ...rule, count: matched, severity: worst });
       return kept;
     }, []);
-    // Re-sorted because the counts just changed: the fold ordered by the total,
-    // and the list has to be ordered by the number it is showing.
-    return matching.sort((a, b) => b.count - a.count);
+    // Re-sorted because both keys just changed: the fold ordered by the rule's
+    // totals, and the list has to be ordered by the numbers it is showing.
+    return matching.sort((a, b) => rankSeverity(b.severity) - rankSeverity(a.severity) || b.count - a.count);
   }, [rules, severity]);
+
+  // The accounts a check fires in, named rather than counted — "3" says a check
+  // is not isolated but not which estate to go and fix. Sorted so the same set
+  // always reads the same way, and falling back to the id for an account that
+  // has not loaded yet rather than dropping it from the list.
+  const accountLabel = useCallback(
+    (accountIds: string[]) =>
+      accountIds
+        .map((id) => accounts?.[id]?.name || id)
+        .sort((a, b) => a.localeCompare(b))
+        .join(', ') || '—',
+    [accounts]
+  );
 
   const tableData = useMemo(
     () =>
@@ -111,11 +135,11 @@ const ConfigRuleRollup = ({ accountId, status, severity, accounts, onSelectRecom
             ),
             data: rule.ruleName,
           },
-          { component: <Text value={String(rule.accountIds.length)} />, data: rule.accountIds.length },
+          { component: <Text value={accountLabel(rule.accountIds)} showAutoEllipsis />, data: accountLabel(rule.accountIds) },
           { component: <Text value={rule.count.toLocaleString()} />, data: rule.count },
         ];
       }),
-    [visible]
+    [visible, accountLabel]
   );
 
   return (
