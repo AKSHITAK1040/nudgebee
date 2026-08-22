@@ -26,7 +26,9 @@ var summarizationCtxKey = summarizationCtxKeyType{}
 func summarizationChunkSize(maxTokens int, model string) int {
 	outputReserve := GetLlmMaxOutputTokens(model)
 	if outputReserve <= 0 {
-		outputReserve = 4096
+		// Must track the wire floor: budgeting for a smaller reserve than the
+		// request may actually emit lets the prompt+completion overrun the window.
+		outputReserve = DefaultMaxOutputTokensFloor
 	}
 	if outputReserve >= maxTokens {
 		outputReserve = maxTokens / 2 // tiny windows: never reserve the whole thing

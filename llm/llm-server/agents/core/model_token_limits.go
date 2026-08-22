@@ -227,6 +227,18 @@ func lookupModelTokenLimits(accountId, provider, model string) (modelTokenLimits
 
 // ResolveMaxOutputTokens returns the output-token ceiling for a model, or 0
 // when nothing is configured anywhere (caller applies its floor + WARN).
+// DefaultMaxOutputTokensFloor is applied when neither the per-account config key
+// nor the pricing catalog carries a max-output value. It is a floor, not a
+// per-model table: raising it does not reintroduce the code-based limits V878
+// removed (#36471), it only changes what an uncatalogued model gets.
+//
+// 4096 was chosen when the catalog did not exist and every model relied on it;
+// with the catalog covering the known models, the remainder are self-hosted
+// (Qwen, Nemotron, Gemma) whose real ceilings are far above 4096, and the low
+// floor cost them a continuation loop on every long response. 16384 matches the
+// lowest ceiling among catalogued chat models (gpt-4o).
+const DefaultMaxOutputTokensFloor = 16384
+
 func ResolveMaxOutputTokens(accountId, provider, model string) int {
 	if v := GetLLMModelIntConfig(accountId, provider, model, "llm_model_max_output_tokens", 0); v > 0 {
 		return v
