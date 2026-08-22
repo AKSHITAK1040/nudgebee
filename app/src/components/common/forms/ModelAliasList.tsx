@@ -89,7 +89,7 @@ export default function ModelAliasList({ value, onChange, disabled }: ModelAlias
           fontWeight: 'var(--ds-font-weight-semibold)',
         }}
       >
-        <span>Model name (clients call this)</span>
+        <span>Client model name</span>
         <span>Served model (sent to provider)</span>
         <span />
       </Box>
@@ -101,7 +101,7 @@ export default function ModelAliasList({ value, onChange, disabled }: ModelAlias
             onChange={(v: string) => setCell(i, 'name', v)}
             size='sm'
             disabled={disabled}
-            placeholder='same as served model'
+            placeholder='optional, e.g. gemini-fast'
             data-testid={`model-alias-name-${i}`}
           />
           <Input
@@ -139,8 +139,8 @@ export default function ModelAliasList({ value, onChange, disabled }: ModelAlias
       </Box>
 
       <Box sx={{ fontSize: 'var(--ds-text-caption)', color: 'var(--ds-gray-500)' }}>
-        Leave the name blank to address the model by its served id. Give it a distinct name to alias it — e.g. so two endpoints can serve the same
-        underlying model, or to expose a friendlier id to clients.
+        Add as many mappings as this account needs. Leave the client name blank to call the served model directly. These mappings are additive and do
+        not restrict other models available through the provider account.
       </Box>
     </Stack>
   );

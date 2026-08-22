@@ -390,6 +390,13 @@ func CreateIntegrationConfig(
 			if isUpdate && intgerationType == "llm" {
 				configForValidation = augmentLLMConfigWithStoredSecrets(ctx.GetContext(), ctx.GetSecurityContext().GetTenantId(), integrationId, integrationConfigValues)
 			}
+			// integration_config_name is stored on integrations.name and intentionally
+			// omitted from integration_config_values. Add it back only for validation so
+			// integrations can identify the row being edited without duplicating metadata.
+			configForValidation = append(slices.Clone(configForValidation), IntegrationConfigValue{
+				Name:  IntegrationConfigName,
+				Value: integrationConfigName,
+			})
 			validationErrors := integration.ValidateConfig(ctx.GetSecurityContext(), configForValidation, accId)
 			if len(validationErrors) > 0 {
 				return IntegrationDto{}, validationErrors[0]

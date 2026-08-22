@@ -55,17 +55,17 @@ func TestHandleChat_CustomUpstreamBeatsProviderAlias(t *testing.T) {
 	defer func() { config.Config.MaxRequestBodyBytes = prev }()
 
 	const colliding = "google/gemma-3-27b-it-maas" // "google/" also matches the Gemini alias
-	prevHook := customProviderHook
-	RegisterCustomProviderResolver(func(_, model string) (schemas.ModelProvider, schemas.Key, string, bool) {
+	prevHook := modelResolverHook
+	RegisterModelResolver(func(_, model string) (schemas.ModelProvider, schemas.Key, string, string, bool) {
 		if model != colliding {
-			return "", schemas.Key{}, "", false
+			return "", schemas.Key{}, "", "", false
 		}
 		// A refused-port URL so dispatch fails fast (no network) AFTER routing is decided.
 		return schemas.VLLM, schemas.Key{ID: "k", Models: schemas.WhiteList{"*"},
 				VLLMKeyConfig: &schemas.VLLMKeyConfig{URL: schemas.SecretVar{Val: "http://127.0.0.1:1"}, ModelName: model}},
-			"/v1/projects/p/locations/global/endpoints/openapi/chat/completions", true
+			model, "/v1/projects/p/locations/global/endpoints/openapi/chat/completions", true
 	})
-	t.Cleanup(func() { customProviderHook = prevHook })
+	t.Cleanup(func() { modelResolverHook = prevHook })
 
 	eng, err := engine.New(context.Background(), nil)
 	require.NoError(t, err)

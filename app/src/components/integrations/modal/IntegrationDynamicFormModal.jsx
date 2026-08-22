@@ -26,6 +26,7 @@ import apiTicketIntegrations from '@api1/tickets';
 import cache from '@lib/cache';
 import VmAgentCredentialsDialog from './VmAgentCredentialsDialog';
 import { docsUrl } from '@lib/externalUrls';
+import ModelAliasList from '@components/common/forms/ModelAliasList';
 
 // Group-header icon for the account dropdown — maps a group (the account's
 // cloud_provider: K8S/AWS/Azure/GCP) to its provider icon. Same pattern as the
@@ -1965,7 +1966,35 @@ const IntegrationDynamicFormModal = ({
                           break;
 
                         case 'string':
-                          if (field.possible_values?.length > 0) {
+                          if (field.widget === 'model_alias_list') {
+                            inputComponent = (
+                              <Box key={`wrapper-${key}`} sx={{ mb: ds.space[1] }}>
+                                <Typography
+                                  variant='body2'
+                                  sx={{
+                                    color: ds.gray[400],
+                                    fontSize: 'var(--ds-text-small)',
+                                    lineHeight: 1.5,
+                                    mb: ds.space[2],
+                                    pl: ds.space[1],
+                                  }}
+                                >
+                                  {field.description}
+                                  {isRequired && <span style={{ color: ds.red[500] }}> *</span>}
+                                </Typography>
+                                <ModelAliasList
+                                  value={formValues[key] || ''}
+                                  onChange={(value) => handleChange(key, value)}
+                                  disabled={field.disabled || field.allow_edit === false}
+                                />
+                                {errorText && (
+                                  <Typography variant='body2' color='error' sx={{ mt: 0.5, fontSize: 'var(--ds-text-small)' }}>
+                                    {errorText}
+                                  </Typography>
+                                )}
+                              </Box>
+                            );
+                          } else if (field.possible_values?.length > 0) {
                             inputComponent = (
                               <Box key={`wrapper-${key}`} sx={{ mb: ds.space[1] }}>
                                 <Typography

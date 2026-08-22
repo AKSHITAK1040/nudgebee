@@ -34,6 +34,26 @@ Two forms are accepted for the `model` field:
 A name that matches neither is a clear `400 invalid_request_error`, never a guessed
 provider.
 
+### Tenant model mappings and routing tiers
+
+Every LLM Gateway provider account may define zero or more model mappings. A mapping
+binds a client-facing name to the exact account credential and served model, so one
+Gemini or Vertex account can expose many names and two accounts for the same provider
+remain distinguishable:
+
+```
+gemini-fast  → team-gemini account  → gemini-2.5-flash
+vertex-qwen  → vertex-model-garden  → Qwen/Qwen3.6-35B-A3B-FP8
+```
+
+Mappings are additive, not an allowlist. Models omitted from the account's mapping rows
+remain callable through their normal provider-qualified names. A routing tier such as
+`nb-fast` is separate: it represents policy intent and resolves through routing rules;
+it is not an account-level model mapping.
+
+Resolution order is: exact tenant model mapping, explicit `provider/model`, recognized
+bare native model, then an enabled routing tier.
+
 `GET /v1/models` returns an advisory list of current-generation models (in
 `provider/model` form) for tool model-pickers. It is **not** a whitelist — any valid
 `provider/model` (or well-known bare name) works whether listed or not.
