@@ -16,6 +16,9 @@ import { containsLink, snakeToTitleCase, safeJSONParse } from 'src/utils/common'
 import { ListingLayout } from '@ui/ListingLayout';
 import CustomTable from '@shared/tables/CustomTable';
 import FilterDropdown from '@ui/FilterDropdown';
+import WidgetCard from '@ui/WidgetCard';
+import { Stat } from '@ui/Stat';
+import { cardTabSx, cardKeyDown } from './utils';
 import { SeverityIcon, type SeverityLevel } from '@ui/SeverityIcon';
 import DownloadButton from '@shared/buttons/DownloadButton';
 import CloudProviderIcon from '@shared/icons/CloudIcon';
@@ -133,6 +136,15 @@ const STATUS_OPTIONS = [
   { label: 'Failed', value: 'Failed' },
 ];
 
+// The stat cards above the listing, one per lifecycle status. Ordered the way a
+// reader scans for trouble — what worked, what is still running, what did not —
+// rather than by the STATUS_OPTIONS order, which is the dropdown's.
+const STATUS_CARDS = [
+  { status: 'Success', label: 'Success', tooltip: 'Resolutions that completed successfully.' },
+  { status: 'InProgress', label: 'In Progress', tooltip: 'Resolutions that have been dispatched and have not finished yet.' },
+  { status: 'Failed', label: 'Failed', tooltip: 'Resolutions that failed. Open one to see why, and retry it from its row.' },
+] as const;
+
 /**
  * Cross-account recommendation resolutions. Mirrors the per-account
  * `ListingRecommendationResolution` listing (mounted under each cloud-account /
@@ -151,6 +163,10 @@ const ResolutionsView = () => {
   const [rowsPerPage, setRowsPerPage] = useState(apiUser.getUserPreferencesTablePageSize());
   const [rawRows, setRawRows] = useState<any[]>([]);
   const [totalCount, setTotalCount] = useState(0);
+
+  // Resolution counts per status, for the stat cards above the listing.
+  const [statusCounts, setStatusCounts] = useState<Record<string, number>>({});
+  const [cardsLoading, setCardsLoading] = useState(false);
 
   // Accounts map (id → { name, cloud_provider }) for the Account column + filter.
   const [accounts, setAccounts] = useState<Record<string, { name: string; cloud_provider: string }>>({});
@@ -219,6 +235,34 @@ const ResolutionsView = () => {
   useEffect(() => {
     setPage(0);
   }, [deepLinkRecId]);
+
+  // Deliberately not keyed on selectedStatus, page or rowsPerPage: the cards show
+  // the split across every status, so narrowing to the selected one would collapse
+  // them into a restatement of the row count — and paging is not a change of scope.
+  useEffect(() => {
+    if (!router.isReady) return;
+    let active = true;
+    setCardsLoading(true);
+    apiRecommendations
+      .getRecommendationResolutionStatusCounts({
+        accountId: selectedAccounts,
+        type: selectedType,
+        resolverType: selectedResolver,
+        recommendationId: deepLinkRecId,
+      })
+      .then((counts) => {
+        if (active) setStatusCounts(counts);
+      })
+      .catch(() => {
+        if (active) setStatusCounts({});
+      })
+      .finally(() => {
+        if (active) setCardsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedAccounts, selectedType, selectedResolver, deepLinkRecId, router.isReady, refreshKey]);
 
   useEffect(() => {
     // Wait for router.query hydration so a deep-linked ?id= scopes the first fetch
@@ -430,175 +474,242 @@ const ResolutionsView = () => {
     [rawRows, accounts, retryingId, handleRetry]
   );
 
+  // Summed across every status the backend reports, not just the three carded
+  // ones — an unrecognised status must still be counted somewhere, and the
+  // listing's totalCount cannot serve here because it honours the status filter.
+  const allResolutionsCount = useMemo(() => Object.values(statusCounts).reduce((sum, n) => sum + n, 0), [statusCounts]);
+
+  const handleStatusCardClick = useCallback((status: string) => {
+    setSelectedStatus((current) => (current === status ? '' : status));
+    setPage(0);
+  }, []);
+
+  const handleAllCardClick = useCallback(() => {
+    setSelectedStatus('');
+    setPage(0);
+  }, []);
+
   return (
-    <ListingLayout id={`${resolutionTableId}-listing-layout`}>
-      <ListingLayout.Toolbar
-        data-testid='resolutions-filter-toolbar'
-        actions={<DownloadButton id={`${resolutionTableId}-download`} onClick={() => ({ tableId: resolutionTableId })} />}
-      >
-        <FilterDropdown
-          id='resolutions-filter-account'
-          label='Account'
-          multiple
-          grouped
-          groupIcon={renderAccountGroupIcon}
-          options={accountFilterOptions}
-          value={accountFilterOptions.filter((o) => selectedAccounts.includes(o.value))}
-          onSelect={(_e: any, items: any) => {
-            setSelectedAccounts((Array.isArray(items) ? items : []).map((it: any) => it.value));
-            setPage(0);
-          }}
-        />
-        <FilterDropdown
-          id='resolutions-filter-status'
-          label='Status'
-          options={STATUS_OPTIONS}
-          value={STATUS_OPTIONS.find((o) => o.value === selectedStatus) ?? null}
-          onSelect={(_e: any, item: any) => {
-            setSelectedStatus(item?.value || '');
-            setPage(0);
-          }}
-        />
-        <FilterDropdown
-          id='resolutions-filter-recommendation'
-          label='Recommendation'
-          options={(recommendationTypes || []).filter(Boolean).map((t) => ({ label: t, value: t }))}
-          value={selectedType ? { label: selectedType, value: selectedType } : null}
-          onSelect={(_e: any, item: any) => {
-            setSelectedType(item?.value || '');
-            setPage(0);
-          }}
-        />
-        <FilterDropdown
-          id='resolutions-filter-resolver'
-          label='Resolver'
-          options={(resolverTypes || []).filter(Boolean).map((t) => ({ label: t, value: t }))}
-          value={selectedResolver ? { label: selectedResolver, value: selectedResolver } : null}
-          onSelect={(_e: any, item: any) => {
-            setSelectedResolver(item?.value || '');
-            setPage(0);
-          }}
-        />
-      </ListingLayout.Toolbar>
+    <Box sx={{ p: '0px' }} data-testid='optimize-resolutions-page'>
+      {/* Stat cards sit ABOVE the listing shell, per the ListingLayout contract. */}
+      <Box sx={{ display: 'flex', gap: ds.space[3], mt: ds.space[4] }}>
+        <WidgetCard
+          role='button'
+          tabIndex={0}
+          aria-pressed={selectedStatus === ''}
+          data-testid='resolutions-card-all'
+          onClick={handleAllCardClick}
+          onKeyDown={cardKeyDown(handleAllCardClick)}
+          sx={cardTabSx(selectedStatus === '', false)}
+        >
+          <Stat
+            size='md'
+            label='All Resolutions'
+            info={{ tooltip: 'Every resolution attempted on a recommendation, across all statuses. Click to clear the status filter.' }}
+            value={cardsLoading ? '…' : allResolutionsCount.toLocaleString()}
+          />
+        </WidgetCard>
 
-      <ListingLayout.Body>
-        {deepLinkRecId && (
-          <Box
-            sx={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: ds.space[2],
-              mb: ds.space[3],
-              px: ds.space[3],
-              py: ds.space[2],
-              backgroundColor: ds.background[100],
-              borderRadius: ds.radius.sm,
+        {STATUS_CARDS.map(({ status, label, tooltip }) => {
+          const count = statusCounts[status] || 0;
+          const pressed = selectedStatus === status;
+          // A zero card is muted and inert rather than tooltipped: the count on its
+          // face already says why, and WidgetCard is not a forwardRef, so a MUI
+          // Tooltip wrapped round it cannot hold the ref it needs to position.
+          const muted = count === 0 && !pressed && !cardsLoading;
+          return (
+            <WidgetCard
+              key={status}
+              role='button'
+              tabIndex={muted ? -1 : 0}
+              aria-pressed={pressed}
+              aria-disabled={muted || undefined}
+              data-testid={`resolutions-card-${status.toLowerCase()}`}
+              onClick={muted ? undefined : () => handleStatusCardClick(status)}
+              onKeyDown={muted ? undefined : cardKeyDown(() => handleStatusCardClick(status))}
+              sx={cardTabSx(pressed, muted)}
+            >
+              <Stat
+                size='md'
+                label={label}
+                // A muted card is inert, so it does not get told it can be clicked.
+                info={{ tooltip: muted ? tooltip : `${tooltip} Click to filter the list; click again to unselect.` }}
+                value={cardsLoading ? '…' : count.toLocaleString()}
+              />
+            </WidgetCard>
+          );
+        })}
+      </Box>
+
+      <ListingLayout id={`${resolutionTableId}-listing-layout`} sx={{ mt: ds.space[4] }}>
+        <ListingLayout.Toolbar
+          data-testid='resolutions-filter-toolbar'
+          actions={<DownloadButton id={`${resolutionTableId}-download`} onClick={() => ({ tableId: resolutionTableId })} />}
+        >
+          <FilterDropdown
+            id='resolutions-filter-account'
+            label='Account'
+            multiple
+            grouped
+            groupIcon={renderAccountGroupIcon}
+            options={accountFilterOptions}
+            value={accountFilterOptions.filter((o) => selectedAccounts.includes(o.value))}
+            onSelect={(_e: any, items: any) => {
+              setSelectedAccounts((Array.isArray(items) ? items : []).map((it: any) => it.value));
+              setPage(0);
             }}
-          >
-            <Typography sx={{ fontSize: ds.text.body, color: ds.gray[700] }}>
-              Showing resolutions for the recommendation from your notification.
-            </Typography>
-            <Link href='/optimise#resolutions' style={{ fontSize: ds.text.body, fontWeight: ds.weight.medium }}>
-              View all resolutions
-            </Link>
-          </Box>
-        )}
-        <CustomTable
-          id={resolutionTableId}
-          headers={RESOLUTION_HEADERS}
-          tableData={tableData}
-          rowsPerPage={rowsPerPage}
-          totalRows={totalCount}
-          onPageChange={changePage}
-          pageNumber={page + 1}
-          loading={loading}
-          showExpandable={true}
-          expandable={{
-            tabs: [
-              {
-                text: 'Details',
-                componentFn: (_option: any, drilldownQuery: any) => {
-                  if (drilldownQuery?.typeReferenceId === 'cli_execution' && drilldownQuery?.recommendationId) {
-                    return (
-                      <CommandExecutionHistory
-                        accountId={drilldownQuery.accountId}
-                        recommendationId={drilldownQuery.recommendationId}
-                        resolutionId={drilldownQuery.resolutionId}
-                      />
-                    );
-                  }
+          />
+          <FilterDropdown
+            id='resolutions-filter-status'
+            label='Status'
+            options={STATUS_OPTIONS}
+            value={STATUS_OPTIONS.find((o) => o.value === selectedStatus) ?? null}
+            onSelect={(_e: any, item: any) => {
+              setSelectedStatus(item?.value || '');
+              setPage(0);
+            }}
+          />
+          <FilterDropdown
+            id='resolutions-filter-recommendation'
+            label='Recommendation'
+            options={(recommendationTypes || []).filter(Boolean).map((t) => ({ label: t, value: t }))}
+            value={selectedType ? { label: selectedType, value: selectedType } : null}
+            onSelect={(_e: any, item: any) => {
+              setSelectedType(item?.value || '');
+              setPage(0);
+            }}
+          />
+          <FilterDropdown
+            id='resolutions-filter-resolver'
+            label='Resolver'
+            options={(resolverTypes || []).filter(Boolean).map((t) => ({ label: t, value: t }))}
+            value={selectedResolver ? { label: selectedResolver, value: selectedResolver } : null}
+            onSelect={(_e: any, item: any) => {
+              setSelectedResolver(item?.value || '');
+              setPage(0);
+            }}
+          />
+        </ListingLayout.Toolbar>
 
-                  const raw = drilldownQuery?.recommendation?.data?.data;
-                  let parsed = raw;
-                  if (typeof raw === 'string') {
-                    try {
-                      parsed = JSON.parse(raw);
-                    } catch {
-                      parsed = raw;
+        <ListingLayout.Body>
+          {deepLinkRecId && (
+            <Box
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: ds.space[2],
+                mb: ds.space[3],
+                px: ds.space[3],
+                py: ds.space[2],
+                backgroundColor: ds.background[100],
+                borderRadius: ds.radius.sm,
+              }}
+            >
+              <Typography sx={{ fontSize: ds.text.body, color: ds.gray[700] }}>
+                Showing resolutions for the recommendation from your notification.
+              </Typography>
+              <Link href='/optimise#resolutions' style={{ fontSize: ds.text.body, fontWeight: ds.weight.medium }}>
+                View all resolutions
+              </Link>
+            </Box>
+          )}
+          <CustomTable
+            id={resolutionTableId}
+            headers={RESOLUTION_HEADERS}
+            tableData={tableData}
+            rowsPerPage={rowsPerPage}
+            totalRows={totalCount}
+            onPageChange={changePage}
+            pageNumber={page + 1}
+            loading={loading}
+            showExpandable={true}
+            expandable={{
+              tabs: [
+                {
+                  text: 'Details',
+                  componentFn: (_option: any, drilldownQuery: any) => {
+                    if (drilldownQuery?.typeReferenceId === 'cli_execution' && drilldownQuery?.recommendationId) {
+                      return (
+                        <CommandExecutionHistory
+                          accountId={drilldownQuery.accountId}
+                          recommendationId={drilldownQuery.recommendationId}
+                          resolutionId={drilldownQuery.resolutionId}
+                        />
+                      );
                     }
-                  }
 
-                  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length > 0) {
+                    const raw = drilldownQuery?.recommendation?.data?.data;
+                    let parsed = raw;
+                    if (typeof raw === 'string') {
+                      try {
+                        parsed = JSON.parse(raw);
+                      } catch {
+                        parsed = raw;
+                      }
+                    }
+
+                    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Object.keys(parsed).length > 0) {
+                      return (
+                        <Box
+                          sx={{
+                            padding: ds.space[4],
+                            backgroundColor: ds.background[100],
+                            borderRadius: ds.radius.sm,
+                            border: `1px solid ${ds.gray[300]}`,
+                          }}
+                        >
+                          <KeyValueList data={parsed} />
+                        </Box>
+                      );
+                    }
+
+                    const fallbackText = parsed ? (typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2)) : 'No Details Available';
                     return (
-                      <Box
+                      <Typography
                         sx={{
                           padding: ds.space[4],
                           backgroundColor: ds.background[100],
                           borderRadius: ds.radius.sm,
                           border: `1px solid ${ds.gray[300]}`,
+                          fontSize: ds.text.body,
+                          color: ds.gray[700],
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
                         }}
                       >
-                        <KeyValueList data={parsed} />
-                      </Box>
+                        {fallbackText}
+                      </Typography>
                     );
-                  }
-
-                  const fallbackText = parsed ? (typeof parsed === 'string' ? parsed : JSON.stringify(parsed, null, 2)) : 'No Details Available';
-                  return (
-                    <Typography
-                      sx={{
-                        padding: ds.space[4],
-                        backgroundColor: ds.background[100],
-                        borderRadius: ds.radius.sm,
-                        border: `1px solid ${ds.gray[300]}`,
-                        fontSize: ds.text.body,
-                        color: ds.gray[700],
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                      }}
-                    >
-                      {fallbackText}
-                    </Typography>
-                  );
+                  },
                 },
-              },
-              {
-                text: 'Message',
-                componentFn: (_option: any, drilldownQuery: any) => {
-                  const messageData = drilldownQuery?.message || 'No Message Available';
-                  return (
-                    <Typography
-                      sx={{
-                        padding: ds.space[4],
-                        backgroundColor: ds.background[100],
-                        borderRadius: ds.radius.sm,
-                        border: `1px solid ${ds.gray[300]}`,
-                        fontSize: ds.text.body,
-                        color: ds.gray[700],
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word',
-                      }}
-                    >
-                      {messageData}
-                    </Typography>
-                  );
+                {
+                  text: 'Message',
+                  componentFn: (_option: any, drilldownQuery: any) => {
+                    const messageData = drilldownQuery?.message || 'No Message Available';
+                    return (
+                      <Typography
+                        sx={{
+                          padding: ds.space[4],
+                          backgroundColor: ds.background[100],
+                          borderRadius: ds.radius.sm,
+                          border: `1px solid ${ds.gray[300]}`,
+                          fontSize: ds.text.body,
+                          color: ds.gray[700],
+                          whiteSpace: 'pre-wrap',
+                          wordBreak: 'break-word',
+                        }}
+                      >
+                        {messageData}
+                      </Typography>
+                    );
+                  },
                 },
-              },
-            ],
-          }}
-        />
-      </ListingLayout.Body>
-    </ListingLayout>
+              ],
+            }}
+          />
+        </ListingLayout.Body>
+      </ListingLayout>
+    </Box>
   );
 };
 

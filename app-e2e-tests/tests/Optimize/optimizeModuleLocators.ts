@@ -12,7 +12,7 @@ import { OptimizeLocators } from "./OptimizeLocators";
 // Rung choices below follow the qa-automation-code-check ladder against what each of
 // those files actually renders, measured rather than assumed:
 //   AnchorComponent.jsx  data-testid=0   SummaryView.tsx    data-testid=0
-//   OptimizeNewPage.tsx  data-testid=6   ResolutionsView.tsx data-testid=1
+//   OptimizeNewPage.tsx  data-testid=6   ResolutionsView.tsx data-testid=4
 //   SecurityView.tsx     data-testid=3   FilterDropdown.jsx  data-testid=0
 // So the Recommendations chip rows, the Resolutions toolbar and the Security states
 // are reached by testid; everything the app leaves untestid'd falls to its id.

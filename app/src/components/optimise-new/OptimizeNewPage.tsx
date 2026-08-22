@@ -64,6 +64,8 @@ import {
   safeParseJSON,
   STATUS_FILTER_OPTIONS,
   dismissalLabel,
+  cardTabSx,
+  cardKeyDown,
   type SortField,
   type SortDirection,
 } from './utils';
@@ -173,37 +175,6 @@ const WIDGET_CATEGORY_TOOLTIPS: Record<string, string> = {
   InfraUpgrade: 'Infrastructure upgrade recommendations including node groups, instance types, and cluster versions',
   Configuration: 'Configuration best practices and policy compliance recommendations',
   K8sSpotRecommendation: 'Workloads eligible for Spot/preemptible instances to reduce compute costs',
-};
-
-// Shared chrome for the clickable stat-card tabs: the active card carries the
-// same blue border + tint the Troubleshoot summary widgets use for their active
-// drill-down; zero-count cards render muted and inert.
-const cardTabSx = (pressed: boolean, muted: boolean) => ({
-  flex: 1,
-  minWidth: 0,
-  mt: 0,
-  padding: `${ds.space[3]} ${ds.space[4]}`,
-  ...(muted
-    ? { opacity: 0.5 }
-    : {
-        cursor: 'pointer',
-        // Stat and Chip pin their own `cursor: default`, which would otherwise leave
-        // the hand pointer showing only on the card's bare padding. `&&` outranks them.
-        '&& *': { cursor: 'pointer' },
-        transition: `border-color ${ds.motion.micro} ${ds.motion.ease}, background-color ${ds.motion.micro} ${ds.motion.ease}`,
-        // Re-assert the blue border on hover for the active card — the gray hover
-        // border would otherwise mask its highlight while hovering.
-        '&:hover': { borderColor: pressed ? ds.blue[400] : ds.gray[400] },
-      }),
-  ...(pressed ? { borderColor: ds.blue[400], backgroundColor: ds.blue[100] } : {}),
-});
-
-// Enter/Space activation so the card tabs work as buttons for keyboard users.
-const cardKeyDown = (activate: () => void) => (e: React.KeyboardEvent) => {
-  if (e.key === 'Enter' || e.key === ' ') {
-    e.preventDefault();
-    activate();
-  }
 };
 
 /** Parse a URL query param that may be a string or string[] into a string[] */

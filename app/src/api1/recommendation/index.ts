@@ -2359,6 +2359,68 @@ const apiRecommendations = {
       },
     };
   },
+  /**
+   * Resolution counts per lifecycle status, for the Resolutions tab's stat cards.
+   *
+   * Deliberately ignores the status filter the listing applies: the cards show
+   * the split across every status and are how a reader discovers there are
+   * failures at all, so narrowing by the selected one would collapse them to a
+   * single card restating the row count. One grouped query on the same aggregate
+   * the listing already counts with.
+   */
+  async getRecommendationResolutionStatusCounts({
+    accountId,
+    type,
+    resolverType,
+    recommendationId,
+  }: {
+    accountId?: string | string[];
+    type?: string;
+    resolverType?: string;
+    recommendationId?: string;
+  } = {}): Promise<Record<string, number>> {
+    if (accountId === 'demo') {
+      return {};
+    }
+    const query = `
+    query RecommendationResolutionStatusCounts($where: RecommendationResolutionGroupingsWhereRequest) {
+      recommendation_resolution: recommendation_resolution_groupings_v2(where: $where, group_by: ["status"]) {
+        rows {
+          status
+          count
+        }
+      }
+    }
+    `;
+    const where: any = {};
+    // Mirrors getRecommendationResolution's scoping: an array of ids on the
+    // cross-account tab, a single id per-account, omitted ⇒ every account.
+    if (Array.isArray(accountId)) {
+      if (accountId.length > 0) {
+        where.account_id = { _in: accountId };
+      }
+    } else if (accountId) {
+      where.account_id = { _eq: accountId };
+    }
+    if (type) {
+      where.type = { _eq: type };
+    }
+    if (resolverType) {
+      where.resolver_type = { _eq: resolverType };
+    }
+    if (recommendationId) {
+      where.recommendation_id = { _eq: recommendationId };
+    }
+
+    const response = await queryGraphQL(query, 'RecommendationResolutionStatusCounts', { where });
+    const rows = response?.data?.data?.recommendation_resolution?.rows || [];
+    return rows.reduce((counts: Record<string, number>, row: any) => {
+      if (row?.status) {
+        counts[row.status] = (counts[row.status] || 0) + (Number(row.count) || 0);
+      }
+      return counts;
+    }, {});
+  },
   async getDistinctResolverTypes(filter = 'resolver_type') {
     const query = `
     query getDistinctResolverTypes($where: RecommendationResolutionGroupingsWhereRequest) {
