@@ -17,6 +17,7 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/config"
 	"nudgebee/services/internal/database"
+	"nudgebee/services/localagent"
 
 	"github.com/Cyprinus12138/otelgin"
 	"github.com/gin-contrib/pprof"
@@ -205,6 +206,23 @@ func main() {
 	var meter = otel.Meter(config.SERVICE_NAME)
 
 	api.RunEEBootstrapHooks(logger)
+
+	// Adopt the credential the chart generated for the bundled in-cluster agent.
+	// Inert unless LOCAL_AGENT_ACCESS_KEY/SECRET are set. Logged, not fatal: a
+	// server that cannot register its own agent must still serve.
+	//
+	// Synchronous, matching RunEEBootstrapHooks above and its documented "must
+	// complete before requests arrive" contract, but bounded — the liveness and
+	// readiness probes declare no initialDelaySeconds, so an unbounded query
+	// against an unresponsive database would burn the probe budget and get the
+	// pod killed before it ever served. 10s mirrors the license feature-flag
+	// reconcile's own bound.
+	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := localagent.Reconcile(bootCtx, logger); err != nil {
+		logger.Error("local agent registration failed; the bundled cluster will not appear until this is resolved", "error", err)
+	}
+	cancelBoot()
+
 	api.ConfigureRoutes(r, &tracer, &meter, logger)
 
 	port := os.Getenv("PORT")

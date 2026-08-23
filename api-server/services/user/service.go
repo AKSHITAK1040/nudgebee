@@ -11,6 +11,7 @@ import (
 	"nudgebee/services/config"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/internal/database/models"
+	"nudgebee/services/localagent"
 	"nudgebee/services/security"
 	"nudgebee/services/tenant"
 	"strings"
@@ -1344,6 +1345,17 @@ func OnboardUser(context *security.RequestContext, request UserOnboardRequest) (
 			return UserOnboardResponse{}, fmt.Errorf("error creating tenant: %w", err)
 		}
 		tenantId = resp.Id
+	}
+
+	// 2b. Register the bundled in-cluster agent, if this install ships one.
+	// This is the first point where both a tenant and a user exist, and
+	// cloud_accounts needs both. Inert unless the chart set LOCAL_AGENT_*.
+	// Logged and continued like the steps below — a failure here must not fail
+	// the login that triggered it.
+	if tenantId != "" && userId != "" {
+		if err := localagent.ReconcileForTenant(context.GetContext(), context.GetLogger(), tenantId, userId); err != nil {
+			context.GetLogger().Error("local agent registration failed; the bundled cluster will not appear until this is resolved", "error", err)
+		}
 	}
 
 	// 3. Assign role (if provided)

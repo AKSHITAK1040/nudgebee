@@ -37,6 +37,15 @@ type appConfig struct {
 
 	NudgebeeEncryptionKey string `mapstructure:"nudgebee_encryption_key"`
 
+	// Credential the server chart generates for the in-cluster agent it bundles
+	// (agent.enabled). The same key/secret is handed to the agent itself, so
+	// the server's only job is to create the matching account and agent rows.
+	// Empty on every install that does not bundle the agent, which makes the
+	// reconcile a no-op.
+	LocalAgentAccessKey    string `mapstructure:"local_agent_access_key"`
+	LocalAgentAccessSecret string `mapstructure:"local_agent_access_secret"`
+	LocalAgentClusterName  string `mapstructure:"local_agent_cluster_name"`
+
 	ClickhouseHost     string `mapstructure:"clickhouse_host"`
 	ClickhouseUser     string `mapstructure:"clickhouse_user"`
 	ClickhousePassword string `mapstructure:"clickhouse_password"`
@@ -342,6 +351,12 @@ func init() {
 	viper.SetDefault("env", "")
 	viper.SetDefault("nudgebee_db_ssl_enabled", "true")
 	viper.SetDefault("service_api_server_url", "http://services-server:8000")
+
+	// Bundled in-cluster agent. Empty key/secret means the install does not
+	// bundle an agent and the reconcile stays inert.
+	viper.SetDefault("local_agent_access_key", "")
+	viper.SetDefault("local_agent_access_secret", "")
+	viper.SetDefault("local_agent_cluster_name", "in-cluster")
 
 	// viper requires default values or bind.. else Unmarshal skips fields with no default values
 	viper.SetDefault("action_api_server_token", "")
