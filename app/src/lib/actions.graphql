@@ -7836,6 +7836,7 @@ type AiConversationToolCall {
   references: String
   tool_id: String
   status: String
+  metadata: String
   created_at: timestamptz!
   updated_at: timestamptz!
 }
@@ -12298,4 +12299,3 @@ type DashboardDeleteResponse {
 scalar Datetime
 
 scalar Json
-

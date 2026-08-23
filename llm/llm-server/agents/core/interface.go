@@ -221,6 +221,16 @@ type NBAgentPlannerToolAction struct {
 	// persisted before this field existed, which are then replayed one per
 	// message exactly as before.
 	TurnID string `json:"turn_id,omitempty"`
+	// ExecutionBatchID groups tool calls that were emitted in one multi-action
+	// planner turn. ExecutionMode records whether the shared executor actually
+	// dispatched that batch through its parallel or sequential path; this is a
+	// dispatch-strategy marker, not a claim that calls overlapped in wall-clock
+	// time. A safety pre-flight can downgrade a model-emitted batch to sequential.
+	ExecutionBatchID          string `json:"execution_batch_id,omitempty"`
+	ExecutionMode             string `json:"execution_mode,omitempty"`
+	ExecutionBatchSize        int    `json:"execution_batch_size,omitempty"`
+	ExecutionParallelismLimit int    `json:"execution_parallelism_limit,omitempty"`
+	SequentialFallbackReason  string `json:"sequential_fallback_reason,omitempty"`
 	// ThoughtSignature is the provider's opaque record of the reasoning that
 	// produced THIS tool call. Gemini 2.5/3.x thinking models return one with
 	// each native function call and require it replayed verbatim whenever that

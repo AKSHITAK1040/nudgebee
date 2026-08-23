@@ -81,6 +81,7 @@ export interface ConversationV3ToolCall {
   references: string | null;
   tool_id: string | null;
   status: string;
+  metadata: string | null;
   created_at: string;
   updated_at: string;
 }

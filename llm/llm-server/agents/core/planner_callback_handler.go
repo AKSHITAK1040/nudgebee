@@ -118,6 +118,56 @@ func mergeToolResponseMetadata(metadata *toolcore.NBToolResponseMetadata, additi
 	}
 }
 
+func actionExecutionMetadata(action NBAgentPlannerToolAction) map[string]any {
+	if action.ExecutionBatchID == "" {
+		return nil
+	}
+	metadata := map[string]any{
+		"execution_batch_id":   action.ExecutionBatchID,
+		"execution_mode":       action.ExecutionMode,
+		"execution_batch_size": action.ExecutionBatchSize,
+	}
+	if action.ExecutionParallelismLimit > 0 {
+		metadata["execution_parallelism_limit"] = action.ExecutionParallelismLimit
+	}
+	if action.SequentialFallbackReason != "" {
+		metadata["sequential_fallback_reason"] = action.SequentialFallbackReason
+	}
+	return metadata
+}
+
+func mergeToolResponseMetadataWithAction(metadata *toolcore.NBToolResponseMetadata, additionalDetails map[string]any, action NBAgentPlannerToolAction) ([]byte, error) {
+	executionMetadata := actionExecutionMetadata(action)
+	if len(additionalDetails) == 0 && len(executionMetadata) == 0 {
+		return mergeToolResponseMetadata(metadata, additionalDetails)
+	}
+	combined := maps.Clone(additionalDetails)
+	if combined == nil {
+		combined = map[string]any{}
+	}
+	for _, key := range []string{
+		"execution_batch_id",
+		"execution_mode",
+		"execution_batch_size",
+		"execution_parallelism_limit",
+		"sequential_fallback_reason",
+	} {
+		delete(combined, key)
+	}
+	maps.Copy(combined, executionMetadata)
+	if _, err := common.MarshalJson(combined); err != nil && len(executionMetadata) > 0 {
+		// Tool-supplied AdditionalDetails may contain values encoding/json cannot
+		// marshal. Preserve the executor-owned batch marker even when that optional
+		// telemetry must be discarded.
+		return mergeToolResponseMetadata(metadata, executionMetadata)
+	}
+	out, err := mergeToolResponseMetadata(metadata, combined)
+	if err == nil || len(executionMetadata) == 0 {
+		return out, err
+	}
+	return mergeToolResponseMetadata(metadata, executionMetadata)
+}
+
 func (h *plannerExecutorCallbackHandler) findTool(toolName string) (toolcore.NBTool, bool) {
 	// check if it's a client tool first
 	for _, ct := range h.request.ClientTools {
@@ -186,7 +236,11 @@ func (h *plannerExecutorCallbackHandler) BeforeToolCall(toolcall NBAgentPlannerT
 			memoryRefsJSON = nil
 		}
 	}
-	err := GetConversationDao().SaveConversationToolCall(h.request.ConversationId, h.request.AccountId, userId, h.request.MessageId, h.request.AgentId, toolcall.ToolID, toolcall.Tool, stripNullBytes(parameters), stripNullBytes(log), stripNullBytes(sqlArgs), "", toolcore.NBToolResponseStatusInProgress, tool.GetType(), nil, nil, nil, memoryRefsJSON)
+	metadataJSON, mErr := mergeToolResponseMetadataWithAction(nil, nil, toolcall)
+	if mErr != nil {
+		h.ctx.GetLogger().Warn("toolcallbackhandler: failed to marshal tool execution metadata", "error", mErr)
+	}
+	err := GetConversationDao().SaveConversationToolCall(h.request.ConversationId, h.request.AccountId, userId, h.request.MessageId, h.request.AgentId, toolcall.ToolID, toolcall.Tool, stripNullBytes(parameters), stripNullBytes(log), stripNullBytes(sqlArgs), "", toolcore.NBToolResponseStatusInProgress, tool.GetType(), nil, nil, metadataJSON, memoryRefsJSON)
 	if err != nil {
 		h.ctx.GetLogger().Error("toolcallbackhandler: unable to save tool call", "error", err.Error())
 	}
@@ -222,7 +276,7 @@ func (h *plannerExecutorCallbackHandler) AfterToolCallResponse(tcr NBAgentPlanne
 	// with the non-internal subset of AdditionalDetails (per-tool extras like
 	// delegate_agent's iterations_used / tools_used). Failure is non-fatal —
 	// log and persist NULL so the row still lands.
-	metadataJSON, mErr := mergeToolResponseMetadata(response.Metadata, response.AdditionalDetails)
+	metadataJSON, mErr := mergeToolResponseMetadataWithAction(response.Metadata, response.AdditionalDetails, tcr)
 	if mErr != nil {
 		h.ctx.GetLogger().Warn("toolcallbackhandler: failed to marshal tool metadata", "error", mErr)
 	}

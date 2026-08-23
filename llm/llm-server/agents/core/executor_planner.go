@@ -49,6 +49,32 @@ func init() {
 
 const plannerDummyTool = "planner"
 
+const (
+	executionModeParallelDispatch   = "parallel_dispatch"
+	executionModeSequentialDispatch = "sequential_dispatch"
+)
+
+func plannerSupportsExecutionBatches(planner NBAgentPlanner) bool {
+	switch planner.(type) {
+	case *NBReActPlanner3, *NBReActPlanner4:
+		return true
+	default:
+		return false
+	}
+}
+
+func annotateExecutionBatch(actions []NBAgentPlannerToolAction, batchID, mode, fallbackReason string, parallelismLimit int) {
+	for i := range actions {
+		actions[i].ExecutionBatchID = batchID
+		actions[i].ExecutionMode = mode
+		actions[i].ExecutionBatchSize = len(actions)
+		actions[i].SequentialFallbackReason = fallbackReason
+		if mode == executionModeParallelDispatch {
+			actions[i].ExecutionParallelismLimit = parallelismLimit
+		}
+	}
+}
+
 // plannerToolNoData is the observation written when a tool succeeds (exit 0,
 // status=Success) but produces empty stdout. Many CLI mutations are silent on
 // success (e.g. `gh run rerun`, `kubectl apply`, `helm upgrade`, `aws s3 cp`),
@@ -837,9 +863,21 @@ func (e *plannerExecutor) doIteration(
 	// pre-flight (below) must run for both — a native react_4 tool batch can
 	// contain write actions just like a react_3 <actions> batch.
 	_, isReAct3Planner := e.agentPlanner.(*NBReActPlanner3)
-	_, isReAct4Planner := e.agentPlanner.(*NBReActPlanner4)
-	isParallelCapablePlanner := isReAct3Planner || isReAct4Planner
-	if len(actions) > 1 && config.Config.PlannerParallelExecEnabled && isParallelCapablePlanner {
+	isParallelCapablePlanner := plannerSupportsExecutionBatches(e.agentPlanner)
+	isExecutionBatch := len(actions) > 1 && isParallelCapablePlanner
+	batchID := ""
+	parallelismLimit := config.Config.LLMServerAgentMaxParallel
+	if parallelismLimit < 1 {
+		parallelismLimit = 1
+	}
+	if isExecutionBatch {
+		batchID = common.GenerateUUID()
+	}
+	if isExecutionBatch && !config.Config.PlannerParallelExecEnabled {
+		annotateExecutionBatch(actions, batchID, executionModeSequentialDispatch, "parallel_execution_disabled", parallelismLimit)
+		e.ctx.GetLogger().Info("plannerexecutor: parallel execution disabled, executing batch sequentially", "agent", e.agent.GetName(), "actionsCount", len(actions), "executionBatchId", batchID)
+	}
+	if isExecutionBatch && config.Config.PlannerParallelExecEnabled {
 		// Pre-flight check: detect actions that might trigger followups (write approval
 		// or config resolution). Only one followup can be active at a time, so if any
 		// action in the batch could trigger one, fall back to sequential execution.
@@ -851,6 +889,7 @@ func (e *plannerExecutor) doIteration(
 		// Agent-type tools (NBToolTypeAgent) run their own sub-executor sequentially,
 		// so followup collisions within a single agent can't happen. Safe to parallelize.
 		needsSequential := false
+		sequentialFallbackReason := ""
 		for _, action := range actions {
 			tool, ok := nameToTool[strings.ToUpper(action.Tool)]
 			if !ok {
@@ -866,6 +905,7 @@ func (e *plannerExecutor) doIteration(
 				reqType, err := validator.InferToolRequestType(e.ctx, action.Tool, action.ToolInput)
 				if err == nil && reqType != "" && reqType != toolcore.ToolRequestTypeRead {
 					needsSequential = true
+					sequentialFallbackReason = "potential_write"
 					e.ctx.GetLogger().Info("plannerexecutor: pre-flight detected write action", "tool", action.Tool, "requestType", reqType)
 					break
 				}
@@ -877,11 +917,13 @@ func (e *plannerExecutor) doIteration(
 					reqType, _ := validator.InferToolRequestType(e.ctx, action.Tool, action.ToolInput)
 					if reqType == "" {
 						needsSequential = true
+						sequentialFallbackReason = "llm_only_request_classification"
 						e.ctx.GetLogger().Info("plannerexecutor: pre-flight detected tool with LLM-only classification, assuming potential write", "tool", action.Tool)
 						break
 					}
 				} else {
 					needsSequential = true
+					sequentialFallbackReason = "llm_only_request_classification"
 					e.ctx.GetLogger().Info("plannerexecutor: pre-flight detected tool with LLM-only classification, assuming potential write", "tool", action.Tool)
 					break
 				}
@@ -908,12 +950,14 @@ func (e *plannerExecutor) doIteration(
 				}
 				if !configResolved {
 					needsSequential = true
+					sequentialFallbackReason = "unresolved_tool_config"
 					e.ctx.GetLogger().Info("plannerexecutor: pre-flight detected unresolved tool config", "tool", action.Tool, "configTool", configCheckTool.Name())
 					break
 				}
 			}
 		}
 		if needsSequential {
+			annotateExecutionBatch(actions, batchID, executionModeSequentialDispatch, sequentialFallbackReason, parallelismLimit)
 			e.ctx.GetLogger().Info("plannerexecutor: falling back to sequential execution — parallel batch may trigger followups", "agent", e.agent.GetName(), "actionsCount", len(actions))
 			// First-turn fanout observability for React3. Diagnoses whether
 			// the prompt change actually drove a wider turn-1 batch and
@@ -928,7 +972,8 @@ func (e *plannerExecutor) doIteration(
 				)
 			}
 		} else {
-			e.ctx.GetLogger().Info("plannerexecutor: executing actions in parallel", "agent", e.agent.GetName(), "actionsCount", len(actions))
+			annotateExecutionBatch(actions, batchID, executionModeParallelDispatch, "", parallelismLimit)
+			e.ctx.GetLogger().Info("plannerexecutor: executing actions in parallel", "agent", e.agent.GetName(), "actionsCount", len(actions), "executionBatchId", batchID, "parallelismLimit", parallelismLimit)
 			if isReAct3Planner && e.currentIteration == 0 && (e.agentRequest.ParentAgentId == "" || e.agentRequest.ParentAgentId == e.agentRequest.AgentId) {
 				e.ctx.GetLogger().Info("plannerexecutor: react3 first-turn batch parallel",
 					"agent", e.agent.GetName(),
