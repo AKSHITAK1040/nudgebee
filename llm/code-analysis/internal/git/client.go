@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -703,6 +704,98 @@ func (gc *GitClient) ensureRemoteTracking(ctx context.Context, baseDir string, b
 // refspec to everything, which would undo the narrowing described below.
 func (gc *GitClient) CloneOrReuseRepository(ctx context.Context, repoURL string, creds *credentials.ResolvedCredentials, branch string, worktreeDir string, extraBranches ...string) (*CloneResult, error) {
 	return gc.CloneOrReuseRepositoryAtCommit(ctx, repoURL, creds, branch, "", worktreeDir, extraBranches...)
+}
+
+// CloneSealedAtCommit checks out exactly `commit` into worktreeDir with no way
+// to reach anything newer.
+//
+// Pinning the *checkout* does not pin what is *reachable*. The shared path
+// clones with --single-branch, which limits which branch is fetched but not how
+// far: the branch tip ref lands in the repo, years ahead of the pinned commit,
+// so `git log --all` and `git show <sha>` reach commits that do not exist yet
+// from the caller's point of view. For incident analysis that is merely
+// confusing; for anything being scored it is the answer sitting in the working
+// directory. An agent did exactly this — found the fix commit by pickaxe and
+// read the corrected file out of it.
+//
+// Two properties do the work here:
+//
+//   - a shallow fetch of a SHA yields that commit and its ANCESTORS only. Git
+//     has no way to walk forward, so no depth setting can expose a descendant.
+//     History that blame and `log -S` legitimately use is preserved.
+//   - origin is removed afterwards, so nothing can be fetched later.
+//
+// Isolated rather than shared on purpose: refs live in the base repo, so pruning
+// them in a shared bare clone would race with concurrent analyses of the same
+// repository (see the note on worktree origin URLs above). A private directory
+// has no such coupling.
+//
+// Only valid when no PR is to be raised — pushing needs the remote this removes.
+func (gc *GitClient) CloneSealedAtCommit(ctx context.Context, repoURL string, creds *credentials.ResolvedCredentials, commit string, depth int, worktreeDir string) (*CloneResult, error) {
+	if err := ValidateCommitSHA(commit); err != nil {
+		return nil, fmt.Errorf("invalid commit: %w", err)
+	}
+	if depth <= 0 {
+		depth = 50
+	}
+	if err := os.MkdirAll(worktreeDir, 0755); err != nil {
+		return nil, fmt.Errorf("failed to create worktree directory: %w", err)
+	}
+
+	authURL := repoURL
+	if creds != nil && creds.Token != "" {
+		var err error
+		if authURL, err = gc.transformRepoURLWithToken(repoURL, creds.Token); err != nil {
+			return nil, fmt.Errorf("failed to build authenticated URL: %w", err)
+		}
+	}
+
+	run := func(timeout time.Duration, args ...string) ([]byte, error) {
+		cctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return exec.CommandContext(cctx, "git", append([]string{"-C", worktreeDir}, args...)...).CombinedOutput()
+	}
+
+	if out, err := run(gc.timeout, "init", "--quiet"); err != nil {
+		return nil, fmt.Errorf("git init failed: %s: %w", string(out), err)
+	}
+	if out, err := run(gc.timeout, "remote", "add", "origin", authURL); err != nil {
+		return nil, fmt.Errorf("git remote add failed: %s: %w", StripURLUserinfo(string(out)), err)
+	}
+	if out, err := run(gc.timeout, "fetch", "--no-tags", "--depth", strconv.Itoa(depth), "origin", commit); err != nil {
+		return nil, fmt.Errorf("shallow fetch of %s failed: %s: %w", commit, StripURLUserinfo(string(out)), err)
+	}
+	// Detached, at the requested commit and nothing else. A failure here must not
+	// fall back to any other revision: analysing the wrong tree confidently is
+	// worse than failing.
+	if out, err := run(gc.timeout, "checkout", "--detach", commit); err != nil {
+		return nil, fmt.Errorf("checkout of %s failed: %s: %w", commit, string(out), err)
+	}
+	// The seal. After this there is no configured remote, so no later fetch can
+	// widen what is visible — including one the agent issues itself.
+	if out, err := run(gc.timeout, "remote", "remove", "origin"); err != nil {
+		return nil, fmt.Errorf("failed to remove origin: %s: %w", string(out), err)
+	}
+
+	head, err := run(gc.timeout, "rev-parse", "HEAD")
+	if err != nil {
+		// Returning an empty CommitHash would let a caller believe the checkout
+		// succeeded at an unknown revision — the precise failure this function
+		// exists to make impossible.
+		return nil, fmt.Errorf("failed to resolve HEAD after checkout of %s: %s: %w", commit, string(head), err)
+	}
+	// The subject is descriptive only; a repository with no log formatting is not
+	// a reason to fail an otherwise good checkout.
+	subject, _ := run(gc.timeout, "log", "-1", "--pretty=%s")
+	gc.logger.Log(common.EventStepComplete, "Sealed clone created", map[string]any{
+		"worktree_dir": worktreeDir, "commit": commit, "depth": depth,
+	})
+	return &CloneResult{
+		LocalPath:     worktreeDir,
+		Branch:        "",
+		CommitHash:    strings.TrimSpace(string(head)),
+		CommitMessage: strings.TrimSpace(string(subject)),
+	}, nil
 }
 
 // CloneOrReuseRepositoryAtCommit is CloneOrReuseRepository with an optional pinned
