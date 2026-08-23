@@ -349,8 +349,29 @@ type IConversationDao interface {
 type AgentReferenceType string
 
 const (
-	AgentReferenceTypeMemory       AgentReferenceType = "memory"
-	AgentReferenceTypeKB           AgentReferenceType = "knowledge_base"
+	AgentReferenceTypeMemory AgentReferenceType = "memory"
+	AgentReferenceTypeKB     AgentReferenceType = "knowledge_base"
+)
+
+// Reference "kind" — the metadata discriminator the UI switches on. Three
+// different writers persist rows with reference_type "knowledge_base": the KB
+// pre-step (documents attributed to a knowledge base), the pre-step's un-owned
+// path (product docs and other collections with no llm_knowledgebases row), and
+// the planner's load_skills/search_skills handler (skills loaded mid-run).
+// Without this the Additional Contexts panel renders all three identically, so
+// a conversation that injected no KB content can still look grounded.
+const (
+	AgentReferenceKindKBDocument = "kb_document"
+	// Documents from collections with no llm_knowledgebases row, split by the
+	// scope rag-server reports so the panel names the actual origin rather than
+	// lumping NudgeBee's own docs together with a customer's own content.
+	AgentReferenceKindNBDocument      = "nb_document"      // global product docs
+	AgentReferenceKindAccountDocument = "account_document" // legacy per-account collection
+	AgentReferenceKindTenantDocument  = "tenant_document"  // tenant-level user KB
+	AgentReferenceKindSkill           = "skill"
+)
+
+const (
 	AgentReferenceTypeContextState AgentReferenceType = "context_state"
 
 	// AgentReferenceTypeChannelContext is the provenance of a watched-channel

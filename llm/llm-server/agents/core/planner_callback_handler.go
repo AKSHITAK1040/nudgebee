@@ -252,6 +252,10 @@ func (h *plannerExecutorCallbackHandler) AfterToolCallResponse(tcr NBAgentPlanne
 					Type:        AgentReferenceTypeKB,
 					ReferenceID: ref.Url,
 					Metadata: map[string]any{
+						// Skills share reference_type "knowledge_base" with
+						// pre-step documents; kind is what tells them apart.
+						"kind":        AgentReferenceKindSkill,
+						"via":         tcr.Tool,
 						"name":        ref.Text,
 						"description": ref.Description,
 					},
