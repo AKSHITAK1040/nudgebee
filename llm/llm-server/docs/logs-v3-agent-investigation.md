@@ -278,24 +278,24 @@ tiny (1.4-1.9KB) in every case, ruling out "too much to show inline."
 backend envelope — the application's actual log line is escaped JSON *inside*
 JSON (`"message":"{\"time\":...}"`) — genuinely harder to parse than the raw file.
 The file itself was already fine: `saveLogsToWorkspace` rewrites it via
-`flattenLogsToJSONL` into clean `<timestamp>\t<message>` lines per entry. The
+`flattenLogsToTabSeparated` into clean `<timestamp>\t<message>` lines per entry. The
 inline preview just never got the same treatment.
 
 **Fix** (`agents/agent_log_fetch.go`, `makeFetchResponse` — shared with v1, so
-`logs` benefits too, not just `logs_v3`): call `flattenLogsToJSONL(logs)` before
+`logs` benefits too, not just `logs_v3`): call `flattenLogsToTabSeparated(logs)` before
 building the inline preview, so it's the *same* clean format as the saved file
 instead of the raw escaped envelope. Test added:
-`TestMakeFetchResponse_PreviewsLogsWhenFileRefPresent/loki_envelope:_inline_preview_is_flattened_JSONL`.
+`TestMakeFetchResponse_PreviewsLogsWhenFileRefPresent/preview_format_matches_the_file_format,_not_the_raw_backend_payload`.
 
 ### ⚠️ Known gap — kubectl backend not covered
-Found live, right after shipping: `flattenLogsToJSONL` only recognizes the
+Found live, right after shipping: `flattenLogsToTabSeparated` only recognizes the
 Loki/ES/Signoz `{"logs":[...]}` shape. The **kubectl** backend's raw output is
 wrapped differently (`{"stdout": "<raw text>"}`), which this fix doesn't touch.
 Confirmed live — a run that routed through kubectl (via a "deployment" label
 anchor) still needed two follow-up reads, the second one literally
 `jq -r '.stdout' <file> | head -n 10` to unwrap it manually. **Not a regression**
 (kubectl-backend fetches were never covered), but the fix's benefit is currently
-Loki/ES/Signoz-only. Fixing this needs a sibling case in `flattenLogsToJSONL` (or
+Loki/ES/Signoz-only. Fixing this needs a sibling case in `flattenLogsToTabSeparated` (or
 an adjacent function) for the `{"stdout":...}` shape.
 
 ---

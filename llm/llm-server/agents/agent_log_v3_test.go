@@ -117,6 +117,19 @@ func TestLogAgentV3_SystemPrompt_MatchesModeClassification(t *testing.T) {
 	}
 }
 
+func TestLogAgentV3_SystemPrompt_ReusesResolvedPodsAndExplainsArtifactFormat(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := newLogAgentV3("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", services_server.ObservabilityProvider{Provider: "loki"})
+	prompt := agent.GetSystemPrompt(ctx, core.NBAgentRequest{Query: "why is checkout failing"})
+	body := strings.Join(prompt.Instructions, "\n")
+
+	assert.Contains(t, body, "framework-generated `<resolved_targets>` block")
+	assert.Contains(t, body, "A `candidate` target alone never suppresses discovery")
+	assert.Contains(t, body, "Step 2a remains mandatory")
+	assert.Contains(t, body, "logs_format_hint")
+	assert.Contains(t, body, "never JSON-decode the whole file")
+}
+
 // TestLogAgentV3_FastPathAppAnchor_RoutineOnly pins the one point where v3's
 // prompt diverges from v1's: the app-anchor fast-path override must appear
 // for ROUTINE mode only, never for investigation/enumeration, so
