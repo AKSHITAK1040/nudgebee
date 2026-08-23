@@ -113,7 +113,17 @@ var recommendationView = `
 			COALESCE(cr.service_name, r.recommendation ->> 'service_name') AS service,
 			cr.name AS resource_name,
 			r.recommendation ->> 'controller_name'::text AS controller_name,
-			COALESCE((r.recommendation ->> 'estimated_saving'::text)::numeric, r.estimated_savings) AS estimated_saving,
+			-- Both COALESCE branches must be numeric so the expression's type
+			-- matches the real recommendation_view (numeric) and Postgres can
+			-- resolve ROUND(estimated_saving, 2), which only exists for
+			-- numeric (42883 otherwise). r.estimated_savings is stored as
+			-- double precision, so we cast the branch inline rather than
+			-- wrapping the whole COALESCE -- an outer cast would force
+			-- Postgres to first widen the numeric first-branch to double
+			-- precision (its arg-precedence rule), then cast the double back
+			-- to numeric, losing the exact decimal precision of the first
+			-- branch on the round trip.
+			COALESCE((r.recommendation ->> 'estimated_saving'::text)::numeric, r.estimated_savings::numeric) AS estimated_saving,
 			r.created_at,
 			r.updated_at,
 			r.recommendation::text AS recommendation,
@@ -183,7 +193,7 @@ func (m RecommendationExecuteTool) ToolPrompt() []string {
 		"- controller_name (STRING): Kubernetes controller name (Deployment, StatefulSet, DaemonSet, etc.); NULL for cloud resources",
 		"",
 		"**Financial Fields:**",
-		"- estimated_saving (DOUBLE PRECISION): Estimated MONTHLY cost savings in USD if recommendation is implemented",
+		"- estimated_saving (NUMERIC): Estimated MONTHLY cost savings in USD if recommendation is implemented",
 		"- is_primary_recommendation (BOOLEAN): TRUE for the highest-saving LIVE row within its dedupe_group (or per resource+category when no group); retired rows never outrank an open one. REQUIRED filter on every savings SUM — see the aggregation rules",
 		"- dedupe_group (STRING): Marks rows that are alternative ways to act on the SAME opportunity, e.g. 'aws_commitment:<account>:AmazonEC2' for the 1yr/3yr × All/No-Upfront purchase variants of one Savings Plan. NULL for standalone recommendations",
 		"",
@@ -222,11 +232,11 @@ func (m RecommendationExecuteTool) ToolPrompt() []string {
 		"- Order by created_at DESC for latest recommendations",
 		"- Use severity filtering for prioritization (Critical > High > Medium > Low > Info)",
 		"- Combine category and rule_name for precise filtering",
-		"- Rounding a savings total needs a cast: ROUND(SUM(estimated_saving)::numeric, 2). ROUND(SUM(estimated_saving), 2) errors",
+		"- Rounding a savings total works directly: ROUND(SUM(estimated_saving), 2). estimated_saving is already numeric in the view.",
 		"",
 		"**Canonical savings queries (adapt, do not invent new shapes):**",
-		"- Total by category: SELECT category, COUNT(*) as recommendation_count, ROUND(SUM(estimated_saving)::numeric, 2) as total_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY category ORDER BY total_savings DESC",
-		"- Account total split by type: SELECT CASE WHEN dedupe_group LIKE 'aws_commitment%' OR rule_name LIKE 'aws_native_ce%' THEN 'commitment_purchases' ELSE 'workload_optimizations' END AS savings_type, COUNT(*) AS opportunities, ROUND(SUM(estimated_saving)::numeric, 2) AS monthly_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY 1",
+		"- Total by category: SELECT category, COUNT(*) as recommendation_count, ROUND(SUM(estimated_saving), 2) as total_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY category ORDER BY total_savings DESC",
+		"- Account total split by type: SELECT CASE WHEN dedupe_group LIKE 'aws_commitment%' OR rule_name LIKE 'aws_native_ce%' THEN 'commitment_purchases' ELSE 'workload_optimizations' END AS savings_type, COUNT(*) AS opportunities, ROUND(SUM(estimated_saving), 2) AS monthly_savings FROM recommendation_view WHERE status = 'Open' AND estimated_saving > 0 AND is_primary_recommendation GROUP BY 1",
 	}
 }
 
