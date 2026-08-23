@@ -7,6 +7,7 @@ import TroubleshootSummary from '@components/troubleshoot/TroubleshootSummary';
 import NubiBriefing from '@components/troubleshoot/briefing/NubiBriefing';
 import BriefingFilters from '@components/troubleshoot/briefing/BriefingFilters';
 import { Box, CircularProgress } from '@mui/material';
+import { Card } from '@ui/Card';
 import { useMemo, useState, useEffect } from 'react';
 import AutoInvestigated from '@components/troubleshoot/AutoInvestigated';
 import ManualInvestigated from '@components/troubleshoot/ManualInvestigated';
@@ -321,16 +322,18 @@ const TroubleshootPage = () => {
           switches selectedTab itself — so a click here leaves this pane for the
           events list, exactly as the briefing's tiles do. */}
       {selectedTab === 3 && (
-        <div style={{ margin: '0px var(--ds-space-6)' }}>
-          {/* Same account/range controls the All Events tab carries. Without them
-              this pane inherited whatever window the URL happened to hold and
-              offered no way to change it. */}
-          <Box sx={{ display: 'flex', justifyContent: 'flex-end', marginTop: 'var(--ds-space-4)' }}>
-            <BriefingFilters />
-          </Box>
-          <ErrorBoundary>
-            <TroubleshootAnalytics onDrillDown={applyWidgetFilter} />
-          </ErrorBoundary>
+        <div style={{ margin: 'var(--ds-space-4) var(--ds-space-6) 0' }}>
+          {/* The whole Analytics pane sits in one white panel (ds/Card — the same
+              white surface ListingLayout gives the other tabs) so it reads as a
+              single bounded surface instead of sections floating on the app's
+              grey. The account/range controls (`filters`) render on the Overview
+              heading row inside the panel — same controls the All Events tab
+              carries; without them this pane offered no way to change the window. */}
+          <Card sx={{ mt: 0 }}>
+            <ErrorBoundary>
+              <TroubleshootAnalytics onDrillDown={applyWidgetFilter} filters={<BriefingFilters />} />
+            </ErrorBoundary>
+          </Card>
         </div>
       )}
     </>

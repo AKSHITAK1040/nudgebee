@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Box, Typography } from '@mui/material';
-import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
-import Tooltip from '@ui/Tooltip';
 import apiKubernetes1 from '@api1/kubernetes1';
 import apiTriage from '@api1/triage';
 import apiAskNudgebee from '@api1/ask-nudgebee';
 import { digestsList, digestGet, type Digest } from '@api1/digests';
 import { Skeleton } from '@ui/Skeleton';
 import { Banner } from '@ui/Banner';
+import { Stat, type DeltaTone } from '@ui/Stat';
+import WidgetCard from '@ui/WidgetCard';
 import TimeSeriesChart from '@components/common/charts/TimeSeriesChart';
 import { useBriefingWindow } from '@components/troubleshoot/briefing/useBriefingData';
 import { useRouter } from 'next/router';
@@ -36,6 +36,12 @@ interface Props {
    * the whole surface looks interactive and does nothing.
    */
   onDrillDown: (query: Record<string, string>) => void;
+  /**
+   * Account/date filter bar, rendered on the "Overview" heading row inside the
+   * panel. Passed in rather than owned here so the same BriefingFilters instance
+   * the All Events tab uses drives this tab too.
+   */
+  filters?: React.ReactNode;
 }
 
 interface Row {
@@ -104,69 +110,41 @@ const ageLabel = (days: number | null): string => {
   return `recurring for ${Math.floor(days / 7)} weeks`;
 };
 
-const SectionHeading = ({ children }: { children: React.ReactNode }) => (
-  <Typography
-    sx={{
-      fontSize: 'var(--ds-text-small)',
-      fontWeight: 'var(--ds-font-weight-semibold)',
-      letterSpacing: '0.08em',
-      textTransform: 'uppercase',
-      color: ds.gray[600],
-      marginBottom: 'var(--ds-space-3)',
-    }}
-  >
-    {children}
-  </Typography>
+// Every card sits inside one white panel now. WidgetCard's default elevation is
+// a big diffuse shadow that reads as "white card" against a grey page but casts
+// grey onto a white panel — so it's swapped for a light crisp shadow that gives
+// each tile just enough lift to read as a tile without dirtying the surface.
+// mt:0 cancels WidgetCard's default top margin in the grids.
+const CARD_SX = { mt: 0, boxShadow: '0 1px 3px rgba(16, 24, 40, 0.08)' } as const;
+
+// `action` is an optional right-aligned slot on the heading row — used to sit the
+// Viewing/Account/date filters parallel to the "Overview" title inside the panel.
+const SectionHeading = ({ children, action }: { children: React.ReactNode; action?: React.ReactNode }) => (
+  <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 'var(--ds-space-3)', marginBottom: 'var(--ds-space-3)' }}>
+    <Typography
+      sx={{
+        fontSize: 'var(--ds-text-small)',
+        fontWeight: 'var(--ds-font-weight-semibold)',
+        letterSpacing: '0.08em',
+        textTransform: 'uppercase',
+        color: ds.gray[600],
+      }}
+    >
+      {children}
+    </Typography>
+    {action}
+  </Box>
 );
 
 const Panel = ({ title, definition, children }: { title: string; definition: string; children: React.ReactNode }) => (
-  <Box
-    sx={{
-      border: `1px solid ${ds.gray[200]}`,
-      borderRadius: 'var(--ds-radius-lg)',
-      padding: 'var(--ds-space-4)',
-      background: ds.background[100],
-      minWidth: 0,
-    }}
-  >
+  <WidgetCard sx={{ ...CARD_SX, minWidth: 0 }}>
     <Typography sx={{ fontSize: 'var(--ds-text-body)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700] }}>{title}</Typography>
     {/* Inline rather than behind a tooltip: this tab is read by people who do not
         know our internals, and a metric whose meaning is one hover away is a
         metric that gets misread. */}
     <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600], marginBottom: 'var(--ds-space-3)' }}>{definition}</Typography>
     {children}
-  </Box>
-);
-
-/**
- * A plain scoreboard number: value, what it counts, and how it was arrived at.
- *
- * `info` is for the second-order question a number provokes — "why is this low,
- * and what would change it" — which does not belong in the always-visible note.
- * The note still has to stand alone without it.
- */
-const StatTile = ({ label, value, note, info }: { label: string; value: string; note: string; info?: string }) => (
-  <Box
-    sx={{
-      border: `1px solid ${ds.gray[200]}`,
-      borderRadius: 'var(--ds-radius-md)',
-      padding: 'var(--ds-space-2) var(--ds-space-3)',
-      background: ds.background[100],
-    }}
-  >
-    <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
-      <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600] }}>{label}</Typography>
-      {info && (
-        <Tooltip title={info}>
-          <InfoOutlinedIcon sx={{ fontSize: ds.text.caption, color: ds.gray[400], cursor: 'help', flexShrink: 0 }} />
-        </Tooltip>
-      )}
-    </Box>
-    <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700], lineHeight: 1.2 }}>
-      {value}
-    </Typography>
-    <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>{note}</Typography>
-  </Box>
+  </WidgetCard>
 );
 
 /**
@@ -193,10 +171,15 @@ const DeltaStat = ({
   const pct = previous > 0 ? Math.round((delta / previous) * 100) : null;
   const flat = delta === 0 || pct === null;
   const improving = betterWhenDown ? delta < 0 : delta > 0;
-  const tone = flat ? ds.gray[600] : improving ? ds.green[500] : ds.red[500];
+  // Stat's delta owns the colour (via cost-axis tone) and the arrow (via
+  // direction), so the "fewer-is-good" judgement maps to a tone rather than a
+  // hand-picked green/red — the DS "don't pick delta colour manually" rule.
+  const tone: DeltaTone = flat ? 'neutral' : improving ? 'savings' : 'waste';
+  const direction: 'up' | 'down' | 'flat' = flat ? 'flat' : delta > 0 ? 'up' : 'down';
+  const period = `vs previous ${previous.toLocaleString()}`;
 
   return (
-    <Box
+    <WidgetCard
       {...(onClick
         ? {
             role: 'button',
@@ -208,28 +191,27 @@ const DeltaStat = ({
           }
         : {})}
       sx={{
-        border: `1px solid ${ds.gray[200]}`,
-        borderRadius: 'var(--ds-radius-md)',
-        padding: 'var(--ds-space-2) var(--ds-space-3)',
-        background: ds.background[100],
+        ...CARD_SX,
         cursor: onClick ? 'pointer' : 'default',
         '&:hover': onClick ? { borderColor: ds.blue[500] } : {},
       }}
     >
-      <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600] }}>{label}</Typography>
-      <Typography sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700], lineHeight: 1.2 }}>
-        {value.toLocaleString()}
-      </Typography>
-      <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: tone }}>
-        {flat
-          ? `no change vs previous ${previous.toLocaleString()}`
-          : `${delta > 0 ? '↑' : '↓'} ${Math.abs(delta).toLocaleString()} (${Math.abs(pct)}%) vs previous ${previous.toLocaleString()}`}
-      </Typography>
-    </Box>
+      <Stat
+        size='md'
+        label={label}
+        value={value.toLocaleString()}
+        delta={{
+          value: flat ? 'no change' : `${Math.abs(delta).toLocaleString()} (${Math.abs(pct)}%)`,
+          period,
+          tone,
+          direction,
+        }}
+      />
+    </WidgetCard>
   );
 };
 
-export default function TroubleshootAnalytics({ onDrillDown }: Props) {
+export default function TroubleshootAnalytics({ onDrillDown, filters }: Props) {
   const router = useRouter();
   const window = useBriefingWindow();
   const accountIdParam = router.query.accountIds;
@@ -576,9 +558,14 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
     };
   }, [state.data, state.suggestions, onDrillDown, router, scope]);
 
+  // Keep the filter bar reachable in every state — a reader who lands on an
+  // error or a slow load can still change the account/range to recover.
+  const filtersRow = filters ? <Box sx={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 'var(--ds-space-3)' }}>{filters}</Box> : null;
+
   if (state.error) {
     return (
-      <Box sx={{ padding: 'var(--ds-space-4) 0' }}>
+      <Box>
+        {filtersRow}
         <Banner
           tone='critical'
           surface='section'
@@ -591,7 +578,8 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
 
   if (state.loading || !model) {
     return (
-      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-4)', padding: 'var(--ds-space-4) 0' }}>
+      <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-4)' }}>
+        {filtersRow}
         <Skeleton height={120} />
         <Skeleton height={280} />
       </Box>
@@ -641,7 +629,7 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
   const enoughHistory = volumeRows.length >= 4;
 
   return (
-    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-6)', padding: 'var(--ds-space-4) 0' }}>
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-6)' }}>
       {/* Overview — the compact scoreboard.
           Deliberately four numbers, not six. An "RCA coverage" percentage is the
           obvious fifth, and it is left off on purpose: computing it correctly
@@ -651,51 +639,61 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
           55%). A wrong coverage number is worse than none — see the MTTU column
           note in the analytics groundwork. */}
       <Box>
-        <SectionHeading>Overview</SectionHeading>
+        <SectionHeading action={filters}>Overview</SectionHeading>
         <Box sx={{ display: 'grid', gridTemplateColumns: { xs: '1fr 1fr', lg: 'repeat(4, 1fr)' }, gap: 'var(--ds-space-3)' }}>
-          <StatTile
-            label='Investigations finished'
-            value={effort?.completed_count ? num(effort.completed_count).toLocaleString() : '—'}
-            // Deliberately NOT "x of y". The backend's total_count windows on
-            // updated_at rather than created_at, so it sweeps in conversations
-            // created up to a year earlier that a cleanup job happened to touch —
-            // on dev that turned a ~93% in-window completion rate into a reported
-            // 8%. Until the DAO windows on created_at there is no trustworthy
-            // denominator, so show none.
-            note='finished in this window'
-          />
+          <WidgetCard sx={CARD_SX}>
+            <Stat
+              size='md'
+              label='Investigations finished'
+              value={effort?.completed_count ? num(effort.completed_count).toLocaleString() : '—'}
+              // Deliberately NOT "x of y". The backend's total_count windows on
+              // updated_at rather than created_at, so it sweeps in conversations
+              // created up to a year earlier that a cleanup job happened to touch —
+              // on dev that turned a ~93% in-window completion rate into a reported
+              // 8%. Until the DAO windows on created_at there is no trustworthy
+              // denominator, so show none.
+              sub='finished in this window'
+            />
+          </WidgetCard>
           {/* Coverage and MTTU come from the same aggregate row, so the numerator,
               the denominator and the clock all share one unit. Shown together on
               purpose: a fast MTTU next to low coverage says "quick on the few we
               do", which is the honest reading — either number alone flatters. */}
-          <StatTile
-            label='Problems we explained'
-            value={eligibleIssues > 0 ? `${Math.round((eligibleAnalysed / eligibleIssues) * 100)}%` : '—'}
-            note={`${eligibleAnalysed.toLocaleString()} of ${eligibleIssues.toLocaleString()} we try to explain automatically`}
-            // Guidance names an operator setting, not a page: automatic
-            // explanations are toggled per environment and per account in
-            // configuration the product has no screen for, so pointing at a
-            // button that does not exist would be worse than saying who to ask.
-            info={
-              eligibleIssues > 0 && eligibleAnalysed / eligibleIssues < 0.5
-                ? 'Counts problems important enough for us to investigate on our own — repeat alerts and low-severity noise are left out. ' +
-                  'A low number usually means automatic explanations are switched off for this environment or account, which an admin controls; ' +
-                  'it can also mean problems are arriving below the severity we investigate without being asked. Ask an admin to turn on ' +
-                  'automatic event explanations for this account.'
-                : 'Counts problems important enough for us to investigate on our own — repeat alerts and low-severity noise are left out.'
-            }
-          />
-          <StatTile
-            label='Time to explain a problem'
-            // One or two samples is not a median. Below that the tile says so
-            // rather than printing a number a reader would take as typical.
-            value={analysedIssues >= 5 && mttuMinutes > 0 ? `${mttuMinutes.toFixed(1)} min` : '—'}
-            note={
-              analysedIssues >= 5 && mttuMinutes > 0
-                ? `typical wait, across ${analysedIssues.toLocaleString()} problems`
-                : 'too few explained to give a typical time'
-            }
-          />
+          <WidgetCard sx={CARD_SX}>
+            <Stat
+              size='md'
+              label='Problems we explained'
+              value={eligibleIssues > 0 ? `${Math.round((eligibleAnalysed / eligibleIssues) * 100)}%` : '—'}
+              sub={`${eligibleAnalysed.toLocaleString()} of ${eligibleIssues.toLocaleString()} we try to explain automatically`}
+              // Guidance names an operator setting, not a page: automatic
+              // explanations are toggled per environment and per account in
+              // configuration the product has no screen for, so pointing at a
+              // button that does not exist would be worse than saying who to ask.
+              info={{
+                tooltip:
+                  eligibleIssues > 0 && eligibleAnalysed / eligibleIssues < 0.5
+                    ? 'Counts problems important enough for us to investigate on our own — repeat alerts and low-severity noise are left out. ' +
+                      'A low number usually means automatic explanations are switched off for this environment or account, which an admin controls; ' +
+                      'it can also mean problems are arriving below the severity we investigate without being asked. Ask an admin to turn on ' +
+                      'automatic event explanations for this account.'
+                    : 'Counts problems important enough for us to investigate on our own — repeat alerts and low-severity noise are left out.',
+              }}
+            />
+          </WidgetCard>
+          <WidgetCard sx={CARD_SX}>
+            <Stat
+              size='md'
+              label='Time to explain a problem'
+              // One or two samples is not a median. Below that the tile says so
+              // rather than printing a number a reader would take as typical.
+              value={analysedIssues >= 5 && mttuMinutes > 0 ? `${mttuMinutes.toFixed(1)} min` : '—'}
+              sub={
+                analysedIssues >= 5 && mttuMinutes > 0
+                  ? `typical wait, across ${analysedIssues.toLocaleString()} problems`
+                  : 'too few explained to give a typical time'
+              }
+            />
+          </WidgetCard>
           {(() => {
             const completed = num(effort?.completed_count);
             const baselineMin = num(effort?.manual_baseline_minutes);
@@ -704,21 +702,26 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
             const savedHours = Math.max(0, (completed * baselineMin) / 60 - agentHours);
             const savedCost = Math.round(savedHours * rate);
             return (
-              <StatTile
-                label='Engineer time saved'
-                value={completed > 0 ? `${savedHours.toFixed(1)} hrs` : '—'}
-                note={completed > 0 && rate > 0 ? `≈$${savedCost.toLocaleString()} vs doing this by hand` : 'vs doing the same first pass by hand'}
-                // No rate, no baseline, no arithmetic — anywhere, including the
-                // tooltip. Those are internal assumptions, and exposing them turns
-                // every reading of this tile into an argument about our model
-                // rather than the work it represents. The tooltip says what the
-                // number means; it does not show its inputs.
-                info={
-                  completed > 0
-                    ? `An estimate of the first-pass investigation time your team did not have to spend, across the ${completed.toLocaleString()} problems the agents explained on their own.`
-                    : undefined
-                }
-              />
+              <WidgetCard sx={CARD_SX}>
+                <Stat
+                  size='md'
+                  label='Engineer time saved'
+                  value={completed > 0 ? `${savedHours.toFixed(1)} hrs` : '—'}
+                  sub={completed > 0 && rate > 0 ? `≈$${savedCost.toLocaleString()} vs doing this by hand` : 'vs doing the same first pass by hand'}
+                  // No rate, no baseline, no arithmetic — anywhere, including the
+                  // tooltip. Those are internal assumptions, and exposing them turns
+                  // every reading of this tile into an argument about our model
+                  // rather than the work it represents. The tooltip says what the
+                  // number means; it does not show its inputs.
+                  info={
+                    completed > 0
+                      ? {
+                          tooltip: `An estimate of the first-pass investigation time your team did not have to spend, across the ${completed.toLocaleString()} problems the agents explained on their own.`,
+                        }
+                      : undefined
+                  }
+                />
+              </WidgetCard>
             );
           })()}
         </Box>
@@ -734,27 +737,16 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
             previous={prevUrgent}
             onClick={() => onDrillDown({ status: 'ALL', ...scope, eventComputedPriority: 'P1' })}
           />
-          <Box
-            sx={{
-              border: `1px solid ${ds.gray[200]}`,
-              borderRadius: 'var(--ds-radius-md)',
-              padding: 'var(--ds-space-2) var(--ds-space-3)',
-              background: ds.background[100],
-            }}
-          >
-            <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600] }}>Problems we have seen before</Typography>
-            {/* Same type scale as StatTile and DeltaStat. This tile is hand-rolled
-                because it has no previous-period comparison, but it sits in a row
-                with two that do, so it has to match their sizing. */}
-            <Typography
-              sx={{ fontSize: 'var(--ds-text-body-lg)', fontWeight: 'var(--ds-font-weight-semibold)', color: ds.gray[700], lineHeight: 1.2 }}
-            >
-              {recurrenceRate}%
-            </Typography>
-            <Typography sx={{ fontSize: 'var(--ds-text-caption)', color: ds.gray[600] }}>
-              {recurring.length.toLocaleString()} of the {chains.length.toLocaleString()} busiest had happened before
-            </Typography>
-          </Box>
+          {/* No previous-period comparison, so no delta — but it sits in a row with
+              two that do, so the same WidgetCard + Stat keeps its sizing aligned. */}
+          <WidgetCard sx={CARD_SX}>
+            <Stat
+              size='md'
+              label='Problems we have seen before'
+              value={`${recurrenceRate}%`}
+              sub={`${recurring.length.toLocaleString()} of the ${chains.length.toLocaleString()} busiest had happened before`}
+            />
+          </WidgetCard>
         </Box>
         <Typography sx={{ fontSize: 'var(--ds-text-small)', color: ds.gray[600], marginTop: 'var(--ds-space-2)' }}>
           Compared against the {Math.max(1, Math.round((window.endMs - window.startMs) / 3600000))} hours immediately before this window.
@@ -1020,14 +1012,14 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
           <SectionHeading>What should we do this week?</SectionHeading>
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: 'var(--ds-space-3)' }}>
             {findings.map((finding) => (
-              <Box
+              // WidgetCard (not Card variant='accent') keeps the same elevation as
+              // every other card on this tab; the blue left-edge stays as an sx
+              // accent so the whole surface reads as one shadow system.
+              <WidgetCard
                 key={finding.key}
                 sx={{
-                  border: `1px solid ${ds.gray[200]}`,
+                  ...CARD_SX,
                   borderLeft: `3px solid ${ds.blue[500]}`,
-                  borderRadius: 'var(--ds-radius-lg)',
-                  padding: 'var(--ds-space-4)',
-                  background: ds.background[100],
                   display: 'flex',
                   alignItems: 'flex-start',
                   justifyContent: 'space-between',
@@ -1061,7 +1053,7 @@ export default function TroubleshootAnalytics({ onDrillDown }: Props) {
                 >
                   {finding.actionText} →
                 </Box>
-              </Box>
+              </WidgetCard>
             ))}
           </Box>
         </Box>
