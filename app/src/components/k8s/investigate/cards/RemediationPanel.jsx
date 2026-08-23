@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import PropTypes from 'prop-types';
-import { Box, IconButton, CircularProgress, Tooltip } from '@mui/material';
+import { Box, IconButton, CircularProgress } from '@mui/material';
+import Tooltip from '@ui/Tooltip';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import { Button } from '@ui/Button';
 import { Card } from '@ui/Card';
@@ -242,7 +243,10 @@ const CommandRow = forwardRef(function CommandRow({ label, tone, command, accoun
         <Box sx={{ flex: 1, minWidth: 0 }}>
           <CodeBlock code={command} language='bash' tone='dark' wrap copyToast='Command copied' />
         </Box>
-        <Tooltip title={!canRun ? 'Requires write access' : status === 'RUNNING' ? 'Running…' : `Run ${label.toLowerCase()} command`}>
+        <Tooltip
+          title={!canRun ? 'Requires write access' : status === 'RUNNING' ? 'Running…' : `Run ${label.toLowerCase()} command`}
+          placement='bottom'
+        >
           <span>
             <IconButton
               size='small'
@@ -424,7 +428,7 @@ function ActionCard({ index, action, hypothesis, accountId, eventId, canRun, app
               >{`${confidence}% likely to resolve`}</Box>
             ) : null}
             {execCmd ? (
-              <Tooltip title={!canRun ? 'Requires write access' : 'Run this action (execute, then verify), stopping on failure'}>
+              <Tooltip title={!canRun ? 'Requires write access' : 'Run this action (execute, then verify), stopping on failure'} placement='bottom'>
                 <span>
                   <Button
                     tone={appliedAt ? 'secondary' : 'primary'}

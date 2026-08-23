@@ -1,4 +1,4 @@
-import { Box, Typography, Divider, CircularProgress, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Tooltip } from '@mui/material';
+import { Box, Typography, Divider, CircularProgress, Table, TableBody, TableCell, TableContainer, TableHead, TableRow } from '@mui/material';
 import { useState, useEffect, type ReactNode } from 'react';
 import { useEffectiveRecommendation } from '@hooks/useEffectiveRecommendation';
 import { Select as DsSelect } from '@ui/Select';
@@ -116,13 +116,13 @@ const deriveVerdict = (
   return { tone: 'success', title: 'Contained blast radius' };
 };
 
-// Wraps a chip so MUI Tooltip gets a ref-holding element (Label doesn't forward refs).
+// Wraps a chip so the tooltip gets a ref-holding element (Label doesn't forward refs).
 const ChipTip = ({ title, children }: { title: string; children: ReactNode }) => (
-  <Tooltip title={title} arrow>
+  <DsTooltip title={title} placement='bottom'>
     <Box component='span' sx={{ display: 'inline-flex' }}>
       {children}
     </Box>
-  </Tooltip>
+  </DsTooltip>
 );
 
 // DependentRow — one blast-radius entry: identity line plus categorization
@@ -323,14 +323,14 @@ const BlastRadiusSection = ({ rec }: { rec: any }) => {
           <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], mt: ds.space[1] }}>
             {/* Typography forwards refs (and renders a <p>, which can't sit
                 inside ChipTip's span), so it takes the Tooltip directly. */}
-            <Tooltip
+            <DsTooltip
               title='What this resource itself calls, publishes to, or subscribes to. Context only — these are not at risk from the change and do not affect the safety band.'
-              arrow
+              placement='bottom'
             >
               <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], fontWeight: ds.weight.medium, alignSelf: 'flex-start' }}>
                 Depends on
               </Typography>
-            </Tooltip>
+            </DsTooltip>
             {(showAllDownstream ? downstream : downstream.slice(0, DEP_COLLAPSE_LIMIT)).map((dep, i) => (
               <DependentRow key={`${dep.namespace || ''}/${dep.name}-${i}`} dep={dep} direction='downstream' />
             ))}

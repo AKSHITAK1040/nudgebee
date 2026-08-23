@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Box, Typography, Tooltip } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import Tooltip from '@ui/Tooltip';
 import KeyboardDoubleArrowLeftIcon from '@mui/icons-material/KeyboardDoubleArrowLeft';
 import KeyboardDoubleArrowRightIcon from '@mui/icons-material/KeyboardDoubleArrowRight';
 import { useRouter } from 'next/router';
@@ -517,7 +518,7 @@ function InvestigateSidebar({
                                 <Text value={'Exit code'} secondaryText />
                                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
                                   <Text value={pd.status.exitCode} secondaryText sx={{ color: ds.gray[700] }} />
-                                  <Tooltip title={exitCodeMapping[pd.status.exitCode] || 'Unknown'} arrow>
+                                  <Tooltip title={exitCodeMapping[pd.status.exitCode] || 'Unknown'} arrow placement='bottom'>
                                     <SafeIcon
                                       src={infoIcon}
                                       alt='info'
@@ -595,7 +596,7 @@ function InvestigateSidebar({
                               <Text value={'Exit Code'} secondaryText />
                               <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
                                 <Text value={pd.lastStatus.exitCode} secondaryText sx={{ color: ds.gray[700] }} />
-                                <Tooltip title={exitCodeMapping[pd.lastStatus.exitCode] || 'Unknown'} arrow>
+                                <Tooltip title={exitCodeMapping[pd.lastStatus.exitCode] || 'Unknown'} arrow placement='bottom'>
                                   <SafeIcon
                                     src={infoIcon}
                                     alt='info'
