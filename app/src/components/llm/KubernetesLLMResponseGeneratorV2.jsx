@@ -1787,17 +1787,23 @@ const KubernetesLLMResponseGenerator = ({
                 // when the sheet is rendered so we don't have two interactive entry points for
                 // the same question.
                 followupReadOnlyKey: showFollowupSheet ? activeFollowupKey : null,
-                // When a background watch transitions to a terminal state, the
-                // responder appends a markdown "Watch update" block to the parent
-                // message's `response` column on the server. The chip poller in
-                // MessageStream detects that transition and invokes this callback
-                // so we pull the fresh message bodies — without it, the block
-                // is in the DB but the UI keeps showing the pre-terminal copy
-                // until a hard refresh. fetchConversation is the same call used
-                // for initial chat load; it's idempotent.
+                // When a background watch reaches a terminal state, the responder
+                // appends a markdown "Watch update" block to the parent message's
+                // `response` column on the server. The watch poller in MessageStream
+                // calls this until that block actually shows up, so we pull the fresh
+                // message bodies — without it the block is in the DB but the UI keeps
+                // showing the pre-terminal copy until a hard refresh.
+                //
+                // 'poll' rather than 'selected' deliberately. Both go through the same
+                // ai_get_conversation_v3 delta fetcher, but 'selected' additionally
+                // flips isLoading, clears the model picker and aborts in-flight
+                // requests — a visible flash on an otherwise settled chat, and
+                // self-cancelling once this runs more than once. 'poll' is inert here:
+                // its one side effect, SET_ALLOW_STOP, is gated behind
+                // conversationStatus === 'IN_PROGRESS' at the Stop button.
                 onWatchTerminal: () => {
                   if (selectedSessionId || selectedConversationId) {
-                    fetchConversation(selectedSessionId, selectedConversationId, 'selected', false);
+                    fetchConversation(selectedSessionId, selectedConversationId, 'poll', false);
                   }
                 },
               }}
