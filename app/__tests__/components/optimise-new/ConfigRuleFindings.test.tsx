@@ -12,6 +12,22 @@ jest.mock('@api1/recommendation', () => ({
   },
 }));
 
+// RowActions gates on write access; grant it so the actions render under test.
+jest.mock('@lib/auth', () => ({
+  __esModule: true,
+  hasWriteAccess: () => true,
+  hasPermission: () => true,
+}));
+
+const ROW_ACTIONS = {
+  assistantName: 'Nubi',
+  onAskNubi: jest.fn(),
+  onResolve: jest.fn(),
+  onCreateTicket: jest.fn(),
+  onCopyCli: jest.fn(),
+  onDismiss: jest.fn(),
+};
+
 const page = (count: number) => ({
   data: {
     recommendation: Array.from({ length: 5 }, (_, i) => ({
@@ -90,5 +106,59 @@ describe('ConfigRuleFindings', () => {
     fireEvent.click(screen.getByText('resource-2'));
 
     expect(onSelectRecommendation).toHaveBeenCalledWith(expect.objectContaining({ id: 'rec-2' }));
+  });
+});
+
+describe('ConfigRuleFindings row actions', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGet.mockResolvedValue(page(6));
+  });
+
+  const renderWithActions = () =>
+    render(
+      <ConfigRuleFindings
+        ruleName='aws_lambda_tracing'
+        accountId={['acct-a']}
+        status={['Open']}
+        onSelectRecommendation={jest.fn()}
+        rowActions={ROW_ACTIONS}
+      />
+    );
+
+  it('carries the same quick actions the cost tab rows do', async () => {
+    renderWithActions();
+
+    await waitFor(() => expect(screen.getByText('resource-0')).toBeInTheDocument());
+    // One Ask-Nubi button per row — the shared RowActions, not a local copy.
+    expect(screen.getAllByRole('button', { name: 'Ask Nubi' })).toHaveLength(5);
+    expect(screen.getAllByRole('button', { name: 'More actions' })).toHaveLength(5);
+  });
+
+  it('acts on the row without also opening the panel', async () => {
+    const onSelectRecommendation = jest.fn();
+    render(
+      <ConfigRuleFindings
+        ruleName='aws_lambda_tracing'
+        accountId={['acct-a']}
+        status={['Open']}
+        onSelectRecommendation={onSelectRecommendation}
+        rowActions={ROW_ACTIONS}
+      />
+    );
+
+    await waitFor(() => expect(screen.getByText('resource-0')).toBeInTheDocument());
+    fireEvent.click(screen.getAllByRole('button', { name: 'Ask Nubi' })[0]);
+
+    expect(ROW_ACTIONS.onAskNubi).toHaveBeenCalledWith(expect.objectContaining({ id: 'rec-0' }));
+    // RowActions stops propagation, so the action is not also a way into the row.
+    expect(onSelectRecommendation).not.toHaveBeenCalled();
+  });
+
+  it('renders no action buttons when no handlers are supplied', async () => {
+    render(<ConfigRuleFindings ruleName='aws_lambda_tracing' accountId={['acct-a']} status={['Open']} onSelectRecommendation={jest.fn()} />);
+
+    await waitFor(() => expect(screen.getByText('resource-0')).toBeInTheDocument());
+    expect(screen.queryByRole('button', { name: 'Ask Nubi' })).not.toBeInTheDocument();
   });
 });

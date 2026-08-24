@@ -6,7 +6,7 @@ import recommendationApi from '@api1/recommendation';
 import { useLatestRequest } from '@components/vm/common';
 import { SeverityIcon } from '@ui/SeverityIcon';
 import { toSeverityLevel } from '@utils/common';
-import ConfigRuleFindings from './ConfigRuleFindings';
+import ConfigRuleFindings, { type FindingRowActions } from './ConfigRuleFindings';
 import { formatRuleName } from './utils';
 import { type ConfigRule, foldConfigRules, rankSeverity } from './configRollup';
 
@@ -27,6 +27,8 @@ interface ConfigRuleRollupProps {
   accounts?: Record<string, { name: string; cloud_provider: string }>;
   /** Opens one finding's detail panel, from inside an expanded check. */
   onSelectRecommendation: (rec: any) => void;
+  /** Per-row quick actions, passed through to the expanded findings. */
+  rowActions?: FindingRowActions;
 }
 
 /**
@@ -37,7 +39,7 @@ interface ConfigRuleRollupProps {
  * ninety distinct checks, none of which carry savings. Grouping by check restores
  * the scale a reader can act on; the row drills into the resources.
  */
-const ConfigRuleRollup = ({ accountId, status, severity, accounts, onSelectRecommendation }: ConfigRuleRollupProps) => {
+const ConfigRuleRollup = ({ accountId, status, severity, accounts, onSelectRecommendation, rowActions }: ConfigRuleRollupProps) => {
   const [rules, setRules] = useState<ConfigRule[]>([]);
   const [loading, setLoading] = useState(false);
   const beginRequest = useLatestRequest();
@@ -166,6 +168,7 @@ const ConfigRuleRollup = ({ accountId, status, severity, accounts, onSelectRecom
                 severity={severity}
                 accounts={accounts}
                 onSelectRecommendation={onSelectRecommendation}
+                rowActions={rowActions}
               />
             ),
           },
