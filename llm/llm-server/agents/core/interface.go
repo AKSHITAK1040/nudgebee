@@ -231,6 +231,7 @@ type NBAgentPlannerToolAction struct {
 	ExecutionBatchSize        int    `json:"execution_batch_size,omitempty"`
 	ExecutionParallelismLimit int    `json:"execution_parallelism_limit,omitempty"`
 	SequentialFallbackReason  string `json:"sequential_fallback_reason,omitempty"`
+	PlannerIteration          int    `json:"planner_iteration,omitempty"`
 	// ThoughtSignature is the provider's opaque record of the reasoning that
 	// produced THIS tool call. Gemini 2.5/3.x thinking models return one with
 	// each native function call and require it replayed verbatim whenever that

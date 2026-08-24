@@ -258,6 +258,7 @@ func TestMergeToolResponseMetadataWithAction_EmptyInputRemainsNil(t *testing.T) 
 
 func TestMergeToolResponseMetadataWithAction_PersistsExecutionBatch(t *testing.T) {
 	action := NBAgentPlannerToolAction{
+		PlannerIteration:          2,
 		ExecutionBatchID:          "batch-1",
 		ExecutionMode:             executionModeParallelDispatch,
 		ExecutionBatchSize:        3,
@@ -274,11 +275,23 @@ func TestMergeToolResponseMetadataWithAction_PersistsExecutionBatch(t *testing.T
 	var got map[string]any
 	assert.NoError(t, json.Unmarshal(blob, &got))
 	assert.Equal(t, "batch-1", got["execution_batch_id"], "executor metadata must override tool-supplied collisions")
+	assert.EqualValues(t, 2, got["planner_iteration"])
 	assert.Equal(t, executionModeParallelDispatch, got["execution_mode"])
 	assert.Equal(t, float64(3), got["execution_batch_size"])
 	assert.Equal(t, float64(2), got["execution_parallelism_limit"])
 	assert.Equal(t, float64(125), got["execution_duration_ms"])
 	assert.Equal(t, "kept", got["custom_metric"])
+}
+
+func TestMergeToolResponseMetadataWithAction_PersistsSingleToolIteration(t *testing.T) {
+	blob, err := mergeToolResponseMetadataWithAction(nil, nil, NBAgentPlannerToolAction{PlannerIteration: 3})
+	assert.NoError(t, err)
+
+	var got map[string]any
+	assert.NoError(t, json.Unmarshal(blob, &got))
+	assert.EqualValues(t, 3, got["planner_iteration"])
+	_, hasBatchID := got["execution_batch_id"]
+	assert.False(t, hasBatchID)
 }
 
 func TestMergeToolResponseMetadataWithAction_PersistsSequentialFallback(t *testing.T) {

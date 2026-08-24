@@ -119,13 +119,17 @@ func mergeToolResponseMetadata(metadata *toolcore.NBToolResponseMetadata, additi
 }
 
 func actionExecutionMetadata(action NBAgentPlannerToolAction) map[string]any {
-	if action.ExecutionBatchID == "" {
+	if action.ExecutionBatchID == "" && action.PlannerIteration <= 0 {
 		return nil
 	}
-	metadata := map[string]any{
-		"execution_batch_id":   action.ExecutionBatchID,
-		"execution_mode":       action.ExecutionMode,
-		"execution_batch_size": action.ExecutionBatchSize,
+	metadata := map[string]any{}
+	if action.PlannerIteration > 0 {
+		metadata["planner_iteration"] = action.PlannerIteration
+	}
+	if action.ExecutionBatchID != "" {
+		metadata["execution_batch_id"] = action.ExecutionBatchID
+		metadata["execution_mode"] = action.ExecutionMode
+		metadata["execution_batch_size"] = action.ExecutionBatchSize
 	}
 	if action.ExecutionParallelismLimit > 0 {
 		metadata["execution_parallelism_limit"] = action.ExecutionParallelismLimit
@@ -146,6 +150,7 @@ func mergeToolResponseMetadataWithAction(metadata *toolcore.NBToolResponseMetada
 		combined = map[string]any{}
 	}
 	for _, key := range []string{
+		"planner_iteration",
 		"execution_batch_id",
 		"execution_mode",
 		"execution_batch_size",

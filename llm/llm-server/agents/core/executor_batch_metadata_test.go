@@ -25,6 +25,15 @@ func TestAnnotateExecutionBatch_UsesOneIdentifierForAllActions(t *testing.T) {
 	}
 }
 
+func TestAnnotatePlannerIteration_UsesOneBasedIterationForAllActions(t *testing.T) {
+	actions := []NBAgentPlannerToolAction{{ToolID: "E1"}, {ToolID: "E2"}}
+	annotatePlannerIteration(actions, 3)
+
+	for _, action := range actions {
+		assert.Equal(t, 3, action.PlannerIteration)
+	}
+}
+
 func TestAnnotateExecutionBatch_SequentialDoesNotExposeParallelLimit(t *testing.T) {
 	actions := []NBAgentPlannerToolAction{{ToolID: "E1"}, {ToolID: "E2"}}
 	annotateExecutionBatch(actions, "batch-fallback", executionModeSequentialDispatch, "potential_write", 4)

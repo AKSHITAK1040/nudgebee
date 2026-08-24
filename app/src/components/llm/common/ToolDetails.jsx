@@ -30,7 +30,9 @@ import { LogDate } from '@components/k8s/common/LogDate';
 import KubernetesSecurityDetails from '@components/recommendations/security/KubernetesSecurityDetails';
 import { DiffViewer } from '@ui/DiffViewer';
 import CodeBlock from '@ui/CodeBlock';
+import { Chip } from '@ui/Chip';
 import { convertToReadableFormat } from 'src/utils/common';
+import { executionBatchLabel, executionBatchTone, executionBatchTooltip, parseExecutionBatchMetadata } from './executionBatch';
 
 const FRIENDLY_TOOL_NAMES = {
   react_critique: 'Critique Feedback',
@@ -1068,12 +1070,13 @@ ParametersBox.propTypes = {
 /**
  * Renders a single tool call's thought and response.
  */
-const ToolCallSection = ({ tc, index, accountId, reasoning }) => {
+const ToolCallSection = ({ tc, index, accountId, reasoning, showExecutionBatch }) => {
   const thought = (tc.thought || '').split('\n\nAction:')[0];
   const responseText = tc.response;
   const tcName = tc.tool_name || `Tool Call ${index + 1}`;
   const tcIcon = getIcon(tcName) || WrenchIcon;
   const tcStatus = tc.status;
+  const executionBatch = showExecutionBatch ? parseExecutionBatchMetadata(tc.metadata) : null;
 
   const prettyThought = tryPrettifyJson(thought);
   const codeEdit = parseCodeEditParams(tc);
@@ -1097,6 +1100,15 @@ const ToolCallSection = ({ tc, index, accountId, reasoning }) => {
           {toolSourceSuffix(tc.metadata)}
         </Typography>
         <StatusBadge status={tcStatus} />
+        {executionBatch && (
+          <Tooltip title={executionBatchTooltip(executionBatch)} placement='top'>
+            <Box component='span' sx={{ display: 'inline-flex' }}>
+              <Chip variant='tag' size='xs' tone={executionBatchTone(executionBatch)} dot>
+                {executionBatchLabel(executionBatch)}
+              </Chip>
+            </Box>
+          </Tooltip>
+        )}
         <ReasoningBadge reasoning={reasoning} />
         <Duration createdAt={tc.created_at} updatedAt={tc.updated_at} metadata={tc.metadata} />
       </Box>
@@ -1182,6 +1194,7 @@ ToolCallSection.propTypes = {
   index: PropTypes.number.isRequired,
   accountId: PropTypes.string,
   reasoning: PropTypes.object,
+  showExecutionBatch: PropTypes.bool,
 };
 
 // Formats a reasoning duration in seconds as "Xm Ys" / "Ys".
@@ -1281,6 +1294,13 @@ const ToolDetails = ({ toolCall, accountId, conversationId, getReasoningForTool 
   // rendered (a task can group several calls), then the first row, then the
   // wrapper — same widening the reasoning lookup below does.
   const headerMetadata = toolCall.metadata ?? toolCalls.find((t) => t?.tool_name === toolName)?.metadata ?? toolCalls[0]?.metadata;
+  const headerBatch = (() => {
+    if (!hasMultipleToolCalls) {
+      return parseExecutionBatchMetadata(headerMetadata);
+    }
+    const batches = toolCalls.map((t) => parseExecutionBatchMetadata(t.metadata)).filter(Boolean);
+    return batches.length === toolCalls.length && new Set(batches.map((batch) => batch.id)).size === 1 ? batches[0] : null;
+  })();
 
   // Per-tool reasoning lookup: match a tool-call-like object's candidate ids against the
   // time-split reasoning map so each tool shows the thinking that produced it.
@@ -1366,6 +1386,15 @@ const ToolDetails = ({ toolCall, accountId, conversationId, getReasoningForTool 
           </Box>
         )}
         <StatusBadge status={status} />
+        {headerBatch && (
+          <Tooltip title={executionBatchTooltip(headerBatch)} placement='top'>
+            <Box component='span' sx={{ display: 'inline-flex' }}>
+              <Chip variant='tag' size='xs' tone={executionBatchTone(headerBatch)} dot>
+                {executionBatchLabel(headerBatch, toolCalls.length)}
+              </Chip>
+            </Box>
+          </Tooltip>
+        )}
         <ReasoningBadge reasoning={headerReasoning} />
         {/* `toolCall` is the task wrapper; the persisted row (and its metadata)
             lives in toolCalls[0] for the single-call view — same precedence the
@@ -1403,7 +1432,7 @@ const ToolDetails = ({ toolCall, accountId, conversationId, getReasoningForTool 
       {hasMultipleToolCalls ? (
         toolCalls.map((tc, idx) => (
           <React.Fragment key={tc.tool_id || idx}>
-            <ToolCallSection tc={tc} index={idx} accountId={accountId} reasoning={reasoningFor(tc)} />
+            <ToolCallSection tc={tc} index={idx} accountId={accountId} reasoning={reasoningFor(tc)} showExecutionBatch={!headerBatch} />
             {idx < toolCalls.length - 1 && <Divider sx={{ my: ds.space[3] }} />}
           </React.Fragment>
         ))

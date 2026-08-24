@@ -75,6 +75,12 @@ func annotateExecutionBatch(actions []NBAgentPlannerToolAction, batchID, mode, f
 	}
 }
 
+func annotatePlannerIteration(actions []NBAgentPlannerToolAction, iteration int) {
+	for i := range actions {
+		actions[i].PlannerIteration = iteration
+	}
+}
+
 // plannerToolNoData is the observation written when a tool succeeds (exit 0,
 // status=Success) but produces empty stdout. Many CLI mutations are silent on
 // success (e.g. `gh run rerun`, `kubectl apply`, `helm upgrade`, `aws s3 cp`),
@@ -864,6 +870,9 @@ func (e *plannerExecutor) doIteration(
 	// contain write actions just like a react_3 <actions> batch.
 	_, isReAct3Planner := e.agentPlanner.(*NBReActPlanner3)
 	isParallelCapablePlanner := plannerSupportsExecutionBatches(e.agentPlanner)
+	if isParallelCapablePlanner {
+		annotatePlannerIteration(actions, e.currentIteration+1)
+	}
 	isExecutionBatch := len(actions) > 1 && isParallelCapablePlanner
 	batchID := ""
 	parallelismLimit := config.Config.LLMServerAgentMaxParallel
