@@ -641,8 +641,19 @@ func resolveExistingEvents(ctx *security.RequestContext, dbms *common.DatabaseMa
 		resolvedAt := re.Date.UTC()
 
 		var rows []resolvedRow
+		// priority is deliberately NOT written here. Severity describes what fired,
+		// not what the row's current state is — `status = 'RESOLVED'` already carries
+		// "it's over". This UPDATE used to also set priority = 'INFO', a leftover from
+		// when the OK transition inserted its own row (whose severity template renders
+		// Info for an OK state, correctly, because that row WAS the recovery notice).
+		// Once this path switched to updating the firing row in place, that Info landed
+		// on the incident itself and destroyed the source severity — irrecoverably, since
+		// nothing else records it. A HIGH alarm that self-recovered then read as INFO,
+		// which hid it from the Triage Inbox (it excludes DEBUG/INFO) and made the
+		// briefing's Nubi-vs-source severity comparison measure this UPDATE rather than
+		// the source.
 		err := dbms.QueryAndScan(&rows,
-			`UPDATE events SET status = 'RESOLVED', updated_at = $3, ends_at = $3, priority = 'INFO'
+			`UPDATE events SET status = 'RESOLVED', updated_at = $3, ends_at = $3
 			 WHERE cloud_account_id = $1 AND fingerprint = $2
 			 AND status NOT IN ('CLOSED', 'RESOLVED')
 			 RETURNING id::text, tenant::text, cloud_account_id::text, fingerprint`,
