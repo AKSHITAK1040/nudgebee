@@ -81,13 +81,12 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
         // contract every notification, the FinOps agent prompt and the apply CTA
         // already write, and it is independent of what the strip displays.
         { name: 'Cost', id: 'recommendations', fragment: 'recommendations', value: 1, icon: DollarIcon, iconSize: 18 },
-        { name: 'Resolutions', id: 'resolutions', fragment: 'resolutions', value: 2, icon: RecommendationResolutionIcon, iconSize: 18 },
-        { name: 'Configuration', id: 'configuration', fragment: 'configuration', value: 3, icon: ToolIconBlue, iconSize: 18 },
+        { name: 'Configuration', id: 'configuration', fragment: 'configuration', value: 2, icon: ToolIconBlue, iconSize: 18 },
         {
           name: 'Security',
           id: 'security',
           fragment: 'security',
-          value: 4,
+          value: 3,
           icon: SecuritytoolsBlue,
           tabOptions: [
             { id: 'image-scan', text: 'Image Scan', value: 0, fragment: 'image-scan' },
@@ -96,6 +95,9 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
             { id: 'cloud-posture', text: 'Cloud Posture', value: 3, fragment: 'cloud-posture' },
           ],
         },
+        // Resolutions sits after the three finding tabs because it is the record of
+        // what was already actioned, not another list to triage.
+        { name: 'Resolutions', id: 'resolutions', fragment: 'resolutions', value: 4, icon: RecommendationResolutionIcon, iconSize: 18 },
         {
           name: 'Auto Optimize',
           id: 'auto-optimize',
@@ -254,9 +256,9 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
         <ErrorBoundary key={activeTab}>
           {activeTab === 0 && <SummaryView />}
           {activeTab === 1 && <OptimizeNewPage />}
-          {activeTab === 2 && <ResolutionsView />}
-          {activeTab === 3 && <OptimizeNewPage lockedCategory='Configuration' />}
-          {activeTab === 4 && <SecurityView subTab={subTab} />}
+          {activeTab === 2 && <OptimizeNewPage lockedCategory='Configuration' />}
+          {activeTab === 3 && <SecurityView subTab={subTab} />}
+          {activeTab === 4 && <ResolutionsView />}
           {activeTab === 5 && (
             <AutoOptimizeTabs
               subTab={subTab}

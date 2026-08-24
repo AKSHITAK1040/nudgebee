@@ -35,8 +35,8 @@ test.describe("Optimize", () => {
           // The strip labels this tab "Cost"; its id and fragment stay
           // `recommendations`, which is what RecommendationsTab locates it by.
           { tab: locators.RecommendationsTab, name: "Cost" },
-          { tab: locators.ResolutionsTab, name: "Resolutions" },
           { tab: locators.securityTab, name: "Security" },
+          { tab: locators.ResolutionsTab, name: "Resolutions" },
           { tab: locators.AutoOptimizeTab, name: "Auto Optimize" },
         ];
         for (const { tab, name } of strip) {

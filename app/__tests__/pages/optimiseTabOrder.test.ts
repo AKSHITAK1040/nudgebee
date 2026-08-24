@@ -73,8 +73,10 @@ describe('Optimise tab registration', () => {
     });
   });
 
-  it('places Configuration immediately before Security', () => {
+  it('groups the finding tabs together and puts Resolutions after them', () => {
+    // Cost, Configuration and Security are lists to triage; Resolutions is the
+    // record of what was already actioned, so it follows rather than splits them.
     const names = parseTabs().map((t) => t.name);
-    expect(names.indexOf('Configuration')).toBe(names.indexOf('Security') - 1);
+    expect(names.slice(0, names.indexOf('Resolutions'))).toEqual(['Summary', 'Cost', 'Configuration', 'Security']);
   });
 });
