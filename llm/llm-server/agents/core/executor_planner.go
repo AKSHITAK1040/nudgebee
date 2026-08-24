@@ -485,31 +485,10 @@ func (e *plannerExecutor) Call(ctx context.Context, inputValues map[string]any, 
 		// Fast-fail: if the LLM returned no parseable actions OR only failures,
 		// count consecutive bad iterations. Breaking after 2 prevents burning
 		// 5+ iterations × 16s on a stuck model.
-		//
-		// NOTE (pre-existing, not introduced by the circuit breaker work):
-		// allFailed is seeded from len(steps)==0, so for any non-empty steps
-		// it starts false and the loop below can only ever leave it false —
-		// the "every step in this iteration failed" branch is dead today;
-		// only the zero-actions case reaches consecutiveFailedIters++. The
-		// `|| s.IsCircuitOpen` guard is therefore inert too. Left in place
-		// (rather than removed as dead code) because it's the correct
-		// exclusion for the moment someone fixes the seed — a circuit-open
-		// step is the breaker fast-failing, not the LLM spinning on a
-		// genuinely broken action, and shouldn't count toward this abort.
-		// Fixing the seed itself would revive a long-dormant abort path
-		// across every agent, which is a behavior change well beyond this
-		// PR's scope — tracked as separate follow-up, not done here.
-		allFailed := len(steps) == 0
-		for _, s := range steps {
-			if s.Status != ToolStatusFailure || s.IsCircuitOpen {
-				allFailed = false
-				break
-			}
-		}
-		if allFailed {
+		if shouldCountFailedIteration(steps, config.Config.LlmServerNoProgressBrakeEnabled) {
 			consecutiveFailedIters++
 			if consecutiveFailedIters >= 2 {
-				e.ctx.GetLogger().Warn("plannerexecutor: breaking after 2 consecutive failed iterations (likely zero-output LLM)", "agent", e.agent.GetName(), "iteration", i)
+				e.ctx.GetLogger().Warn("plannerexecutor: breaking after 2 consecutive iterations with no usable actions", "agent", e.agent.GetName(), "iteration", i)
 				break
 			}
 		} else {
@@ -554,6 +533,26 @@ func (e *plannerExecutor) Call(ctx context.Context, inputValues map[string]any, 
 	}
 
 	return map[string]any{"output": agents.ErrNotFinished.Error()}, agents.ErrNotFinished
+}
+
+// shouldCountFailedIteration reports whether an iteration should advance the
+// consecutive-failure brake. Empty iterations retain the legacy behavior.
+// Counting non-empty all-failure iterations is gated with the broader
+// no-progress brake because ToolStatusFailure spans parser, validation,
+// condition, scheduling, and execution failures across every agent.
+func shouldCountFailedIteration(steps []NBAgentPlannerToolActionStep, countNonEmptyFailures bool) bool {
+	if len(steps) == 0 {
+		return true
+	}
+	if !countNonEmptyFailures {
+		return false
+	}
+	for _, step := range steps {
+		if step.Status != ToolStatusFailure || step.IsCircuitOpen {
+			return false
+		}
+	}
+	return true
 }
 
 // buildToolCallSummary renders the per-step status block fed into the
