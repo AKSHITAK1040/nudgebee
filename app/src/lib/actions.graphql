@@ -1015,9 +1015,11 @@ type EventGetImpactOutput {
   seed: ImpactSeedNode
   impacted: [ImpactedServiceNode]
   depends_on: [ImpactedServiceNode]
+  infrastructure_impacted: [ImpactedServiceNode]
   correlated_count: Int
   dependent_count: Int
   production_dependents: Int
+  infrastructure_count: Int
   coverage_confidence: String
   truncated: Boolean
   assembly: IncidentAssembly

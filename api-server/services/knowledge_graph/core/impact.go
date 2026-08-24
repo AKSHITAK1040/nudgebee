@@ -159,6 +159,27 @@ var downstreamRelationshipDefaults = map[NodeType][]RelationshipType{
 	NodeTypeJob:                {RelationshipCalls, RelationshipPublishesTo, RelationshipSubscribesTo},
 	NodeTypeCronJob:            {RelationshipCalls, RelationshipPublishesTo, RelationshipSubscribesTo},
 	NodeTypeServerlessFunction: {RelationshipCalls, RelationshipPublishesTo, RelationshipSubscribesTo},
+	// A load balancer is the one seed whose useful neighbourhood is entirely
+	// downstream: nothing routes *to* it (its clients are outside the graph),
+	// while everything it fronts hangs off its outgoing edges. Without this a
+	// load-balancer alarm reports no topology at all — the upstream pass returns
+	// nothing by construction.
+	//
+	// RelationshipRoutesTo is listed alongside the two K8s-shaped ingress types
+	// because it is the edge AWS actually emits for ALB/NLB → EC2 target-group
+	// membership (see sources/aws/loadbalancer.go buildLBTargetEdges); the
+	// ROUTES_TO_BACKEND / ROUTES_TO_SERVICE pair alone never matches a cloud
+	// load balancer.
+	//
+	// Routing edges only — deliberately NOT RelationshipCalls. Continuing the
+	// walk through the backend's own traffic looks appealing (it would name the
+	// tier behind the front door) but a load balancer's backend calls back
+	// through the balancer's own ENIs, which arrive as unresolved ExternalService
+	// IP nodes. Those are an app-level type, so they survive the
+	// downstreamDependencyTypes filter and the panel ends up reporting that the
+	// load balancer depends on its own two private IPs. The backend is one click
+	// away and its panel tells the rest of the story correctly.
+	NodeTypeLoadBalancer: {RelationshipRoutesTo, RelationshipRoutesToBackend, RelationshipRoutesToService},
 }
 
 // downstreamDependencyTypes are the node types worth naming as something the
@@ -172,6 +193,15 @@ var downstreamDependencyTypes = func() map[NodeType]bool {
 		NodeTypeQueue:        true,
 		NodeTypeTopic:        true,
 		NodeTypeStorage:      true,
+		// A VM is a dependency worth naming, not plumbing: on a cloud stack the
+		// instance a load balancer fronts *is* the tier that serves the request,
+		// and omitting it leaves an ALB alarm reporting nothing it depends on.
+		// Safe to widen here because this set gates only what gets *named* as a
+		// downstream dependency — DownstreamDependencies never feeds
+		// DependentCount or the FinOps safety band (see safety_band.go), and the
+		// upstream/dependent side that does feed them uses appDependentTypes,
+		// which is deliberately left alone.
+		NodeTypeComputeInstance: true,
 	}
 	for t := range appDependentTypes {
 		m[t] = true
