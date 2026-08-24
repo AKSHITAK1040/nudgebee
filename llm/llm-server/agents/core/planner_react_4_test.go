@@ -78,6 +78,23 @@ func TestReAct4_HumanText_TodayIncludesTimeOfDay(t *testing.T) {
 		"today's date component must be rendered in UTC, matching time.Now().UTC()")
 }
 
+func TestReAct4_AccountContextIsSystemOnlyAndRequestPromptIsHumanOnly(t *testing.T) {
+	request := NBAgentRequest{
+		AccountId:      "account-1",
+		AccountContext: "stable deployment fact",
+		AccountPrompt:  "event-only instruction",
+	}
+	ctx := security.NewRequestContextForSuperAdmin()
+	system := composeReact4SystemMessage(ctx, request, notebookOptOutAgent{}, "agent prompt", "", nil)
+	planner := &NBReActPlanner4{request: request}
+	human := planner.humanText("what happened?")
+
+	assert.Contains(t, system, "stable deployment fact")
+	assert.NotContains(t, system, "event-only instruction")
+	assert.Contains(t, human, "event-only instruction")
+	assert.NotContains(t, human, "stable deployment fact")
+}
+
 func TestReAct4_ParseCompletion_EmptyTurnIsParseFailure(t *testing.T) {
 	o := &NBReActPlanner4{}
 	actions, finish, err := o.parseCompletion(&llms.ContentChoice{Content: "  ", StopReason: "max_tokens"})

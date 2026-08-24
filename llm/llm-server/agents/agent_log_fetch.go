@@ -1033,7 +1033,7 @@ func buildLogIntentMessages(systemPrompt string, request core.NBAgentRequest) []
 	// TestBuildLogIntentMessages_SystemPromptIsStable is preserved — only
 	// per-call inputs (Query/OriginalQuery/ConversationContext) must stay out
 	// of the system message.
-	if ap := strings.TrimSpace(request.AccountPrompt); ap != "" {
+	if ap := strings.TrimSpace(core.CombinedAccountPrompt(request)); ap != "" {
 		ap = core.TruncateHead(ap, customAgentAccountPromptCap())
 		systemPrompt += "\n\n**Account preferences (operator-curated for THIS deployment):**\n" +
 			"The notes below may state this backend's real log field names, id formats, and query conventions. " +

@@ -423,6 +423,7 @@ func ExecuteAgentToolCall(nbRequestContext toolcore.NbToolContext, agent NBAgent
 		QueryContext:   nbRequestContext.QueryContext,
 		QueryConfig:    nbRequestContext.QueryConfig,
 		AgentId:        existingAgentId,
+		AccountContext: nbRequestContext.AccountContext,
 		AccountPrompt:  nbRequestContext.AccountPrompt,
 		// Propagate the inherited-skills chain. Custom-planner delegators like
 		// metrics, traces, logs, and logs_default append their own name to this

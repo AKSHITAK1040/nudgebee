@@ -659,13 +659,11 @@ func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgen
 		defaultConfig.enableCritique = lo.ToPtr(false)
 	}
 
-	// Compose AccountPrompt from per-request additional system prompt (e.g.
-	// event-analysis additional_instructions, memory bridge writes) and the
-	// account-wide GlobalContext. Both surfaces feed the same <global_preferences>
-	// block in the planner human-message; see renderGlobalPreferencesBlock.
-	// GC loader is soft-failing — DB issues never block a chat turn.
+	// Keep the stable account-wide GlobalContext separate from request-specific
+	// additional guidance. ReAct planners cache AccountContext in their system
+	// prefix while AccountPrompt stays in the dynamic human turn. The GC loader
+	// is soft-failing — DB issues never block a chat turn.
 	gcPrompt := toolcore.LoadActiveGlobalContext(ctx, accountId)
-	composedAccountPrompt := mergeAccountPrompts(defaultConfig.systemPrompt, gcPrompt)
 
 	agentRequest := NBAgentRequest{
 		Query:                 query,
@@ -677,7 +675,8 @@ func HandleConversationSessionRequest(ctx *security.RequestContext, agent NBAgen
 		AgentId:               lo.Ternary(defaultConfig.agentId.Valid, defaultConfig.agentId.UUID.String(), ""),
 		QueryContext:          defaultConfig.queryContext,
 		EnableQueryRefinement: *defaultConfig.enableQueryRefinement,
-		AccountPrompt:         composedAccountPrompt,
+		AccountContext:        gcPrompt,
+		AccountPrompt:         strings.TrimSpace(defaultConfig.systemPrompt),
 		SessionId:             sessionId,
 		ConversationSource:    defaultConfig.source,
 		EnableCritique:        *defaultConfig.enableCritique,

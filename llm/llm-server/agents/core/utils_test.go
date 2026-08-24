@@ -233,6 +233,32 @@ func TestMergeAccountPrompts_PreservesPriorityForGlobalPreferencesBlock(t *testi
 	)
 }
 
+func TestAccountContextAndRequestPromptHaveDistinctPromptSurfaces(t *testing.T) {
+	request := NBAgentRequest{
+		AccountContext: "cluster_name=prod-us-east-1",
+		AccountPrompt:  "For this event, inspect the linked runbook first.",
+	}
+
+	system := renderAccountContextBlock(request.AccountContext)
+	human := renderGlobalPreferencesBlock(request.AccountPrompt)
+
+	assert.Contains(t, system, "<account_context>")
+	assert.Contains(t, system, "cluster_name=prod-us-east-1")
+	assert.NotContains(t, system, "linked runbook")
+	assert.Contains(t, human, "<global_preferences>")
+	assert.Contains(t, human, "linked runbook")
+	assert.NotContains(t, human, "cluster_name")
+	assert.Equal(t,
+		"For this event, inspect the linked runbook first.\n\ncluster_name=prod-us-east-1",
+		CombinedAccountPrompt(request),
+		"custom planners retain the legacy request-first combined view",
+	)
+}
+
+func TestRenderGlobalPreferencesBlock_WhitespaceOnlyIsEmpty(t *testing.T) {
+	assert.Empty(t, renderGlobalPreferencesBlock(" \n\t "))
+}
+
 func stringsIndex(haystack, needle string) int {
 	for i := 0; i+len(needle) <= len(haystack); i++ {
 		if haystack[i:i+len(needle)] == needle {

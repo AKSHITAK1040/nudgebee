@@ -3752,6 +3752,7 @@ func callNbTool(nbRequestContext *security.RequestContext, agentRequest NBAgentR
 	}
 
 	toolContext := toolcore.NewNbToolContext(nbRequestContext, tool, agentRequest.AccountId, agentRequest.UserId, agentRequest.ConversationId, agentRequest.MessageId, agentRequest.AgentId, input, previousHistory, queryContext, agentRequest.QueryConfig, toolId)
+	toolContext.AccountContext = agentRequest.AccountContext
 	toolContext.AccountPrompt = agentRequest.AccountPrompt
 	toolContext.SessionId = agentRequest.SessionId
 	// Propagate the top-level user question across delegation. The planner

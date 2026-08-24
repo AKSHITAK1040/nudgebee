@@ -213,6 +213,9 @@ func composeReact4SystemMessage(ctx *security.RequestContext, request NBAgentReq
 	if base := renderReact4Base(ctx, request, nbAgent, tools); strings.TrimSpace(base) != "" {
 		parts = append(parts, base)
 	}
+	if accountContext := renderAccountContextBlock(request.AccountContext); accountContext != "" {
+		parts = append(parts, accountContext)
+	}
 	if strings.TrimSpace(additionalAgentPrompt) != "" {
 		parts = append(parts, fmt.Sprintf("<additional_agent_prompt>\n%s\n</additional_agent_prompt>", additionalAgentPrompt))
 	}
@@ -858,9 +861,8 @@ func (o *NBReActPlanner4) humanText(input string) string {
 	if menu := strings.TrimSpace(o.request.SkillListsMenu); menu != "" {
 		fmt.Fprintf(&b, "\n%s\n", menu)
 	}
-	// Account global preferences (rendered from AccountPrompt) live in the human
-	// message — not the system prefix — so the event-analysis fragment doesn't
-	// bust the Account-scope cache, matching react_3.
+	// Request-specific preferences live in the human message so event-analysis
+	// traffic does not bust the Account-scope system cache, matching react_3.
 	if gp := strings.TrimSpace(renderGlobalPreferencesBlock(o.request.AccountPrompt)); gp != "" {
 		fmt.Fprintf(&b, "\n%s\n", gp)
 	}

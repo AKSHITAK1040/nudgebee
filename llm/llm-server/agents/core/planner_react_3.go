@@ -2471,14 +2471,16 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		messageFormatters = append(messageFormatters, LiteralSystemMessage{Content: priorityInstruction})
 	}
 
-	// AccountPrompt (account GlobalContext + event-analysis additional
-	// instructions) is intentionally NOT added as a system message: its
-	// event-analysis fragment varies per entry-point, so injecting it here
-	// would alternate the cacheable prefix and bust the Account-scope cache.
-	// It is rendered into the human-message <global_preferences> block below.
-	// This is also why ReAct agents need no per-agent GC wiring — custom-planner
-	// agents that bypass this prompt path (fetch_logs, resource_search) attach
-	// AccountPrompt to their own LLM calls explicitly.
+	// Stable account-wide context belongs in the account-scoped cacheable system
+	// prefix. Request/entry-point-specific AccountPrompt remains in the human
+	// message below so event-analysis traffic cannot churn the shared cache slot.
+	if accountContext := renderAccountContextBlock(request.AccountContext); accountContext != "" {
+		messageFormatters = append(messageFormatters, LiteralSystemMessage{Content: accountContext})
+	}
+
+	// ReAct agents need no per-agent GC wiring. Custom-planner agents that bypass
+	// this prompt path attach the combined AccountContext + AccountPrompt to
+	// their own LLM calls explicitly.
 
 	agentAdditionalPrompt, configuredTools, _ := AgentAdditionalInstructionsAndToolsAndConfigs(ctx, request.AccountId, agent.GetName())
 	if agentAdditionalPrompt != "" {
@@ -2524,10 +2526,9 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	// Move all dynamic context to the final Human message so the system prefix is stable.
 	// today is placed here (not in the system message) so the cached system prefix
 	// does not expire on date rollover.
-	// global_preferences_block carries AccountPrompt (account GlobalContext,
-	// merged with any event-analysis additional instructions — populated on
-	// every entry point by handleDefaultConversation) so
-	// the cacheable system prefix does not flip between entry points.
+	// global_preferences_block carries only request/entry-point-specific
+	// AccountPrompt so the cacheable system prefix does not flip between entry
+	// points.
 	dynamicPrompt := `
 **Current date and time:** {{.today}}
 {{.kb_prestep_content}}

@@ -584,6 +584,7 @@ func buildFetchLogsV3Request(nbCtx toolcore.NbToolContext, input toolcore.NBTool
 		QueryConfig:    nbCtx.QueryConfig,
 		SessionId:      nbCtx.SessionId,
 		OriginalQuery:  nbCtx.OriginalQuery,
+		AccountContext: nbCtx.AccountContext,
 		AccountPrompt:  nbCtx.AccountPrompt,
 	}
 }

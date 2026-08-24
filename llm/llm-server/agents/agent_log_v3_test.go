@@ -232,6 +232,7 @@ func TestBuildFetchLogsV3Request_PropagatesOriginalQueryAndAccountPrompt(t *test
 		UserId:         "user-1",
 		SessionId:      "session-1",
 		OriginalQuery:  "why is checkout-service throwing 500s",
+		AccountContext: "cluster is prod-us-east-1",
 		AccountPrompt:  "log field for pod name is k8s_pod_name, not pod",
 	}
 	input := toolcore.NBToolCallRequest{Command: "get recent logs for checkout-service"}
@@ -239,6 +240,7 @@ func TestBuildFetchLogsV3Request_PropagatesOriginalQueryAndAccountPrompt(t *test
 	request := buildFetchLogsV3Request(nbCtx, input)
 
 	assert.Equal(t, "why is checkout-service throwing 500s", request.OriginalQuery)
+	assert.Equal(t, "cluster is prod-us-east-1", request.AccountContext)
 	assert.Equal(t, "log field for pod name is k8s_pod_name, not pod", request.AccountPrompt)
 	assert.Equal(t, "get recent logs for checkout-service", request.Query)
 	assert.Equal(t, "parent-agent-1", request.AgentId)
