@@ -963,8 +963,9 @@ func GenerateRecommendation(ctx *security.RequestContext, request GenerateRecomm
 		// for Prometheus-backed clusters is gone with the Robusta agent
 		// deprecation, so before this change non-Datadog accounts produced
 		// zero pv_rightsize recommendations even with the agent connected.
-		if !tenant.IsFeatureEnabledByDefault(accountCtx, acc.TenantId, tenant.FEATURE_VERTICAL_RIGHTSIZING) {
-			accountCtx.GetLogger().Debug("volume rightsizing: feature disabled for tenant", "tenant_id", acc.TenantId)
+		if !tenant.IsFeatureEnabledByDefaultForAccount(accountCtx, acc.TenantId, accountId, tenant.FEATURE_VERTICAL_RIGHTSIZING) {
+			accountCtx.GetLogger().Debug("volume rightsizing: disabled for this scope, skipping",
+				"tenant_id", acc.TenantId, "account_id", accountId)
 		} else {
 			request := ml.VolumeRightsizingRequest{
 				AccountId:             accountId,
