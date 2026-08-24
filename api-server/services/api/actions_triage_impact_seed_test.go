@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"nudgebee/services/knowledge_graph/core"
+	"nudgebee/services/triage"
 )
 
 // TestSeedNodeTypeGroupsAreSingleType pins the property that makes resolution
@@ -131,5 +132,87 @@ func TestInfrastructureImpactedIsNotNamespaceScoped(t *testing.T) {
 	got := scopeAndNormalize(infra, "")
 	if len(got) != 2 {
 		t.Fatalf("unscoped = %d entries, want 2", len(got))
+	}
+}
+
+// The same mismatch reaches the alerting join and the incident assembly, not just
+// the response scoping. A cloud alarm records the provider's service code in
+// subject_namespace while the graph node it belongs to carries none, so the alert
+// index and the dependent lookup are keyed differently and a cloud dependent can
+// never be reported as alerting. Both sides normalise to the empty namespace for a
+// namespace-blind seed; these are the two key shapes that have to meet.
+func TestCloudAlertKeysMeetTheGraphNamespace(t *testing.T) {
+	// What the alert index sees, straight from the events table.
+	const eventNamespace = "AmazonEC2"
+	// What the graph-derived dependent carries.
+	const nodeNamespace = ""
+	const name = "nb-demo-web"
+
+	if impactKey(eventNamespace, name) == impactKey(nodeNamespace, name) {
+		t.Fatal("precondition changed: cloud event and graph namespaces now agree, so the dual index is unnecessary")
+	}
+	// Indexing under the empty namespace as well is what lets the lookup land.
+	if impactKey("", name) != impactKey(nodeNamespace, name) {
+		t.Fatalf("empty-namespace index %q does not match the dependent lookup %q",
+			impactKey("", name), impactKey(nodeNamespace, name))
+	}
+
+	// The assembly keys the same way through triage.SubjectKey, so a seed left
+	// carrying the service code cannot match its own topology entries.
+	seedWithServiceCode := triage.SubjectKey(triage.AlertIdentity{SubjectNamespace: eventNamespace, SubjectName: "nb-demo-db"})
+	topology := triage.SubjectKey(triage.AlertIdentity{SubjectNamespace: nodeNamespace, SubjectName: "nb-demo-db"})
+	if seedWithServiceCode == topology {
+		t.Fatal("precondition changed: SubjectKey no longer includes the namespace")
+	}
+	seedNormalised := triage.SubjectKey(triage.AlertIdentity{SubjectNamespace: "", SubjectName: "nb-demo-db"})
+	if seedNormalised != topology {
+		t.Fatalf("normalised seed key %q must equal the topology key %q", seedNormalised, topology)
+	}
+}
+
+// The same trap, one field over: depends_on and impacted were still scoped by
+// the event namespace for every seed, so a load-balancer alarm returned
+// depends_on: null even after the graph traversal started finding its backend.
+// The seed's own resolution already knows whether the namespace means anything —
+// a cloud seed is matched namespace-blind — so the response scoping has to use
+// that same answer rather than the raw event namespace.
+func TestDependsOnScopingFollowsSeedResolution(t *testing.T) {
+	backend := []core.ImpactedService{
+		{NodeID: "web", Name: "nb-demo-web", NodeType: core.NodeTypeComputeInstance, HopsAway: 1},
+	}
+
+	// A cloud seed: the event namespace is a service code and the neighbours have
+	// none, so scoping by it empties the list. This is the shipped bug.
+	if got := scopeAndNormalize(backend, "AWSELB"); len(got) != 0 {
+		t.Fatalf("precondition changed: cloud scoping no longer drops the backend (%d kept)", len(got))
+	}
+
+	// What the handler must do instead for a namespace-blind (cloud) seed.
+	scopeNamespace := ""
+	for _, g := range seedNodeTypeGroups() {
+		if g.nodeType == core.NodeTypeLoadBalancer {
+			if g.namespaced {
+				t.Fatal("LoadBalancer became namespace-scoped; the handler's scoping would empty depends_on again")
+			}
+			scopeNamespace = g.namespace("AWSELB")
+		}
+	}
+	if got := scopeAndNormalize(backend, scopeNamespace); len(got) != 1 || got[0].Name != "nb-demo-web" {
+		t.Fatalf("cloud seed depends_on = %+v, want the backend kept", got)
+	}
+
+	// A Kubernetes seed keeps its namespace filter: workload names are unique
+	// only within a namespace, so dropping the scope there would be wrong.
+	workloads := []core.ImpactedService{
+		{NodeID: "a", Name: "checkout", Namespace: "shop", NodeType: core.NodeTypeWorkload, HopsAway: 1},
+		{NodeID: "b", Name: "checkout", Namespace: "other", NodeType: core.NodeTypeWorkload, HopsAway: 1},
+	}
+	for _, g := range seedNodeTypeGroups() {
+		if g.nodeType == core.NodeTypeWorkload {
+			got := scopeAndNormalize(workloads, g.namespace("shop"))
+			if len(got) != 1 || got[0].Namespace != "shop" {
+				t.Fatalf("k8s seed depends_on = %+v, want only the shop namespace", got)
+			}
+		}
 	}
 }

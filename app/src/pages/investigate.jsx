@@ -1341,6 +1341,18 @@ const Investigate = () => {
             const card = new ServiceMapCard(d, row, i);
             if (await card.canRenderContent()) pushCard(card);
           }
+          // The knowledge-graph card was registered only for Kubernetes events, so
+          // on a cloud alarm the one piece of evidence holding real traffic
+          // dependencies was collected and never drawn. What rendered instead was
+          // cloud_service_map, which for AWS carries containment only — a VPC, a
+          // security group and the resource itself — making a database alarm look
+          // like it had no callers when the same event already carried the
+          // "instance CALLS database" edge from VPC flow logs. The card reads
+          // nodes/edges straight off the evidence and is provider-agnostic.
+          if (actionType === 'knowledge_graph' || actionType === 'knowledge_graph_service_map' || d.type === 'knowledge_graph') {
+            const card = new KnowledgeGraphCard(d, row, i);
+            if (await card.canRenderContent()) pushCard(card);
+          }
           if (actionType == 'cloud_performance_insights') {
             const card = new PerformanceInsightsCard(d, i);
             if (await card.canRenderContent()) pushCard(card);
