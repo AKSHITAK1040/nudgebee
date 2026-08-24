@@ -3048,6 +3048,12 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
         if (accountLabel) contextChips.push({ label: 'Account', value: accountLabel });
         if (namespaceValue) contextChips.push({ label: 'Namespace', value: namespaceValue });
         if (kindValue) contextChips.push({ label: 'Kind', value: kindValue });
+        // PVC options carry their allocated storage, so the user can size the
+        // resize against what the volume has today (#34688). Absent for
+        // workload/node options and for expression-mode values, which match no
+        // option — the chip just doesn't render then.
+        const selectedResourceStorage = resourceNames.find((o) => o?.value === fieldValue)?.storage;
+        if (selectedResourceStorage) contextChips.push({ label: 'Current Size', value: selectedResourceStorage });
 
         return (
           <Box key={fieldName} sx={{ mb: 2, display: 'flex', alignItems: 'flex-start', gap: 2, flexWrap: 'wrap' }}>
@@ -4233,7 +4239,7 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                       pt: 1,
                     }}
                   >
-                    Resize
+                    Resize<span style={{ color: ds.red[500] }}> *</span>
                   </Typography>
                   <Box sx={{ flex: '1 1 300px', minWidth: '200px', display: 'flex', flexDirection: 'column', gap: 2 }}>
                     <FormField
@@ -4275,6 +4281,8 @@ const ActionDetailsSidebar: React.FC<ActionDetailsSidebarProps> = ({
                       }}
                       placeholder={activePlaceholder}
                       description={activeSchema?.description || ''}
+                      error={validationErrors[activeFieldName] || ''}
+                      required={true}
                       disabled={viewOnlyMode}
                       minWidth='100%'
                     />
