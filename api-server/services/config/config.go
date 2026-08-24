@@ -78,8 +78,7 @@ type appConfig struct {
 	RabbitMqHost     string `mapstructure:"rabbit_mq_host"`
 	RabbitMqPort     int    `mapstructure:"rabbit_mq_port"`
 
-	Env          string `mapstructure:"env"`
-	DBSslEnabled bool   `mapstructure:"nudgebee_db_ssl_enabled"`
+	Env string `mapstructure:"env"`
 
 	MlServiceUrl string `mapstructure:"ml_service_url"`
 
@@ -236,8 +235,7 @@ type appConfig struct {
 	CacheRedisServerHost    string `mapstructure:"redis_server_host"`
 	CacheRedisServerPort    int    `mapstructure:"redis_server_port"`
 
-	FeatureEventAutoAiSummaryEnabled bool   `mapstructure:"feature_event_auto_ai_summary_enabled"`
-	ServerName                       string `mapstructure:"services_server_name"`
+	ServerName string `mapstructure:"services_server_name"`
 
 	// When true, events that describe a moment rather than a recoverable condition
 	// (configuration_change) are stored already CLOSED at ingestion — no closer
@@ -355,7 +353,6 @@ func init() {
 	viper.SetDefault("ml_service_url", "http://localhost:9000")
 
 	viper.SetDefault("env", "")
-	viper.SetDefault("nudgebee_db_ssl_enabled", "true")
 	viper.SetDefault("service_api_server_url", "http://services-server:8000")
 
 	// Bundled in-cluster agent. Empty key/secret means the install does not
@@ -473,7 +470,6 @@ func init() {
 	viper.SetDefault("nb_anomaly_training_days", 7)
 	viper.SetDefault("nb_anomaly_evaluation_hours", 1)
 
-	viper.SetDefault("feature_event_auto_ai_summary_enabled", true)
 	viper.SetDefault("feature_event_point_in_time_close_enabled", true)
 	viper.SetDefault("webhook_async_execution", true)
 

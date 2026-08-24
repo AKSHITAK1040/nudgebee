@@ -127,10 +127,6 @@ func ProcessEvent(ctx *security.RequestContext, event map[string]any) (err error
 		}
 	}
 
-	if !config.Config.FeatureEventAutoAiSummaryEnabled {
-		return nil
-	}
-
 	// accountId extracted before the FF gate so it can be account-scoped.
 	accountId, accountIdOk := event["cloud_account_id"].(string)
 	if !accountIdOk {
