@@ -1372,8 +1372,12 @@ const Investigate = () => {
           result.canTracesRender = canTracesRender;
           if (await card.canRenderContent(result, row)) {
             if (isGenCancelled()) break;
-            await safeDelay(2000);
-            if (isGenCancelled()) break;
+            // Demo mode only: stage the cards in one at a time so the investigation reads as
+            // live work. Everywhere else they land as soon as they can render.
+            if (showDemoMessage) {
+              await safeDelay(2000);
+              if (isGenCancelled()) break;
+            }
             safeSetState(setMatchedOptions, (old) => {
               const cardExists = old.some((existingCard) => existingCard.id === card.id);
               if (cardExists) return old;
