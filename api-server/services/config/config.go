@@ -42,6 +42,12 @@ type appConfig struct {
 	// the server's only job is to create the matching account and agent rows.
 	// Empty on every install that does not bundle the agent, which makes the
 	// reconcile a no-op.
+	// Admin address used to provision the first admin and their tenant at
+	// install time, so a fresh deployment is complete before anyone signs in.
+	// Optional: empty means skip, and setup falls back to first login.
+	// Enterprise leaves it empty and the licence's own address is used.
+	AdminEmail string `mapstructure:"admin_email"`
+
 	LocalAgentAccessKey    string `mapstructure:"local_agent_access_key"`
 	LocalAgentAccessSecret string `mapstructure:"local_agent_access_secret"`
 	LocalAgentClusterName  string `mapstructure:"local_agent_cluster_name"`
@@ -354,6 +360,7 @@ func init() {
 
 	// Bundled in-cluster agent. Empty key/secret means the install does not
 	// bundle an agent and the reconcile stays inert.
+	viper.SetDefault("admin_email", "")
 	viper.SetDefault("local_agent_access_key", "")
 	viper.SetDefault("local_agent_access_secret", "")
 	viper.SetDefault("local_agent_cluster_name", "in-cluster")

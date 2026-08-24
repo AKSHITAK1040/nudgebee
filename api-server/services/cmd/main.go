@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"nudgebee/services/api"
+	"nudgebee/services/bootstrap"
 	"nudgebee/services/common"
 	"nudgebee/services/config"
 	"nudgebee/services/internal/database"
@@ -218,6 +219,16 @@ func main() {
 	// pod killed before it ever served. 10s mirrors the license feature-flag
 	// reconcile's own bound.
 	bootCtx, cancelBoot := context.WithTimeout(context.Background(), 10*time.Second)
+
+	// Provision the first admin and tenant, so a fresh install is complete
+	// before anyone signs in. Inert unless an admin address is configured or
+	// carried by the licence; those installs provision at first login instead.
+	// This runs first because it registers the bundled cluster as part of the
+	// same call, which makes the reconcile below a no-op on a fresh install.
+	if err := bootstrap.Provision(bootCtx, logger); err != nil {
+		logger.Error("first-run provisioning failed; the deployment will fall back to provisioning at first login", "error", err)
+	}
+
 	if err := localagent.Reconcile(bootCtx, logger); err != nil {
 		logger.Error("local agent registration failed; the bundled cluster will not appear until this is resolved", "error", err)
 	}

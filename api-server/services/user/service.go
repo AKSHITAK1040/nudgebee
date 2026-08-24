@@ -858,6 +858,15 @@ func addUserToGroup(db *sqlx.DB, userId, groupId string) error {
 	return err
 }
 
+// GeneratedOrgName exposes the tenant-naming rule to install-time
+// provisioning, which has to pass a tenant name explicitly to get
+// get-or-create-by-name semantics. Exported rather than duplicated so a
+// deployment provisioned at boot and one provisioned at first login end up
+// with the same tenant name for the same admin.
+func GeneratedOrgName(displayName, username string) string {
+	return generateOrgName(displayName, username)
+}
+
 func generateOrgName(displayName, username string) string {
 	if displayName != "" {
 		return strings.Split(displayName, " ")[0] + "'s Org"
