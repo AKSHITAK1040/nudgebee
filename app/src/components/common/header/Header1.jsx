@@ -23,8 +23,9 @@ import NotificationOutlineIconDark from '@assets/new/bell-icon-dark.svg';
 import DocumentationIcon from '@assets/header/Documentation.svg';
 import newAwsLogo from '@assets/logo/aws_logo.png';
 import GroupingIcon from '@assets/header/group-icon.svg';
+import ApplicationGroupingIcon from '@assets/kubernetes/app-nodes-icons/ApplicationsIconBlue.icon.svg';
 import VmServerIcon from '@assets/new/vm-server.svg';
-import DashboardIconBlue from '@assets/home/Dashboard_Icon.svg';
+import DashboardIconBlue from '@assets/home/Dashboard_Gauge_Icon.svg';
 import OuK8sIcon from '@assets/ou-management/kubernetes_icon.icon.svg';
 import JiraIcon from '@assets/jira_icon.icon.svg';
 import GithubIcon from '@assets/github-icon.icon.svg';
@@ -537,7 +538,7 @@ const Header1 = ({ showBorder = false }) => {
       const isDashboardGroups = router.pathname === '/dashboards' && router.asPath.includes('#groups');
       setAnchorActiveTab({
         name: isDashboardGroups ? 'Application Group' : matchedTab.name,
-        icon: isDashboardGroups ? GroupingIcon : matchedTab.icon,
+        icon: isDashboardGroups ? ApplicationGroupingIcon : matchedTab.icon,
         showActiveCluster: matchedTab.showActiveCluster,
         disableDropdown: matchedTab.disableDropdown ?? false,
         connectClusterButton: matchedTab.connectClusterButton,
