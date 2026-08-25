@@ -244,3 +244,32 @@ func TestDependsOnScopingFollowsSeedResolution(t *testing.T) {
 		}
 	}
 }
+
+// A cloud alarm names its subject by the provider's id — an EC2 CPU alarm fires
+// on "i-0f568ef22d52139bb" — while the graph node it belongs to is named by its
+// Name tag. Matching alerts to dependents on name alone can therefore never
+// connect an instance's own alarm to the instance the graph reports as a
+// dependent, which is why a database incident showed nothing alerting while both
+// instances in front of it were at 100% CPU.
+func TestDependentMatchesAlertByResourceID(t *testing.T) {
+	const instanceID = "i-0f568ef22d52139bb"
+	dependent := core.ImpactedService{
+		Name: "nb-demo-web", ResourceID: instanceID, NodeType: core.NodeTypeComputeInstance,
+	}
+
+	// The alert index is keyed off the event's subject, which is the instance id.
+	if impactKey("", dependent.Name) == impactKey("", instanceID) {
+		t.Fatal("precondition changed: the Name tag and the instance id now key alike")
+	}
+	// Falling back to the resource id is what makes the two meet.
+	if impactKey("", dependent.ResourceID) != impactKey("", instanceID) {
+		t.Fatalf("resource-id key %q does not match the alarm subject key %q",
+			impactKey("", dependent.ResourceID), impactKey("", instanceID))
+	}
+
+	// A Kubernetes dependent has no resource id, so the fallback is inert there.
+	k8s := core.ImpactedService{Name: "checkout", Namespace: "shop", NodeType: core.NodeTypeWorkload}
+	if k8s.ResourceID != "" {
+		t.Error("Kubernetes dependents must not carry a provider resource id")
+	}
+}

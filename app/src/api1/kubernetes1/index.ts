@@ -1693,7 +1693,7 @@ const apiKubernetes1 = {
         seed { node_id name namespace type }
         impacted { name node_type namespace environment hops_away relationship alerting active_alerts { event_id title priority source starts_at } }
         depends_on { name node_type namespace hops_away relationship }
-        infrastructure_impacted { name node_type namespace hops_away relationship }
+        infrastructure_impacted { name node_type namespace hops_away relationship alerting active_alerts { event_id title priority source starts_at } }
         correlated_count
         dependent_count
         production_dependents

@@ -312,6 +312,14 @@ func annotateImpactedWithActiveAlerts(db *sqlx.DB, accountID, rootEventID string
 	correlated := 0
 	for i := range out {
 		alerts := byKey[impactKey(out[i].Namespace, out[i].Name)]
+		// Fall back to the provider's own id. A cloud alarm names its subject by
+		// that — an EC2 CPU alarm fires on "i-0f568ef22d52139bb" — while the graph
+		// node is named by its Name tag ("nb-demo-web"), so matching on name alone
+		// can never connect an instance's alarm to the instance the graph says is
+		// a dependent.
+		if len(alerts) == 0 && out[i].ResourceID != "" {
+			alerts = byKey[impactKey(out[i].Namespace, out[i].ResourceID)]
+		}
 		if len(alerts) == 0 {
 			continue
 		}
@@ -454,6 +462,13 @@ func handleEventGetImpact(h *ActionRequest, c *gin.Context, ctx *security.Reques
 
 	// Topology-driven correlation: which dependents are actually alerting in the window.
 	impacted, correlatedCount := annotateImpactedWithActiveAlerts(dbms.Db, accountID, eventID, rootTime, deps, !seedNamespaced)
+	// Infrastructure dependents get the same treatment. Skipping them made the
+	// alerting count structurally zero on a VM stack, where every dependent is a
+	// ComputeInstance and so lands here rather than in deps: the database's callers
+	// could be alarming loudly and the incident still reported nothing impacted.
+	infrastructure, infraCorrelated := annotateImpactedWithActiveAlerts(dbms.Db, accountID, eventID, rootTime,
+		scopeAndNormalize(impact.InfrastructureDependents, ""), !seedNamespaced)
+	correlatedCount += infraCorrelated
 	assembly := buildIncidentAssembly(ctx.GetLogger(), dbms.Db, accountID, eventID, rootTime, seedIdentity, dependsOnMap, !seedNamespaced)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -476,7 +491,7 @@ func handleEventGetImpact(h *ActionRequest, c *gin.Context, ctx *security.Reques
 		// are cluster- or account-scoped and carry no namespace (a cloud resource
 		// has none at all, a k8s Node is cluster-wide), so scoping them by the
 		// event's namespace discards every one of them.
-		"infrastructure_impacted": scopeAndNormalize(impact.InfrastructureDependents, ""),
+		"infrastructure_impacted": infrastructure,
 		"infrastructure_count":    impact.InfrastructureCount,
 		"coverage_confidence":     string(impact.CoverageConfidence),
 		"truncated":               impact.Truncated,

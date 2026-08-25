@@ -46,12 +46,18 @@ var flowObservationSources = map[string]bool{
 // ImpactedService is one dependent of a resource: an application-level node that
 // relies on it and could be affected if the resource is rightsized or removed.
 type ImpactedService struct {
-	NodeID      string   `json:"node_id"`
-	Name        string   `json:"name"`
-	NodeType    NodeType `json:"node_type"`
-	Namespace   string   `json:"namespace,omitempty"`
-	Environment string   `json:"environment,omitempty"`
-	HopsAway    int      `json:"hops_away"`
+	NodeID   string   `json:"node_id"`
+	Name     string   `json:"name"`
+	NodeType NodeType `json:"node_type"`
+	// ResourceID is the provider's own id for the node (an EC2 instance id, an
+	// ARN tail). Cloud alarms name their subject by it — a CPU alarm's subject is
+	// "i-0f568ef22d52139bb" — while the graph node is named by its Name tag, so
+	// callers matching alerts to dependents need both spellings or the two never
+	// meet. Empty for nodes that have no provider id (every Kubernetes one).
+	ResourceID  string `json:"resource_id,omitempty"`
+	Namespace   string `json:"namespace,omitempty"`
+	Environment string `json:"environment,omitempty"`
+	HopsAway    int    `json:"hops_away"`
 	// Relationship is the edge type linking this node one hop toward the seed
 	// (its own edge when direct, its first walked edge when multi-hop); Sources
 	// is the union of discovery sources asserting any such edge — the provenance
@@ -533,6 +539,7 @@ func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []
 			summary.InfrastructureDependents = append(summary.InfrastructureDependents, ImpactedService{
 				NodeID:       n.ID,
 				Name:         impactNodeName(n),
+				ResourceID:   impactNodeAttr(n, "resource_id"),
 				NodeType:     n.NodeType,
 				Namespace:    impactNodeAttr(n, "namespace"),
 				Environment:  impactNodeAttr(n, "environment"),
@@ -547,6 +554,7 @@ func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []
 		summary.Dependents = append(summary.Dependents, ImpactedService{
 			NodeID:       n.ID,
 			Name:         impactNodeName(n),
+			ResourceID:   impactNodeAttr(n, "resource_id"),
 			NodeType:     n.NodeType,
 			Namespace:    impactNodeAttr(n, "namespace"),
 			Environment:  env,
@@ -581,6 +589,7 @@ func summarizeDownstream(seedID string, nodes []*DbNode, edges []*DbEdge, nodeMi
 		deps = append(deps, ImpactedService{
 			NodeID:       n.ID,
 			Name:         impactNodeName(n),
+			ResourceID:   impactNodeAttr(n, "resource_id"),
 			NodeType:     n.NodeType,
 			Namespace:    impactNodeAttr(n, "namespace"),
 			Environment:  impactNodeAttr(n, "environment"),
