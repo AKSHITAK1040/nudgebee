@@ -22,6 +22,27 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
+// TriageResponse is the combined triage picture for a single event, returned by
+// the event_get_triage action. It deliberately carries no "correlated events"
+// lane: #34658 made the incident assembly (event_get_impact) the single source
+// of what else is related, and the pairwise event_correlations rows this
+// response used to expose are no longer rendered anywhere.
+type TriageResponse struct {
+	EventID         string                  `json:"event_id"`
+	IsDuplicate     bool                    `json:"is_duplicate"`
+	DuplicateInfo   *DuplicateInfo          `json:"duplicate_info,omitempty"`
+	HistoricalStats *triage.HistoricalStats `json:"historical_stats"`
+	HourlyTrend     []triage.HourlyBucket   `json:"hourly_trend"`
+}
+
+// DuplicateInfo contains information about duplicate events
+type DuplicateInfo struct {
+	FirstEventID     string                  `json:"first_event_id"`
+	OccurrenceNumber int                     `json:"occurrence_number"`
+	DuplicateChain   []triage.DuplicateEvent `json:"duplicate_chain"`
+	TotalOccurrences int                     `json:"total_occurrences"`
+}
+
 // handleTriageApis registers the triage action endpoint
 func handleTriageApis(router *gin.Engine, tracer *trace.Tracer, meter *metric.Meter, logger *slog.Logger) {
 	groupV2 := router.Group("/rpc")
@@ -50,6 +71,8 @@ func handleTriageAction(h *ActionRequest, c *gin.Context, tracer *trace.Tracer, 
 	}
 
 	switch actionName {
+	case "event_get_triage":
+		handleEventGetTriage(h, c, ctx)
 	case "event_get_duplicates":
 		handleEventGetDuplicates(h, c, ctx)
 	case "event_get_timeline":
@@ -112,6 +135,103 @@ func handleTriageAction(h *ActionRequest, c *gin.Context, tracer *trace.Tracer, 
 }
 
 // handleEventGetDuplicates returns the duplicate chain for an event
+// handleEventGetTriage returns the triage picture for an event: its duplicate
+// chain, historical firing stats and hourly trend. The llm-server
+// get_triage_explanation tool is its only caller — it is not routed through
+// app/src/lib/actions.yaml, so absence from that file is not evidence that this
+// handler is unused (see TestTriageActionsCoverLLMServerCallers).
+func handleEventGetTriage(h *ActionRequest, c *gin.Context, ctx *security.RequestContext) {
+	eventID, ok := h.Input["event_id"].(string)
+	if !ok || eventID == "" {
+		c.JSON(400, common.ErrorActionBadRequest("event_id is required"))
+		return
+	}
+
+	// Get event to extract fingerprint and account_id
+	ev, err := event.GetEvent(ctx, eventID)
+	if err != nil {
+		ctx.GetLogger().Error("Failed to get event", "error", err, "event_id", eventID)
+		c.JSON(400, common.ErrorActionBadRequest("event not found"))
+		return
+	}
+
+	if ev.CloudAccountId == nil || *ev.CloudAccountId == "" {
+		c.JSON(400, common.ErrorActionBadRequest("event has no account ID"))
+		return
+	}
+
+	if ev.Fingerprint == nil || *ev.Fingerprint == "" {
+		c.JSON(400, common.ErrorActionBadRequest("event has no fingerprint"))
+		return
+	}
+
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		ctx.GetLogger().Error("Failed to get database manager", "error", err)
+		c.JSON(400, common.ErrorActionBadRequest("database connection failed"))
+		return
+	}
+
+	response := TriageResponse{EventID: eventID}
+
+	// Get tenant ID for tenant isolation
+	tenantID := ctx.GetSecurityContext().GetTenantId()
+
+	// 1. Check if this is a duplicate.
+	//
+	// Being in a chain is NOT being a duplicate: the triage processor writes an
+	// event_duplicates row at occurrence_number 1 for the first firing too, so
+	// every triaged event is in a chain of at least itself (82.5% of dev chains
+	// are singletons). What makes an event a duplicate is its OWN occurrence
+	// number being past the first — not the chain's length, and not the chain's
+	// highest occurrence, which belongs to the newest sibling rather than to the
+	// event being explained.
+	duplicates, err := triage.GetDuplicateChain(ctx.GetContext(), dbms.Db, eventID, tenantID)
+	if err != nil {
+		ctx.GetLogger().Error("Failed to get duplicate chain", "error", err, "event_id", eventID)
+	} else if len(duplicates) > 0 {
+		occurrence := duplicates[len(duplicates)-1].OccurrenceNumber
+		found := false
+		for _, d := range duplicates {
+			if d.EventID == eventID {
+				occurrence, found = d.OccurrenceNumber, true
+				break
+			}
+		}
+		if !found {
+			// The chain is selected by this event's own first_event_id, so it
+			// always contains this event. Fall back to the previous behaviour
+			// rather than report 0 if that invariant ever breaks.
+			ctx.GetLogger().Warn("event missing from its own duplicate chain", "event_id", eventID)
+		}
+		response.IsDuplicate = occurrence > 1
+		response.DuplicateInfo = &DuplicateInfo{
+			FirstEventID:     duplicates[0].FirstEventID,
+			OccurrenceNumber: occurrence,
+			DuplicateChain:   duplicates,
+			TotalOccurrences: len(duplicates),
+		}
+	}
+
+	// 2. Get historical stats
+	historicalStats, err := triage.ComputeHistoricalStats(ctx.GetContext(), dbms.Db, *ev.Fingerprint, *ev.CloudAccountId)
+	if err != nil {
+		ctx.GetLogger().Error("Failed to compute historical stats", "error", err, "event_id", eventID)
+	} else {
+		response.HistoricalStats = historicalStats
+	}
+
+	// 3. Get hourly trend
+	hourlyTrend, err := triage.ComputeHourlyTrend(ctx.GetContext(), dbms.Db, *ev.Fingerprint, *ev.CloudAccountId)
+	if err != nil {
+		ctx.GetLogger().Error("Failed to compute hourly trend", "error", err, "event_id", eventID)
+	} else {
+		response.HourlyTrend = hourlyTrend
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
 func handleEventGetDuplicates(h *ActionRequest, c *gin.Context, ctx *security.RequestContext) {
 	eventID, ok := h.Input["event_id"].(string)
 	if !ok || eventID == "" {

@@ -2101,7 +2101,8 @@ func analyzeEventUsingAgentsAndUpdateDb(ctx *security.RequestContext, request Ev
 			summaryQuery := "Get the details of Event with id - " + eventData.Id +
 				". Also explain how Nudgebee auto-triaged this event: its triage status (nb_status), " +
 				"computed priority and the score_factors that produced it, and the deduplication chain and " +
-				"correlated events behind the decision. Use get_triage_explanation for the dedup chain and correlations."
+				"firing history behind the decision. Use get_triage_explanation for the dedup chain and " +
+				"firing history, and get_incident_assembly for what else is involved in the same incident."
 			summaryResp, err := core.HandleConversationSessionRequest(ctx, eventSummaryAgent, request.UserId, request.AccountId, parentConversationId, summaryQuery, core.ConversationSessionRequestWithSource(core.ConversationSourceInvestigation), core.ConversationSessionRequestWithEnableCritique(false), core.ConversationSessionRequestWithConfig(toolcore.NBQueryConfig{Labels: parsedLabels}))
 			if err != nil {
 				if errors.Is(err, core.ErrConversationInProgress) {
