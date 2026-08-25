@@ -1703,8 +1703,8 @@ var table_metadata = map[string]TableDefinition{
 			"incident_group_leader_id": {
 				Type: ColumnDefinitionTypeString,
 				Def: "coalesce(" +
-					"(array_agg(events.id::text ORDER BY coalesce(ecc.incident_member_count, 0) DESC, events.created_at DESC) " +
-					"FILTER (WHERE coalesce(ecc.incident_member_count, 0) > 0))[1], " +
+					"(array_agg(events.id::text ORDER BY ecc.incident_member_count DESC, events.created_at DESC) " +
+					"FILTER (WHERE ecc.incident_member_count > 0))[1], " +
 					"(array_agg(ecl.related_event_id::text ORDER BY events.created_at DESC) " +
 					"FILTER (WHERE ecl.related_event_id IS NOT NULL))[1])",
 				IsAggregated: true,

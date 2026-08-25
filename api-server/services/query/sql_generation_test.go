@@ -970,7 +970,7 @@ func TestSQLGen_RealTable_EventGroupings_IncidentGroupLeaderIsGroupAnchor(t *tes
 	// member and the panel renders "no related alerts" under a GROUPED badge.
 	assert.Contains(t, sql, "AS incident_group_leader_id")
 	// A row that LEADS resolves to its own biggest leader event...
-	assert.Contains(t, sql, "array_agg(events.id::text ORDER BY coalesce(ecc.incident_member_count, 0) DESC, events.created_at DESC) FILTER (WHERE coalesce(ecc.incident_member_count, 0) > 0)")
+	assert.Contains(t, sql, "array_agg(events.id::text ORDER BY ecc.incident_member_count DESC, events.created_at DESC) FILTER (WHERE ecc.incident_member_count > 0)")
 	// ...and only a row that merely BELONGS to one falls back to the link.
 	assert.Contains(t, sql, "array_agg(ecl.related_event_id::text ORDER BY events.created_at DESC) FILTER (WHERE ecl.related_event_id IS NOT NULL)")
 	// max() over the link alone cannot resolve a leading row at all, and picks
