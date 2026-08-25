@@ -170,6 +170,34 @@ func TestCloudAlertKeysMeetTheGraphNamespace(t *testing.T) {
 	}
 }
 
+// Normalising the seed's namespace without normalising the candidates' silently
+// empties the same-subject tier: AssembleTiers groups an alert with the seed when
+// their SubjectKeys are equal, and the seed would be keyed "|nb-demo-db" against
+// candidates keyed "amazonrds|nb-demo-db". The seed, the candidates and the
+// topology map are one identifier space and have to be normalised together.
+func TestAssemblySeedAndCandidatesShareOneNamespaceSpace(t *testing.T) {
+	seed := triage.AlertIdentity{SubjectName: "nb-demo-db", SubjectType: "db", AggregationKey: "nb-demo-rds-conns-high"}
+	rawCandidate := triage.AlertIdentity{
+		ID: "sibling", SubjectName: "nb-demo-db", SubjectNamespace: "AmazonRDS", SubjectType: "db",
+		AggregationKey: "nb-demo-rds-other", TsOffsetS: 60,
+	}
+
+	// Seed normalised, candidate not: the sibling alert falls out of the incident.
+	got := triage.AssembleTiers(seed, []triage.AlertIdentity{rawCandidate}, map[string][]string{}, map[string]triage.Rate{})
+	if got[rawCandidate.ID] == triage.TierCore {
+		t.Fatal("precondition changed: a raw-namespace candidate now groups with a normalised seed")
+	}
+
+	// Both normalised: the alert on the same subject is part of the same incident.
+	normalised := rawCandidate
+	normalised.SubjectNamespace = ""
+	got = triage.AssembleTiers(seed, []triage.AlertIdentity{normalised}, map[string][]string{}, map[string]triage.Rate{})
+	if got[normalised.ID] != triage.TierCore {
+		t.Fatalf("same-subject candidate tier = %q, want %q — fetchWindowRows must blank the namespace whenever the seed's was blanked",
+			got[normalised.ID], triage.TierCore)
+	}
+}
+
 // The same trap, one field over: depends_on and impacted were still scoped by
 // the event namespace for every seed, so a load-balancer alarm returned
 // depends_on: null even after the graph traversal started finding its backend.

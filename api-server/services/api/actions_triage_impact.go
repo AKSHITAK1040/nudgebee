@@ -271,6 +271,17 @@ func annotateImpactedWithActiveAlerts(db *sqlx.DB, accountID, rootEventID string
 	defer func() { _ = rows.Close() }()
 
 	byKey := map[string][]alertRef{}
+	// index files an alert under the event's own namespace and, for a
+	// namespace-blind seed, under the empty namespace the graph nodes use.
+	// Defined once outside the loop and taking the alert as an argument: closing
+	// over a per-row variable would force a fresh closure allocation on each of
+	// the up-to-1000 rows.
+	index := func(ns, key string, ref alertRef) {
+		byKey[impactKey(ns, key)] = append(byKey[impactKey(ns, key)], ref)
+		if namespaceBlind && ns != "" {
+			byKey[impactKey("", key)] = append(byKey[impactKey("", key)], ref)
+		}
+	}
 	for rows.Next() {
 		var id, sname, sns, sowner, title, prio, source string
 		var startsAt sql.NullTime
@@ -281,25 +292,17 @@ func annotateImpactedWithActiveAlerts(db *sqlx.DB, accountID, rootEventID string
 		if startsAt.Valid {
 			ref.StartsAt = startsAt.Time.UTC().Format(time.RFC3339)
 		}
-		// index files the alert under the event's own namespace and, for a
-		// namespace-blind seed, under the empty namespace the graph nodes use.
-		index := func(ns, key string) {
-			byKey[impactKey(ns, key)] = append(byKey[impactKey(ns, key)], ref)
-			if namespaceBlind && ns != "" {
-				byKey[impactKey("", key)] = append(byKey[impactKey("", key)], ref)
-			}
-		}
 		if sname != "" {
-			index(sns, sname)
+			index(sns, sname, ref)
 			// Dependent names arrive workload-normalized (scopeAndNormalize), so an
 			// ownerless event whose subject is itself a ReplicaSet must be indexed under
 			// its workload too, or it can never be matched back.
 			if wn := triage.WorkloadName(sname); wn != strings.ToLower(strings.TrimSpace(sname)) {
-				index(sns, wn)
+				index(sns, wn, ref)
 			}
 		}
 		if sowner != "" && !strings.EqualFold(sowner, sname) {
-			index(sns, sowner)
+			index(sns, sowner, ref)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -401,7 +404,7 @@ func handleEventGetImpact(h *ActionRequest, c *gin.Context, ctx *security.Reques
 			"correlated_count":    0,
 			"dependent_count":     0,
 			"coverage_confidence": string(core.CoverageNone),
-			"assembly":            buildIncidentAssembly(ctx.GetLogger(), dbms.Db, accountID, eventID, rootTime, seedIdentity, dependsOnMap),
+			"assembly":            buildIncidentAssembly(ctx.GetLogger(), dbms.Db, accountID, eventID, rootTime, seedIdentity, dependsOnMap, false),
 		})
 		return
 	}
@@ -451,7 +454,7 @@ func handleEventGetImpact(h *ActionRequest, c *gin.Context, ctx *security.Reques
 
 	// Topology-driven correlation: which dependents are actually alerting in the window.
 	impacted, correlatedCount := annotateImpactedWithActiveAlerts(dbms.Db, accountID, eventID, rootTime, deps, !seedNamespaced)
-	assembly := buildIncidentAssembly(ctx.GetLogger(), dbms.Db, accountID, eventID, rootTime, seedIdentity, dependsOnMap)
+	assembly := buildIncidentAssembly(ctx.GetLogger(), dbms.Db, accountID, eventID, rootTime, seedIdentity, dependsOnMap, !seedNamespaced)
 
 	c.JSON(http.StatusOK, gin.H{
 		"event_id":              eventID,
@@ -523,7 +526,7 @@ type windowRow struct {
 // any DB error it returns an empty-but-valid assembly so the rest of the panel
 // response is unaffected. Runs for unresolved seeds too (empty topology →
 // same_incident + seed config-changes only).
-func buildIncidentAssembly(log *slog.Logger, db *sqlx.DB, accountID, rootEventID string, rootTime time.Time, seed triage.AlertIdentity, dependsOn map[string][]string) gin.H {
+func buildIncidentAssembly(log *slog.Logger, db *sqlx.DB, accountID, rootEventID string, rootTime time.Time, seed triage.AlertIdentity, dependsOn map[string][]string, namespaceBlind bool) gin.H {
 	windowMeta := gin.H{"lead_in_s": 7200, "core_s": 7200, "impact_s": 7200}
 	empty := gin.H{
 		"root_identity":    triage.SubjectKey(seed),
@@ -539,7 +542,7 @@ func buildIncidentAssembly(log *slog.Logger, db *sqlx.DB, accountID, rootEventID
 		return empty
 	}
 
-	wr, truncated := fetchWindowRows(log, db, accountID, rootEventID, rootTime)
+	wr, truncated := fetchWindowRows(log, db, accountID, rootEventID, rootTime, namespaceBlind)
 	if len(wr) == 0 {
 		return empty
 	}
@@ -651,7 +654,13 @@ const windowFetchLimit = 1000
 // them) and returns each row's fingerprint (for the rarity count) and its offset
 // from the root. Errors are logged and yield an empty slice so assembly degrades to
 // empty, not a failed response. The bool reports whether the LIMIT was hit.
-func fetchWindowRows(log *slog.Logger, db *sqlx.DB, accountID, rootEventID string, rootTime time.Time) ([]windowRow, bool) {
+// namespaceBlind drops the namespace from every candidate identity, and must be
+// set whenever the seed's was dropped. The three identifier spaces the assembly
+// joins — the seed, these candidates, and the topology map built from graph
+// nodes — have to agree, and a cloud resource has no namespace in the graph.
+// Normalising only the seed makes it match the topology and stop matching the
+// alerts, which silently empties the same-subject tier.
+func fetchWindowRows(log *slog.Logger, db *sqlx.DB, accountID, rootEventID string, rootTime time.Time, namespaceBlind bool) ([]windowRow, bool) {
 	const winQ = `
 		SELECT id::text, COALESCE(fingerprint,''), COALESCE(subject_name,''), COALESCE(subject_namespace,''),
 		       COALESCE(subject_owner,''), COALESCE(subject_type,''), COALESCE(aggregation_key,''),
@@ -689,6 +698,9 @@ func fetchWindowRows(log *slog.Logger, db *sqlx.DB, accountID, rootEventID strin
 		if startsAt.Valid {
 			sa = startsAt.Time
 			dt = int(sa.Sub(rootTime).Seconds())
+		}
+		if namespaceBlind {
+			sns = ""
 		}
 		wr = append(wr, windowRow{
 			id: triage.AlertIdentity{
