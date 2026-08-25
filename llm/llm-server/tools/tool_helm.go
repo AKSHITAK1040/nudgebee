@@ -27,6 +27,12 @@ func (m HelmExecuteTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("helm ...")` instead of `helm_execute`.
+func (m HelmExecuteTool) ShellCommandPrefixes() []string { return []string{"helm"} }
+
 func (m HelmExecuteTool) Description() string {
 	return `Executes 'helm' commands against the user's Kubernetes cluster. This tool allows you to gather information about the cluster's resources and configuration, enabling you to provide informed assistance and suggestions.
 

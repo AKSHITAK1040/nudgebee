@@ -34,6 +34,12 @@ func (m ServerExecuteTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("ssh ...")` instead of `server_execute`.
+func (m ServerExecuteTool) ShellCommandPrefixes() []string { return []string{"ssh"} }
+
 func (m ServerExecuteTool) Description() string {
 	return `Executes Shell commands against the provided Server instance. This tool allows you to gather information about perticular Server instance, enabling you to provide informed assistance and suggestions.
 

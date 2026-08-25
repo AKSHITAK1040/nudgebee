@@ -29,6 +29,15 @@ func (m ClickhouseExecuteTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("clickhouse-client ...")` instead of
+// `clickhouse_execute`.
+func (m ClickhouseExecuteTool) ShellCommandPrefixes() []string {
+	return []string{"clickhouse-client", "clickhouse"}
+}
+
 func (m ClickhouseExecuteTool) Description() string {
 	return `Executes read-only 'ClickHouse' queries against the user's Database. This tool allows you to gather information about the ClickHouse tables and system views, enabling you to provide informed assistance and suggestions.
 

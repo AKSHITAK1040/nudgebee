@@ -62,6 +62,12 @@ func (t AwsCliTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("aws ...")` instead of `aws_execute`.
+func (t AwsCliTool) ShellCommandPrefixes() []string { return []string{"aws"} }
+
 func (t AwsCliTool) Description() string {
 	return `Executes 'aws' CLI commands.  This tool allows gathering information from various AWS services.
 

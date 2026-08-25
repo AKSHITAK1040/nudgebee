@@ -31,6 +31,15 @@ func (m RabbitExecuteTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("rabbitmqadmin ...")` instead of
+// `rabbit_execute`.
+func (m RabbitExecuteTool) ShellCommandPrefixes() []string {
+	return []string{"rabbitmqadmin", "rabbitmq-api", "rabbitmqctl"}
+}
+
 func (m RabbitExecuteTool) Description() string {
 	return `Executes 'rabbitmqadmin' commands or 'curl' calls against the RabbitMQ HTTP Management API. This tool allows you to gather information about RabbitMQ resources and configuration, enabling you to provide informed assistance and suggestions.
 

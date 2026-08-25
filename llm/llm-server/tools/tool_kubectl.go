@@ -496,6 +496,12 @@ func (m KubectlExecuteTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("kubectl ...")` instead of `kubectl_execute`.
+func (m KubectlExecuteTool) ShellCommandPrefixes() []string { return []string{"kubectl"} }
+
 func (m KubectlExecuteTool) Description() string {
 	return `Executes 'kubectl' commands against the user's Kubernetes cluster. This tool allows you to gather information about the cluster's resources and configuration, enabling you to provide informed assistance and suggestions.
 

@@ -51,6 +51,12 @@ func (t AzureCliTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("az ...")` instead of `azure_execute`.
+func (t AzureCliTool) ShellCommandPrefixes() []string { return []string{"az"} }
+
 func (t AzureCliTool) Description() string {
 	return `Executes 'az' CLI commands.  This tool allows gathering information from various Azure services.
 

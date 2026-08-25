@@ -263,6 +263,30 @@ type ToolRequestInferencePrompt interface {
 	InferToolRequestTypePrompt(ctx *security.RequestContext, toolName, input string) (string, error)
 }
 
+// ShellWrappable is implemented by CLI tools whose executable name (`kubectl`,
+// `aws`, `gh`, ...) can also appear as the leading token of a `shell_execute`
+// command. When shell_execute is invoked with such a command, the shell tool's
+// classifier walks registered ShellWrappable tools and delegates
+// InferToolRequestType to the matching implementation — so the destructive-
+// action confirmation gate fires the same way as if the CLI tool had been
+// invoked directly. Without this, `shell_execute("kubectl delete deploy X")`
+// would run unconfirmed while `kubectl_execute("kubectl delete deploy X")`
+// asks for approval — a bypass that defeats the per-tool consent layer.
+//
+// A tool implementing ShellWrappable must also implement at least one of
+// ToolRequestInference or ToolRequestInferencePrompt so shell_execute can
+// delegate its classification.
+// TestShellCommandPrefixRegistry_CoversExpectedCLIs pins the expected built-in
+// CLI set. When adding a CLI tool, update that list as part of registration.
+//
+// Prefixes are the command name as typed at the shell (`gh`, `glab`, `az`) —
+// which frequently differs from the tool name (`github_execute`,
+// `gitlab_execute`, `azure_execute`). List every alias the CLI accepts (e.g.
+// `aws` alone; not `awscli`).
+type ShellWrappable interface {
+	ShellCommandPrefixes() []string
+}
+
 // ToolConfirmationScope is an optional interface for write tools whose user
 // confirmation must be per-action rather than per-tool. By default a
 // write-confirmation is recorded under the tool name, so the first "yes"
