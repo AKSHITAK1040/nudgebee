@@ -165,8 +165,12 @@ const transformTableData = (
       startTime: dateRange.startDate,
       endTime: dateRange.endDate,
       accountId: item.account_id,
-      // For the Grouped Alerts drill-down tab (#34655).
+      // For the Grouped Alerts drill-down tab (#34655). The group anchor is
+      // not the row's latest event — a recurring fingerprint leads its group
+      // from its OLDEST event — so the drill-down resolves from the anchor and
+      // only falls back to the latest event for rows with no group at all.
       latestEventId: item.latest_event_id,
+      groupLeaderId: item.incident_group_leader_id,
       aggregationKey: item.aggregation_key,
       hasAlertGroup: Boolean((item.incident_group_size ?? 0) > 0 || item.is_incident_child),
       ...(nbStatus && nbStatus.length > 0 ? { nb_status: nbStatus } : {}),
@@ -1342,7 +1346,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
                 const groupedTab = {
                   text: 'Grouped Alerts',
                   key: 'incident-members',
-                  componentFn: (_opt: any, q: any) => <IncidentGroupDrilldown eventId={q.latestEventId} accountId={q.accountId} />,
+                  componentFn: (_opt: any, q: any) => <IncidentGroupDrilldown eventId={q.groupLeaderId || q.latestEventId} accountId={q.accountId} />,
                 };
                 return dq?.hasAlertGroup ? [groupedTab, eventsTab] : [eventsTab, groupedTab];
               },

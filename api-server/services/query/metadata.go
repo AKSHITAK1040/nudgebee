@@ -1692,9 +1692,21 @@ var table_metadata = map[string]TableDefinition{
 				Def:          "bool_or(ecl.related_event_id IS NOT NULL)",
 				IsAggregated: true,
 			},
+			// The event id the Grouped Alerts drill-down resolves the row's
+			// group from. A row's newest event is usually neither a leader nor
+			// a member — the leader is the OLDEST event of a recurring
+			// fingerprint — so anchoring on latest_event_id left rows that
+			// visibly carry a GROUPED badge showing "no related alerts".
+			// Leading rows anchor on their own largest leader (a row can hold
+			// more than one; incident_group_size is that same max); child rows
+			// anchor on the leader their newest linked event points at.
 			"incident_group_leader_id": {
-				Type:         ColumnDefinitionTypeString,
-				Def:          "max(ecl.related_event_id::text)",
+				Type: ColumnDefinitionTypeString,
+				Def: "coalesce(" +
+					"(array_agg(events.id::text ORDER BY coalesce(ecc.incident_member_count, 0) DESC, events.created_at DESC) " +
+					"FILTER (WHERE coalesce(ecc.incident_member_count, 0) > 0))[1], " +
+					"(array_agg(ecl.related_event_id::text ORDER BY events.created_at DESC) " +
+					"FILTER (WHERE ecl.related_event_id IS NOT NULL))[1])",
 				IsAggregated: true,
 			},
 		},
