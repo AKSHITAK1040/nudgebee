@@ -114,16 +114,14 @@ func resolveStoragePricing(pv map[string]any, storageClasses map[string]map[stri
 	}
 	if provider != "" && className != "" {
 		if diskType, ok := wellKnownClassDiskType[provider][className]; ok {
-			return storagePricing{
-				PricePerGB: storageRatesPerGBMonth[provider][diskType],
-				DiskType:   diskType, Provider: provider, Source: "class_name",
+			if rate, ok := storageRatesPerGBMonth[provider][diskType]; ok {
+				return storagePricing{PricePerGB: rate, DiskType: diskType, Provider: provider, Source: "class_name"}
 			}
 		}
 	}
 	if diskType, ok := providerDefaultDiskType[provider]; ok {
-		return storagePricing{
-			PricePerGB: storageRatesPerGBMonth[provider][diskType],
-			DiskType:   diskType, Provider: provider, Source: "provider_default",
+		if rate, ok := storageRatesPerGBMonth[provider][diskType]; ok {
+			return storagePricing{PricePerGB: rate, DiskType: diskType, Provider: provider, Source: "provider_default"}
 		}
 	}
 	return storagePricing{PricePerGB: fallbackStorageRatePerGBMonth, Source: "fallback"}

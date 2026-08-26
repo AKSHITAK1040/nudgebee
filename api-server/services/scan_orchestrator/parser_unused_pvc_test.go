@@ -183,6 +183,24 @@ func TestParseUnusedPVs_StorageClassRate(t *testing.T) {
 	}
 }
 
+func TestStorageRateMapsConsistent(t *testing.T) {
+	// Every disk type the resolution maps can emit must have a rate — a
+	// drifted entry would otherwise silently price at the fallback. Guards
+	// future rate edits; the python copies rely on the same invariant.
+	for provider, classes := range wellKnownClassDiskType {
+		for className, diskType := range classes {
+			if _, ok := storageRatesPerGBMonth[provider][diskType]; !ok {
+				t.Errorf("wellKnownClassDiskType[%s][%s] = %s has no rate", provider, className, diskType)
+			}
+		}
+	}
+	for provider, diskType := range providerDefaultDiskType {
+		if _, ok := storageRatesPerGBMonth[provider][diskType]; !ok {
+			t.Errorf("providerDefaultDiskType[%s] = %s has no rate", provider, diskType)
+		}
+	}
+}
+
 func TestResolveStoragePricing_Ladder(t *testing.T) {
 	gkeClasses := map[string]map[string]any{
 		"custom-ssd": {

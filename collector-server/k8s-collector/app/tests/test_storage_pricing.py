@@ -99,6 +99,15 @@ class TestResolveStoragePricing(unittest.TestCase):
         self.assertEqual(pricing["price_per_gb"], sp.FALLBACK_STORAGE_RATE_PER_GB_MONTH)
 
 
+class TestRateMapsConsistent(unittest.TestCase):
+    def test_every_emittable_disk_type_has_a_rate(self):
+        for provider, classes in sp.WELL_KNOWN_CLASS_DISK_TYPE.items():
+            for class_name, disk_type in classes.items():
+                self.assertIn(disk_type, sp.STORAGE_RATES_PER_GB_MONTH[provider], f"{provider}/{class_name}")
+        for provider, disk_type in sp.PROVIDER_DEFAULT_DISK_TYPE.items():
+            self.assertIn(disk_type, sp.STORAGE_RATES_PER_GB_MONTH[provider], provider)
+
+
 class TestGetK8sProvider(unittest.TestCase):
     def setUp(self):
         sp._provider_cache.clear()

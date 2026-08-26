@@ -155,22 +155,14 @@ def resolve_storage_pricing(pv, storage_classes=None, provider="") -> dict:
             return {"price_per_gb": rate, "disk_type": disk_type, "provider": resolved, "source": "parameters"}
 
     if resolved and class_name:
-        disk_type = WELL_KNOWN_CLASS_DISK_TYPE.get(resolved, {}).get(class_name)
-        if disk_type:
-            return {
-                "price_per_gb": STORAGE_RATES_PER_GB_MONTH[resolved][disk_type],
-                "disk_type": disk_type,
-                "provider": resolved,
-                "source": "class_name",
-            }
+        disk_type = WELL_KNOWN_CLASS_DISK_TYPE.get(resolved, {}).get(class_name, "")
+        rate = STORAGE_RATES_PER_GB_MONTH.get(resolved, {}).get(disk_type)
+        if rate is not None:
+            return {"price_per_gb": rate, "disk_type": disk_type, "provider": resolved, "source": "class_name"}
 
-    default_type = PROVIDER_DEFAULT_DISK_TYPE.get(resolved)
-    if default_type:
-        return {
-            "price_per_gb": STORAGE_RATES_PER_GB_MONTH[resolved][default_type],
-            "disk_type": default_type,
-            "provider": resolved,
-            "source": "provider_default",
-        }
+    default_type = PROVIDER_DEFAULT_DISK_TYPE.get(resolved, "")
+    rate = STORAGE_RATES_PER_GB_MONTH.get(resolved, {}).get(default_type)
+    if rate is not None:
+        return {"price_per_gb": rate, "disk_type": default_type, "provider": resolved, "source": "provider_default"}
 
     return {"price_per_gb": FALLBACK_STORAGE_RATE_PER_GB_MONTH, "source": "fallback"}
