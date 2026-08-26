@@ -3,6 +3,7 @@ package scan_orchestrator
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"nudgebee/services/internal/database"
@@ -36,10 +37,22 @@ func RunUnusedPVCScan(ctx *security.RequestContext, account ScanAccount) error {
 	if err != nil {
 		return fmt.Errorf("unused_pvc: list pvs: %w", err)
 	}
-	logger.Info("unused_pvc: fetched", "pods", len(pods), "pvcs", len(pvcs), "pvs", len(pvs))
+	// StorageClasses refine the per-GB rate; a fetch failure (old agent, RBAC)
+	// must not fail the scan — pricing degrades to provider defaults.
+	storageClasses := map[string]map[string]any{}
+	if scs, scErr := fetchK8sList(account.AccountID, "storageclasses", "storage.k8s.io", "v1", false); scErr != nil {
+		logger.Warn("unused_pvc: list storageclasses failed, pricing falls back to provider defaults", "error", scErr)
+	} else {
+		for _, sc := range scs {
+			if name := getStringField(getMapField(sc, "metadata"), "name"); name != "" {
+				storageClasses[name] = sc
+			}
+		}
+	}
+	logger.Info("unused_pvc: fetched", "pods", len(pods), "pvcs", len(pvcs), "pvs", len(pvs), "storage_classes", len(storageClasses))
 
 	unused := IdentifyUnusedPVs(pods, pvcs, pvs)
-	recs, err := ParseUnusedPVs(unused, account)
+	recs, err := ParseUnusedPVs(unused, storageClasses, fetchK8sProvider(account), account)
 	if err != nil {
 		return fmt.Errorf("unused_pvc: parse: %w", err)
 	}
@@ -125,6 +138,37 @@ func fetchK8sList(accountID, resourceType, group, version string, allNamespaces 
 		return nil, fmt.Errorf("get_resource %s: parse items: %w", resourceType, err)
 	}
 	return items, nil
+}
+
+// fetchK8sProvider returns the account's canonical cloud provider
+// ("aws"/"gcp"/"azure") from agent telemetry, or "" — the same backstop rung
+// the python producers' ladders use (get_k8s_provider), so both unused_pvc
+// writers price a signal-less PV identically. Lookup failure degrades
+// pricing, never the scan.
+func fetchK8sProvider(account ScanAccount) string {
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return ""
+	}
+	var provider string
+	if err := dbms.Db.Get(&provider,
+		`SELECT k8s_provider FROM agent
+		 WHERE cloud_account_id = $1
+		   AND k8s_provider IS NOT NULL AND k8s_provider != ''
+		 LIMIT 1`,
+		account.AccountID,
+	); err != nil {
+		return ""
+	}
+	switch strings.ToLower(provider) {
+	case "eks":
+		return "aws"
+	case "gke":
+		return "gcp"
+	case "aks":
+		return "azure"
+	}
+	return strings.ToLower(provider)
 }
 
 // persistUnusedPVCs archives the previous scan's unused_pvc rows then

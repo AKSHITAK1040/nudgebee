@@ -121,7 +121,7 @@ func TestParseUnusedPVs_Shape(t *testing.T) {
 	unused := []map[string]any{
 		makePV("pv-released", "Released", "50Gi", "", ""),
 	}
-	recs, err := ParseUnusedPVs(unused, ScanAccount{AccountID: "acc-1", TenantID: "tenant-1"})
+	recs, err := ParseUnusedPVs(unused, nil, "", ScanAccount{AccountID: "acc-1", TenantID: "tenant-1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,9 @@ func TestParseUnusedPVs_Shape(t *testing.T) {
 	if r.AccountObjectID != "/pv-released" {
 		t.Errorf("account_object_id = %q; want /pv-released (PVs are cluster-scoped → leading slash matches collector)", r.AccountObjectID)
 	}
-	wantSavings := 50.0 * UnusedPVCSavingFactor
+	// No storage class / provider signal on the PV → full monthly cost at
+	// the fallback rate.
+	wantSavings := 50.0 * fallbackStorageRatePerGBMonth
 	if r.EstimatedSavings != wantSavings {
 		t.Errorf("savings = %f; want %f", r.EstimatedSavings, wantSavings)
 	}
@@ -153,6 +155,86 @@ func TestParseUnusedPVs_Shape(t *testing.T) {
 	if md, _ := body["metadata"].(map[string]any); md["name"] != "pv-released" {
 		t.Errorf("recommendation body lost metadata.name: %v", body)
 	}
+	pricing, _ := body["pricing"].(map[string]any)
+	if pricing == nil || pricing["source"] != "fallback" {
+		t.Errorf("recommendation body should carry pricing with source=fallback: %v", body["pricing"])
+	}
+}
+
+func TestParseUnusedPVs_StorageClassRate(t *testing.T) {
+	pv := makePV("pv-gcp-standard", "Released", "100Gi", "", "")
+	pv["spec"].(map[string]any)["storage_class_name"] = "slow-disks"
+	storageClasses := map[string]map[string]any{
+		"slow-disks": {
+			"metadata":    map[string]any{"name": "slow-disks"},
+			"provisioner": "pd.csi.storage.gke.io",
+			"parameters":  map[string]any{"type": "pd-standard"},
+		},
+	}
+	recs, err := ParseUnusedPVs([]map[string]any{pv}, storageClasses, "", ScanAccount{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 rec, got %d", len(recs))
+	}
+	if want := 100.0 * 0.04; recs[0].EstimatedSavings != want {
+		t.Errorf("savings = %f; want %f (100GB pd-standard full monthly cost)", recs[0].EstimatedSavings, want)
+	}
+}
+
+func TestResolveStoragePricing_Ladder(t *testing.T) {
+	gkeClasses := map[string]map[string]any{
+		"custom-ssd": {
+			"provisioner": "pd.csi.storage.gke.io",
+			"parameters":  map[string]any{"type": "pd-ssd"},
+		},
+		"standard": {
+			"provisioner": "kubernetes.io/gce-pd",
+		},
+	}
+	pvWithClass := func(class string) map[string]any {
+		return map[string]any{"spec": map[string]any{"storage_class_name": class}}
+	}
+
+	if p := resolveStoragePricing(pvWithClass("custom-ssd"), gkeClasses, ""); p.Source != "parameters" || p.PricePerGB != 0.17 {
+		t.Errorf("parameters rung: got %+v", p)
+	}
+	// Class without parameters → well-known GKE name.
+	if p := resolveStoragePricing(pvWithClass("standard"), gkeClasses, ""); p.Source != "class_name" || p.PricePerGB != 0.04 {
+		t.Errorf("class_name rung: got %+v", p)
+	}
+	// Unknown class, provider from the PV's own CSI driver → provider default.
+	pvCSI := map[string]any{"spec": map[string]any{
+		"storage_class_name": "who-knows",
+		"csi":                map[string]any{"driver": "ebs.csi.aws.com"},
+	}}
+	if p := resolveStoragePricing(pvCSI, nil, ""); p.Source != "provider_default" || p.DiskType != "gp2" {
+		t.Errorf("provider_default rung: got %+v", p)
+	}
+	// Azure skuName casing normalizes.
+	azClasses := map[string]map[string]any{
+		"fast": {
+			"provisioner": "disk.csi.azure.com",
+			"parameters":  map[string]any{"skuName": "Premium_LRS"},
+		},
+	}
+	if p := resolveStoragePricing(pvWithClass("fast"), azClasses, ""); p.Source != "parameters" || p.PricePerGB != 0.12 {
+		t.Errorf("azure skuName: got %+v", p)
+	}
+	// No PV-level signal at all → the account-provider backstop decides,
+	// matching the python producers' get_k8s_provider rung.
+	bare := map[string]any{"spec": map[string]any{}}
+	if p := resolveStoragePricing(bare, nil, "azure"); p.Source != "provider_default" || p.PricePerGB != 0.075 {
+		t.Errorf("account-provider backstop: got %+v", p)
+	}
+	// On-prem class name that collides with a GKE default must NOT price as GCP.
+	onPrem := map[string]map[string]any{
+		"standard": {"provisioner": "rancher.io/local-path"},
+	}
+	if p := resolveStoragePricing(pvWithClass("standard"), onPrem, ""); p.Source != "fallback" || p.PricePerGB != fallbackStorageRatePerGBMonth {
+		t.Errorf("on-prem fallback: got %+v", p)
+	}
 }
 
 func TestParseUnusedPVs_DedupesByAccountObjectID(t *testing.T) {
@@ -161,7 +243,7 @@ func TestParseUnusedPVs_DedupesByAccountObjectID(t *testing.T) {
 	// produce duplicate recommendation rows because the conflict tuple
 	// collapses them anyway.
 	twin := makePV("pv-twin", "Released", "8Gi", "", "")
-	recs, err := ParseUnusedPVs([]map[string]any{twin, twin}, ScanAccount{})
+	recs, err := ParseUnusedPVs([]map[string]any{twin, twin}, nil, "", ScanAccount{})
 	if err != nil {
 		t.Fatal(err)
 	}
