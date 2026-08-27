@@ -11,6 +11,7 @@ frozen one), never a failed conversation. All Slack and HTTP calls run on the
 poller's own daemon thread — nothing new lands on the shared event loop.
 """
 
+import json
 import logging
 import re
 import threading
@@ -61,7 +62,7 @@ _TASK_FIELD_LIMIT = 250
 # what it's actually doing, and so two rows sharing a tool_name (e.g. the
 # same recommendation executed twice) don't render as identical titles.
 # Hard-capped since thought is free LLM prose with no length contract.
-_TASK_TITLE_CHAR_LIMIT = 58
+_TASK_TITLE_CHAR_LIMIT = 80
 # Header shown from panel creation until the first tool title arrives.
 _INITIAL_HEADER = "Thinking"
 # Synthetic first task so the panel opens already populated (Slack renders a
@@ -453,7 +454,7 @@ def _build_chunks(tool_calls, sent_statuses, force_settle=False):
             {
                 "type": "task_update",
                 "id": row_id,
-                "title": _task_title(row.get("tool_name"), row.get("thought"), status),
+                "title": _task_title(row.get("tool_name"), row.get("thought"), status, row.get("parameters")),
                 "status": status,
             }
         )
@@ -526,21 +527,92 @@ _AND_WORD = re.compile(r"\band\b", re.IGNORECASE)
 # embedded.
 _MARKDOWN_WRAPPER_CHARS = re.compile(r"(?<![A-Za-z0-9])[`*_]+|[`*_]+(?![A-Za-z0-9])")
 
+# `_SELF_DESCRIBING` values already name their own action ("kubectl ...",
+# "SELECT ...") and go in verbatim; `_TARGET` values are a bare argument (rg
+# pattern, glob) that only reads as a command once led with the tool name.
+_PARAM_SELF_DESCRIBING_KEYS = ("command", "query", "sql")
+_PARAM_TARGET_KEYS = ("pattern", "path_glob")
 
-def _task_title(tool_name, thought=None, status=None):
+
+def _lead_with_tool(tool_name, text):
+    tool_name = (tool_name or "").strip()
+    return f"{tool_name} {text}" if tool_name else text
+
+
+def _command_from_parameters(parameters, tool_name=None):
+    """One-liner describing what a tool call runs, from its persisted
+    `parameters`. Fallback for rows the planner left with no `thought` (relay
+    sub-steps, code-analysis file ops) that otherwise render as an
+    undifferentiated stack of one bare tool name. "" when nothing readable.
+
+    Only an allow-list of command-ish keys is surfaced, so secret keys
+    (`github_token`, `credentials`) can never reach the panel.
+
+    `parameters` is a JSON string in every row seen so far, but the field is
+    loosely typed upstream - accept a pre-parsed dict/list too rather than
+    crash the poller on an unexpected shape.
+    """
+    if not parameters:
+        return ""
+    if isinstance(parameters, (dict, list)):
+        obj = parameters
+    else:
+        raw = str(parameters).strip()
+        if not raw:
+            return ""
+        if raw[0] not in "{[":
+            return " ".join(raw.split())
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            return ""
+    if isinstance(obj, list):
+        return _lead_with_tool(tool_name, " ".join(str(x) for x in obj))
+    if not isinstance(obj, dict):
+        return ""
+    for key in _PARAM_SELF_DESCRIBING_KEYS:
+        val = obj.get(key)
+        if isinstance(val, str) and val.strip():
+            return " ".join(val.split())
+    for key in _PARAM_TARGET_KEYS:
+        val = obj.get(key)
+        if isinstance(val, str) and val.strip():
+            return _lead_with_tool(tool_name, " ".join(val.split()))
+    args = obj.get("args")
+    if isinstance(args, list) and args:
+        return _lead_with_tool(tool_name, " ".join(str(x) for x in args))
+    path = obj.get("file_path") or obj.get("path")
+    if isinstance(path, str) and path.strip():
+        start, end = obj.get("start_line"), obj.get("end_line")
+        loc = f"{path}:{start}-{end}" if isinstance(start, int) and isinstance(end, int) else path
+        return _lead_with_tool(tool_name, loc)
+    return ""
+
+
+def _task_title(tool_name, thought=None, status=None, parameters=None):
     thought = " ".join((thought or "").split())
+    is_command = False
     if thought:
         title = _drop_deliberation_prefix(thought) or thought
+        title = _AND_WORD.sub("&", title)
+        title = _MARKDOWN_WRAPPER_CHARS.sub("", title) or title
+        title = title[:1].upper() + title[1:]
     else:
-        title = (tool_name or "Working").replace("_", " ").strip() or "Working"
-    title = _AND_WORD.sub("&", title)
-    title = _MARKDOWN_WRAPPER_CHARS.sub("", title) or title
-    title = title[:1].upper() + title[1:]
-    # While a task is actively in progress, show the LLM's full thought
-    # (still hard-capped by Slack's field limit below) instead of the
-    # cosmetic cap - it's the one row the user is actually watching right
-    # now. Once settled, cap it so the panel stays compact.
-    if status != "in_progress" and len(title) > _TASK_TITLE_CHAR_LIMIT:
+        command = _command_from_parameters(parameters, tool_name)
+        if command:
+            # Verbatim - no capitalisation, no and/markdown substitutions: those
+            # would mangle real syntax (jsonpath `{range .items[*]}`).
+            title = command
+            is_command = True
+        else:
+            title = (tool_name or "Working").replace("_", " ").strip() or "Working"
+            title = _AND_WORD.sub("&", title)
+            title = _MARKDOWN_WRAPPER_CHARS.sub("", title) or title
+            title = title[:1].upper() + title[1:]
+    # An in-progress thought is left uncapped (full text for the row the user is
+    # watching); an in-progress command is still capped - a 200-char
+    # kubectl/jsonpath line is noise, and a cropped command still reads.
+    if (status != "in_progress" or is_command) and len(title) > _TASK_TITLE_CHAR_LIMIT:
         # Back up to the last full word rather than cutting mid-word ("clu…")
         # - drop the partial word entirely instead of showing a fragment of
         # it. Falls back to the raw cut only when there's no word boundary to

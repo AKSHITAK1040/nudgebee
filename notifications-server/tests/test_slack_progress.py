@@ -28,8 +28,22 @@ def _entry(**overrides):
     return entry
 
 
-def _tool_row(row_id, status, tool_name="get_pod_logs", thought="checking logs", updated_at="2026-08-14T10:00:00Z"):
-    return {"id": row_id, "status": status, "tool_name": tool_name, "thought": thought, "updated_at": updated_at}
+def _tool_row(
+    row_id,
+    status,
+    tool_name="get_pod_logs",
+    thought="checking logs",
+    updated_at="2026-08-14T10:00:00Z",
+    parameters=None,
+):
+    return {
+        "id": row_id,
+        "status": status,
+        "tool_name": tool_name,
+        "thought": thought,
+        "updated_at": updated_at,
+        "parameters": parameters,
+    }
 
 
 class TestBuildChunks:
@@ -50,6 +64,47 @@ class TestBuildChunks:
         sent = {}
         chunks = slack_progress._build_chunks([_tool_row("t1", "IN_PROGRESS", thought=None)], sent)
         assert chunks[0]["title"] == "Get pod logs"
+
+    def test_uses_command_from_parameters_when_thought_missing(self):
+        sent = {}
+        rows = [
+            _tool_row(
+                "t1",
+                "IN_PROGRESS",
+                tool_name="cluster_command",
+                thought="",
+                parameters="kubectl get pods -n nudgebee -o wide",
+            )
+        ]
+        chunks = slack_progress._build_chunks(rows, sent)
+        assert chunks[0]["title"] == "kubectl get pods -n nudgebee -o wide"
+
+    def test_relay_sub_steps_get_distinct_titles_from_their_commands(self):
+        # The bug: five relay probes of one search all rendered as "Cluster command".
+        sent = {}
+        rows = [
+            _tool_row(
+                "s#1",
+                "ERROR",
+                tool_name="cluster_command",
+                thought="",
+                parameters="kubectl get pods pod-a -n ns-one",
+                updated_at="2026-08-27T06:18:36Z",
+            ),
+            _tool_row(
+                "s#2",
+                "ERROR",
+                tool_name="cluster_command",
+                thought="",
+                parameters="kubectl get pods pod-b -n ns-two",
+                updated_at="2026-08-27T06:18:37Z",
+            ),
+        ]
+        titles = [c["title"] for c in slack_progress._build_chunks(rows, sent)]
+        assert titles == [
+            "kubectl get pods pod-a -n ns-one",
+            "kubectl get pods pod-b -n ns-two",
+        ]
 
     def test_status_transitions_and_dedupe(self):
         sent = {}
@@ -144,7 +199,7 @@ class TestTaskTitle:
         assert title.endswith("…")
 
     def test_thought_truncated_at_word_boundary(self):
-        thought = "checking the health of the cluster before restarting the failing pods"
+        thought = "carefully checking the current health of the cluster before restarting the failing pods"
         full_title = " ".join(thought.split())
         full_title = full_title[:1].upper() + full_title[1:]
 
@@ -260,6 +315,119 @@ class TestTaskTitle:
         assert slack_progress._task_title("get_pod_logs", "correlating pod restarts with the deploy") == (
             "Correlating pod restarts with the deploy"
         )
+
+    def test_parameters_command_used_when_no_thought(self):
+        # Verbatim: not capitalised ("kubectl", not "Kubectl").
+        assert (
+            slack_progress._task_title(
+                "cluster_command", thought="", parameters='{"command": "kubectl get pods -n nudgebee"}'
+            )
+            == "kubectl get pods -n nudgebee"
+        )
+
+    def test_parameters_ignored_when_thought_present(self):
+        assert (
+            slack_progress._task_title(
+                "cluster_command", thought="checking pods", parameters='{"command": "kubectl get pods"}'
+            )
+            == "Checking pods"
+        )
+
+    def test_parameters_fall_through_to_tool_name_when_unreadable(self):
+        assert slack_progress._task_title("cluster_command", thought="", parameters='{"limit": 500}') == (
+            "Cluster command"
+        )
+
+    def test_parameters_command_skips_and_markdown_substitutions(self):
+        # A real command must survive verbatim - no "and" -> "&", no stripping of
+        # jsonpath brackets/asterisks.
+        command = "kubectl get pods -o=jsonpath='{range .items[*]}{.metadata.name}{end}' and wait"
+        assert slack_progress._task_title("cluster_command", thought="", parameters=command, status="in_progress") == (
+            "kubectl get pods -o=jsonpath='{range .items[*]}{.metadata.name}{end}' and wait"
+        )
+
+    def test_command_title_is_capped_even_while_in_progress(self):
+        # Unlike a thought, a long command is capped the moment it renders - a
+        # 200-char kubectl/jsonpath line is noise to watch mid-run.
+        command = "kubectl get pods " + "pod-name-that-is-fairly-long " * 6 + "-n nudgebee"
+        title = slack_progress._task_title("cluster_command", thought="", parameters=command, status="in_progress")
+        assert len(title) <= slack_progress._TASK_TITLE_CHAR_LIMIT
+        assert title.endswith("…")
+
+    def test_structured_param_branches_lead_with_tool_name(self):
+        assert (
+            slack_progress._task_title("rg", thought="", parameters='{"pattern": "WithTools", "path": "llm"}')
+            == "rg WithTools"
+        )
+        assert (
+            slack_progress._task_title(
+                "file_view", thought="", parameters='{"file_path": "llm/x.go", "start_line": 10, "end_line": 20}'
+            )
+            == "file_view llm/x.go:10-20"
+        )
+
+
+class TestCommandFromParameters:
+    def test_blank(self):
+        assert slack_progress._command_from_parameters(None) == ""
+        assert slack_progress._command_from_parameters("   ") == ""
+
+    def test_bare_string_command_collapsed(self):
+        assert slack_progress._command_from_parameters("recent events  in\npayments namespace") == (
+            "recent events in payments namespace"
+        )
+
+    def test_bare_url_returned_as_is(self):
+        url = "https://search.brave.com/search?q=LLM+gateway&safesearch=strict"
+        assert slack_progress._command_from_parameters(url, "crawl_execute") == url
+
+    def test_multiline_command_collapsed_to_one_line(self):
+        assert slack_progress._command_from_parameters('{"command": "grep foo\\n  bar.txt"}') == "grep foo bar.txt"
+
+    def test_json_command_key_not_prefixed_with_tool_name(self):
+        assert slack_progress._command_from_parameters('{"command": "kubectl get ns"}', "cluster_command") == (
+            "kubectl get ns"
+        )
+
+    def test_json_query_key(self):
+        assert slack_progress._command_from_parameters('{"query": "SELECT 1;"}') == "SELECT 1;"
+
+    def test_json_args_list_led_with_tool_name(self):
+        assert slack_progress._command_from_parameters('{"args": ["log", "-n", "5"]}', "git") == "git log -n 5"
+
+    def test_json_file_path_with_line_range_led_with_tool_name(self):
+        assert (
+            slack_progress._command_from_parameters(
+                '{"file_path": "llm/x.go", "start_line": 10, "end_line": 20}', "file_view"
+            )
+            == "file_view llm/x.go:10-20"
+        )
+
+    def test_json_pattern_key_led_with_tool_name(self):
+        assert slack_progress._command_from_parameters('{"pattern": "WithTools", "path": "llm/llm-server"}', "rg") == (
+            "rg WithTools"
+        )
+
+    def test_lead_with_tool_noop_without_tool_name(self):
+        assert slack_progress._command_from_parameters('{"args": ["log", "-n", "5"]}') == "log -n 5"
+
+    def test_secret_only_blob_yields_nothing(self):
+        assert slack_progress._command_from_parameters('{"github_token": "abc", "credentials": "xyz"}') == ""
+
+    def test_malformed_json_yields_nothing(self):
+        assert slack_progress._command_from_parameters('{"command": ') == ""
+
+    def test_pre_parsed_dict_parameters(self):
+        assert slack_progress._command_from_parameters({"command": "kubectl get ns"}, "cluster_command") == (
+            "kubectl get ns"
+        )
+
+    def test_pre_parsed_list_parameters(self):
+        assert slack_progress._command_from_parameters(["log", "-n", "5"], "git") == "git log -n 5"
+
+    def test_pre_parsed_empty_container_yields_nothing(self):
+        assert slack_progress._command_from_parameters({}, "git") == ""
+        assert slack_progress._command_from_parameters([], "git") == ""
 
 
 class TestStartProgressPoller:
