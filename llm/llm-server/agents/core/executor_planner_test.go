@@ -24,6 +24,105 @@ type MockContextCapturingTool struct {
 	ReturnStatus toolcore.NBToolResponseStatus
 }
 
+type MockConfigurableTool struct {
+	MockContextCapturingTool
+}
+
+type MockClassifiedTool struct {
+	MockContextCapturingTool
+	RequestType  toolcore.ToolRequestType
+	InferenceErr error
+}
+
+func (m *MockClassifiedTool) InferToolRequestType(_ *security.RequestContext, _, _ string) (toolcore.ToolRequestType, error) {
+	return m.RequestType, m.InferenceErr
+}
+
+type MockPromptClassifiedTool struct {
+	MockClassifiedTool
+}
+
+func (m *MockPromptClassifiedTool) InferToolRequestTypePrompt(_ *security.RequestContext, _, _ string) (string, error) {
+	return "classify this request", nil
+}
+
+type MockAgentTypeTool struct {
+	MockContextCapturingTool
+}
+
+func (m *MockAgentTypeTool) GetType() toolcore.NBToolType {
+	return toolcore.NBToolTypeAgent
+}
+
+func (m *MockConfigurableTool) ConfigSchema(_ *security.RequestContext) toolcore.ToolConfigSchema {
+	return toolcore.ToolConfigSchema{}
+}
+
+func TestParallelPreflightDoesNotBorrowConfigFromUnrelatedTool(t *testing.T) {
+	actionTool := &MockContextCapturingTool{NameVal: "kubectl_execute"}
+	unrelatedConfigTool := &MockConfigurableTool{
+		MockContextCapturingTool: MockContextCapturingTool{NameVal: "unrelated_integration"},
+	}
+
+	name, unresolved := unresolvedConfigForActionTool(actionTool, nil)
+	assert.False(t, unresolved, "the action must not inherit a sibling tool's config requirement")
+	assert.Empty(t, name)
+
+	name, unresolved = unresolvedConfigForActionTool(unrelatedConfigTool, nil)
+	assert.True(t, unresolved, "a configurable action tool must still force sequential preflight")
+	assert.Equal(t, "unrelated_integration", name)
+
+	name, unresolved = unresolvedConfigForActionTool(unrelatedConfigTool, map[string]string{"unrelated_integration": "config-1"})
+	assert.False(t, unresolved, "a resolved configurable action remains parallel-safe")
+	assert.Equal(t, "unrelated_integration", name)
+}
+
+func TestParallelAuthorizationFallbackPolicy(t *testing.T) {
+	ctx := security.NewRequestContextForTenantAccountAdmin("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", []string{"cccccccc-cccc-cccc-cccc-cccccccccccc"})
+	tests := []struct {
+		name string
+		tool toolcore.NBTool
+		want string
+	}{
+		{
+			name: "nil registry entry is ignored",
+		},
+		{
+			name: "no classifier remains parallel eligible",
+			tool: &MockContextCapturingTool{NameVal: "legacy_read_tool"},
+		},
+		{
+			name: "agent authorization belongs to child executor",
+			tool: &MockAgentTypeTool{MockContextCapturingTool: MockContextCapturingTool{NameVal: "logs"}},
+		},
+		{
+			name: "static read remains parallel eligible",
+			tool: &MockClassifiedTool{MockContextCapturingTool: MockContextCapturingTool{NameVal: "kubectl_execute"}, RequestType: toolcore.ToolRequestTypeRead},
+		},
+		{
+			name: "static write requires sequential execution",
+			tool: &MockClassifiedTool{MockContextCapturingTool: MockContextCapturingTool{NameVal: "kubectl_execute"}, RequestType: toolcore.ToolRequestTypeUpdate},
+			want: "potential_write",
+		},
+		{
+			name: "implemented but unknown classifier fails closed",
+			tool: &MockPromptClassifiedTool{MockClassifiedTool: MockClassifiedTool{MockContextCapturingTool: MockContextCapturingTool{NameVal: "kubectl_execute"}}},
+			want: "llm_only_request_classification",
+		},
+		{
+			name: "unknown static classifier without fallback also fails closed",
+			tool: &MockClassifiedTool{MockContextCapturingTool: MockContextCapturingTool{NameVal: "custom_execute"}},
+			want: "unknown_static_request_classification",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parallelAuthorizationFallbackReason(ctx, tc.tool, "tool", "request"))
+		})
+	}
+}
+
 func (m *MockContextCapturingTool) Name() string {
 	return m.NameVal
 }
@@ -1307,6 +1406,11 @@ func TestUnmarshal_DropsWaitingStepsOnResume(t *testing.T) {
 				Observation: "Tool(github_execute) is trying to create cluster resources. Do you want to continue?",
 				Status:      ToolStatusWaiting,
 			},
+			{
+				Action:      NBAgentPlannerToolAction{ToolID: "client-pending-1", Tool: "custom_shell_execute", ToolInput: "uname -a"},
+				Observation: "Waiting for client execution",
+				Status:      ToolStatusWaitingForClient,
+			},
 		},
 		currentAction: []NBAgentPlannerToolAction{
 			{
@@ -1323,6 +1427,7 @@ func TestUnmarshal_DropsWaitingStepsOnResume(t *testing.T) {
 	// Seed stepKeys with both IDs so we can verify the dropped one is removed.
 	original.stepKeys["done-1"] = true
 	original.stepKeys["pending-1"] = true
+	original.stepKeys["client-pending-1"] = true
 
 	state, err := original.Marshal()
 	assert.NoError(t, err)
@@ -1346,6 +1451,7 @@ func TestUnmarshal_DropsWaitingStepsOnResume(t *testing.T) {
 	// (Call()'s dedup only appends when the key isn't already present).
 	assert.True(t, restored.stepKeys["done-1"], "completed step's key must survive")
 	assert.False(t, restored.stepKeys["pending-1"], "waiting step's key must be cleared so the real result can land")
+	assert.False(t, restored.stepKeys["client-pending-1"], "client-waiting step's key must be cleared so its submitted result can land")
 
 	// currentAction is the source of truth for what to re-run on resume;
 	// it must be preserved.
@@ -1355,6 +1461,20 @@ func TestUnmarshal_DropsWaitingStepsOnResume(t *testing.T) {
 	assert.Equal(t, "E2", restoredAction.DisplayID)
 	assert.Equal(t, "turn-2", restoredAction.TurnID)
 	assert.Equal(t, []byte{0x01, 0x02, 0xfe, 0xff}, restoredAction.ThoughtSignature)
+}
+
+func TestCompleteResumedPlanAdvancesPlannerIteration(t *testing.T) {
+	executor := &plannerExecutor{
+		currentIteration: 4,
+		currentAction: []NBAgentPlannerToolAction{
+			{ToolID: "client-call", Tool: "custom_shell_execute"},
+		},
+	}
+
+	executor.completeResumedPlan()
+
+	assert.Equal(t, 5, executor.currentIteration)
+	assert.Empty(t, executor.currentAction)
 }
 
 // TestGetToolInvocations_SkipsWaitingSteps is the defense-in-depth check:

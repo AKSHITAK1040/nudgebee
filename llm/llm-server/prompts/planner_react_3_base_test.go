@@ -67,3 +67,56 @@ func TestPlannerReact3Base_DelegationReusesResolvedResourceIdentity(t *testing.T
 	assert.Contains(t, prompt, "kind + namespace + exact pod/workload names")
 	assert.Contains(t, prompt, "account/project/subscription + region + exact name/ID/ARN")
 }
+
+func TestPlannerReact3Base_ParallelismIncludesRepeatedReadOnlyToolCalls(t *testing.T) {
+	prompt := GetPromptForTest(PromptReact3Base)
+	assert.Contains(t, prompt, "same read-only tool multiple times with different inputs")
+	assert.Contains(t, prompt, "If two or more such calls exist, emit them together")
+	assert.Contains(t, prompt, "A parallel batch is one step")
+}
+
+func TestPlannerReact3Base_NotebookIsInlineMetadataOutsideToolInput(t *testing.T) {
+	prompt := GetPromptForTest(PromptReact3Base)
+	assert.Contains(t, prompt, "inline response metadata parsed by the planner, NOT a tool or shell command")
+	assert.Contains(t, prompt, "inside the same `<thought_action>` block")
+	assert.Contains(t, prompt, "It is not an `<action>` and must never appear inside `<tool_input>`")
+	assert.Contains(t, prompt, "step or parallel evidence batch you are executing THIS turn")
+	assert.Contains(t, prompt, "Independent read-only checks that test the same scope or hypothesis belong in one parallel batch")
+}
+
+func TestPlannerReact3CustomBase_PreservesProtocolAndPromotesFanout(t *testing.T) {
+	prompt := GetPromptForTest(PromptReact3CustomBase)
+
+	for _, snippet := range []string{
+		"<thought_action>",
+		"<final_answer>",
+		"<actions>",
+		"same tool with different",
+		"Shared purpose, shared target, or use of the same",
+		"skip discovery",
+		"fan out the cheapest independent read-only checks",
+		"generic approach, not a requirement",
+		"agent instructions supplied after this message",
+		"generic shell adapter may carry independent read-only commands in parallel",
+	} {
+		assert.Contains(t, prompt, snippet)
+	}
+}
+
+func TestPlannerReact3CustomBase_DoesNotCarryBuiltInAgentPolicy(t *testing.T) {
+	prompt := GetPromptForTest(PromptReact3CustomBase)
+
+	for _, snippet := range []string{
+		"kubectl_execute",
+		"resource_search_execute",
+		"Specialized Agents vs. Shell",
+		"remediation tool",
+		"code_analyzer",
+		"Avoid JSON/YAML for Global Queries",
+		"watch_resource",
+	} {
+		assert.NotContains(t, prompt, snippet)
+	}
+
+	assert.Less(t, len(prompt), 12000, "custom-agent base should remain compact")
+}

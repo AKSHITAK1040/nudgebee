@@ -81,6 +81,49 @@ func annotatePlannerIteration(actions []NBAgentPlannerToolAction, iteration int)
 	}
 }
 
+func unresolvedConfigForActionTool(tool toolcore.NBTool, configs map[string]string) (string, bool) {
+	if _, configurable := tool.(toolcore.NBToolConfig); !configurable {
+		return "", false
+	}
+	if configs != nil && configs[tool.Name()] != "" {
+		return tool.Name(), false
+	}
+	return tool.Name(), true
+}
+
+// parallelAuthorizationFallbackReason determines whether an action may pause
+// this executor for write confirmation. Absence of a classifier means the tool
+// has no parent-level authorization contract and is therefore safe for the
+// batch scheduler; authorization is still enforced again by doAction. Once a
+// tool opts into classification, however, an unknown result must fail closed.
+func parallelAuthorizationFallbackReason(ctx *security.RequestContext, tool toolcore.NBTool, toolName, toolInput string) string {
+	if tool == nil {
+		return ""
+	}
+	if tool.GetType() != toolcore.NBToolTypeTool {
+		return ""
+	}
+
+	if validator, ok := tool.(toolcore.ToolRequestInference); ok {
+		reqType, err := validator.InferToolRequestType(ctx, toolName, toolInput)
+		if err == nil && reqType != "" {
+			if reqType == toolcore.ToolRequestTypeRead {
+				return ""
+			}
+			return "potential_write"
+		}
+		if _, hasPromptInference := tool.(toolcore.ToolRequestInferencePrompt); hasPromptInference {
+			return "llm_only_request_classification"
+		}
+		return "unknown_static_request_classification"
+	}
+
+	if _, hasPromptInference := tool.(toolcore.ToolRequestInferencePrompt); hasPromptInference {
+		return "llm_only_request_classification"
+	}
+	return ""
+}
+
 // plannerToolNoData is the observation written when a tool succeeds (exit 0,
 // status=Success) but produces empty stdout. Many CLI mutations are silent on
 // success (e.g. `gh run rerun`, `kubectl apply`, `helm upgrade`, `aws s3 cp`),
@@ -380,6 +423,14 @@ func (e *plannerExecutor) GetMemory() schema.Memory {
 
 func (e *plannerExecutor) GetCallbackHandler() callbacks.Handler {
 	return nil
+}
+
+// completeResumedPlan moves the executor to the next planner turn after all
+// actions from a client-tool pause have been reconciled. It must not be called
+// while an action is still waiting; those paths return before reaching it.
+func (e *plannerExecutor) completeResumedPlan() {
+	e.currentIteration++
+	e.currentAction = nil
 }
 
 // accumulateSteps folds the steps produced by one iteration into e.steps,
@@ -955,60 +1006,29 @@ func (e *plannerExecutor) doIteration(
 			if tool.GetType() != toolcore.NBToolTypeTool {
 				continue
 			}
-			// Check 1: Write approval — static heuristic classification
-			if validator, ok := tool.(toolcore.ToolRequestInference); ok {
-				reqType, err := validator.InferToolRequestType(e.ctx, action.Tool, action.ToolInput)
-				if err == nil && reqType != "" && reqType != toolcore.ToolRequestTypeRead {
-					needsSequential = true
-					sequentialFallbackReason = "potential_write"
-					e.ctx.GetLogger().Info("plannerexecutor: pre-flight detected write action", "tool", action.Tool, "requestType", reqType)
-					break
-				}
-			}
-			// Check 1b: If tool only has LLM-based classification (no static heuristic),
-			// we can't cheaply determine if it's a write — assume it could be.
-			if _, hasPromptInference := tool.(toolcore.ToolRequestInferencePrompt); hasPromptInference {
-				if validator, ok := tool.(toolcore.ToolRequestInference); ok {
-					reqType, _ := validator.InferToolRequestType(e.ctx, action.Tool, action.ToolInput)
-					if reqType == "" {
-						needsSequential = true
-						sequentialFallbackReason = "llm_only_request_classification"
-						e.ctx.GetLogger().Info("plannerexecutor: pre-flight detected tool with LLM-only classification, assuming potential write", "tool", action.Tool)
-						break
-					}
-				} else {
-					needsSequential = true
-					sequentialFallbackReason = "llm_only_request_classification"
-					e.ctx.GetLogger().Info("plannerexecutor: pre-flight detected tool with LLM-only classification, assuming potential write", "tool", action.Tool)
-					break
-				}
+			// Check 1: Write approval. Tools without an authorization classifier
+			// cannot pause at this executor level and remain parallel-eligible.
+			// Tools that opt into classification fail closed when their static
+			// classifier cannot decide and an LLM fallback would be required.
+			if reason := parallelAuthorizationFallbackReason(e.ctx, tool, action.Tool, action.ToolInput); reason != "" {
+				needsSequential = true
+				sequentialFallbackReason = reason
+				e.ctx.GetLogger().Info("plannerexecutor: pre-flight authorization requires sequential execution", "tool", action.Tool, "reason", reason)
+				break
 			}
 			// Check 2: Config resolution — tool needs user to select from multiple configs.
 			// If the tool implements NBToolConfig and config isn't already resolved,
 			// it may trigger a config selection followup.
-			configCheckTool := tool
-			if _, hasConfig := tool.(toolcore.NBToolConfig); !hasConfig {
-				// Same fallback as doAction: find the agent's configurable tool
-				for _, t := range e.agent.GetSupportedTools(e.ctx) {
-					if _, ok := t.(toolcore.NBToolConfig); ok {
-						configCheckTool = t
-						break
-					}
-				}
-			}
-			if _, hasConfig := configCheckTool.(toolcore.NBToolConfig); hasConfig {
-				configResolved := false
-				if e.agentRequest.QueryConfig.ToolConfigs != nil {
-					if e.agentRequest.QueryConfig.ToolConfigs[configCheckTool.Name()] != "" {
-						configResolved = true
-					}
-				}
-				if !configResolved {
-					needsSequential = true
-					sequentialFallbackReason = "unresolved_tool_config"
-					e.ctx.GetLogger().Info("plannerexecutor: pre-flight detected unresolved tool config", "tool", action.Tool, "configTool", configCheckTool.Name())
-					break
-				}
+			// Only the action's actual tool can make this action wait for config.
+			// Looking up an arbitrary configurable sibling from the agent causes
+			// unrelated read-only batches (for example kubectl_execute alongside a
+			// configured integration tool) to be downgraded even though doAction
+			// executes them without any config followup.
+			if configToolName, unresolved := unresolvedConfigForActionTool(tool, e.agentRequest.QueryConfig.ToolConfigs); unresolved {
+				needsSequential = true
+				sequentialFallbackReason = "unresolved_tool_config"
+				e.ctx.GetLogger().Info("plannerexecutor: pre-flight detected unresolved tool config", "tool", action.Tool, "configTool", configToolName)
+				break
 			}
 		}
 		if needsSequential {
@@ -3546,7 +3566,7 @@ func (e *plannerExecutor) Unmarshal(previousState []byte) error {
 	if len(e.steps) > 0 {
 		filteredSteps := e.steps[:0]
 		for _, s := range e.steps {
-			if s.Status == ToolStatusWaiting {
+			if s.Status == ToolStatusWaiting || s.Status == ToolStatusWaitingForClient {
 				droppedWaitingIDs[s.Action.ToolID] = struct{}{}
 				continue
 			}
@@ -3994,15 +4014,15 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 				toolId := action.ToolID
 				response, status, err := GetConversationDao().GetConversationToolResponse(toolId, request.MessageId, request.ConversationId, request.AccountId)
 				ctx.GetLogger().Info("plannerexecutor: resumption check", "toolId", toolId, "status", status, "err", err)
-				if err == nil && strings.EqualFold(string(status), string(toolcore.NBToolResponseStatusSuccess)) {
+				if stepStatus, terminal := terminalClientToolStepStatus(status, err); terminal {
 					step := NBAgentPlannerToolActionStep{
 						Action:      action,
 						Observation: response,
-						Status:      ToolStatusSuccess,
+						Status:      stepStatus,
 					}
 					executor.steps = append(executor.steps, step)
 					executor.stepKeys[action.ToolID] = true
-					ctx.GetLogger().Info("plannerexecutor: recovered tool result from DB", "toolId", toolId)
+					ctx.GetLogger().Info("plannerexecutor: recovered terminal client tool result from DB", "toolId", toolId, "status", status)
 				} else if errors.Is(err, sql.ErrNoRows) && !isToolConfigResolved(executor.agentRequest.QueryConfig.ToolConfigs, action.Tool) && !confirmationApprovedForAction(executor.agentRequest.QueryConfig.ToolConfirmations, resumeNameToTool, action) {
 					// No row found in DB for this tool AND neither a config nor a write-confirmation
 					// was resolved. This means the tool was waiting for a config selection that never
@@ -4129,8 +4149,12 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 					}
 				}
 			}
-			// Clear currentAction after processing resumption so the planner loop starts fresh
-			executor.currentAction = nil
+			// Reaching this point means the paused plan has been fully reconciled:
+			// every current action now has a terminal observation (or a recorded
+			// failure) and the next Call will ask the planner for a new plan. Advance
+			// the iteration before clearing currentAction so client-tool resume cycles
+			// are not all persisted as the iteration that originally paused.
+			executor.completeResumedPlan()
 		}
 	}
 	runCtx := context.WithoutCancel(ctx.GetContext())
@@ -4316,6 +4340,24 @@ func executeAgentPlanner(ctx *security.RequestContext, nbAgentPlanner NBAgentPla
 	}
 
 	return plannerResponse, nil
+}
+
+// terminalClientToolStepStatus maps a persisted client-tool response to the
+// planner status used after resume. Both success and error are terminal: an
+// error must be restored as evidence for the next planner iteration instead of
+// leaving the serialized WAITING_FOR_CLIENT stub in history and silently
+// re-emitting the same deterministic tool ID.
+func terminalClientToolStepStatus(status toolcore.NBToolResponseStatus, err error) (ToolStatus, bool) {
+	if err != nil {
+		return "", false
+	}
+	if strings.EqualFold(string(status), string(toolcore.NBToolResponseStatusSuccess)) {
+		return ToolStatusSuccess, true
+	}
+	if strings.EqualFold(string(status), string(toolcore.NBToolResponseStatusError)) {
+		return ToolStatusFailure, true
+	}
+	return "", false
 }
 
 func (e *plannerExecutor) rewriteToolInput(action NBAgentPlannerToolAction, queryContext string) (string, error) {

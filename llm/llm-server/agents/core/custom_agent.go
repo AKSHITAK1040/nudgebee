@@ -93,6 +93,7 @@ type nbCustomAgent struct {
 // user-configured tool list (a.agent.Tools) is honored verbatim. Without this, the
 // planner silently injects shell_execute / load_skills on top of the user's selection.
 var _ DefaultToolsOptOut = (*nbCustomAgent)(nil)
+var _ NBAgentAccountContextProvider = (*nbCustomAgent)(nil)
 
 // OptOutDefaultTools implements DefaultToolsOptOut. Custom agents are user-curated:
 // the operator picks the tool list explicitly via the UI/API. The planner must not
@@ -100,6 +101,13 @@ var _ DefaultToolsOptOut = (*nbCustomAgent)(nil)
 // config flags. If the operator wants shell, they add `shell_execute` to the tool list.
 func (a *nbCustomAgent) OptOutDefaultTools() bool {
 	return true
+}
+
+// GetAccountContextEnabled keeps database-backed custom agents scoped to the
+// instructions and tools explicitly configured by their owner. Global Context
+// can be large and may introduce unrelated infrastructure assumptions.
+func (a *nbCustomAgent) GetAccountContextEnabled() bool {
+	return false
 }
 
 func (a *nbCustomAgent) GetName() string {

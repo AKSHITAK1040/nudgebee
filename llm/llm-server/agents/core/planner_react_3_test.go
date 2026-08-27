@@ -66,6 +66,46 @@ func renderReact3BaseWithRoles(t *testing.T, notebookEnabled, hypothesisModeEnab
 	return out
 }
 
+func TestReAct3CustomAgentPromptHidesBuiltInToolAssumptions(t *testing.T) {
+	base := nbprompts.GetPrompt(context.Background(), nbprompts.PromptReact3CustomBase, "")
+	require.NotEmpty(t, base)
+	tmpl := prompts.NewPromptTemplate(base, []string{
+		"tool_names", "tool_descriptions", "notebook_enabled", "is_investigation",
+		"time_handling_rules", "security_rules",
+	})
+	out, err := tmpl.Format(map[string]any{
+		"tool_names": "custom_shell_execute", "tool_descriptions": "custom_shell_execute: raw shell input",
+		"notebook_enabled": true, "is_investigation": true,
+		"time_handling_rules": "", "security_rules": "",
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, out, "Specialized Agent Priority")
+	assert.NotContains(t, out, "Specialized Agents vs. Shell")
+	assert.NotContains(t, out, "If a `remediation` tool is available")
+	assert.NotContains(t, out, "Step 1 — target is unknown")
+	assert.Contains(t, out, "A dependency is concrete")
+	assert.Contains(t, out, "fan out the cheapest independent read-only checks")
+	assert.Contains(t, out, "generic approach, not a requirement")
+	assert.Contains(t, out, "independent checks may span several hypotheses")
+}
+
+func TestReAct3CustomAgentQueryOmitsInvestigationPolicy(t *testing.T) {
+	base := nbprompts.GetPrompt(context.Background(), nbprompts.PromptReact3CustomBase, "")
+	tmpl := prompts.NewPromptTemplate(base, []string{
+		"tool_names", "tool_descriptions", "notebook_enabled", "is_investigation",
+		"time_handling_rules", "security_rules",
+	})
+	out, err := tmpl.Format(map[string]any{
+		"tool_names": "custom_tool", "tool_descriptions": "custom_tool: ...",
+		"notebook_enabled": false, "is_investigation": false,
+		"time_handling_rules": "", "security_rules": "",
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, out, "INVESTIGATION PATTERN")
+	assert.NotContains(t, out, "plausible failure domains")
+}
+
 // TestReAct3HypothesisModeFence verifies the hypothesis-driven investigation
 // discipline is fenced to the top-level orchestrator: it appears only when
 // hypothesis_mode_enabled is set, while the lightweight notebook still renders
@@ -105,6 +145,30 @@ func TestReAct3HypothesisModeFence(t *testing.T) {
 		assert.NotContains(t, out, notebookHeader)
 		assert.NotContains(t, out, hypothesisHeader)
 	})
+}
+
+func TestReAct3InvestigationPromptDistinguishesDependenciesFromParallelBranches(t *testing.T) {
+	out := renderReact3Base(t, true, true)
+
+	assert.Contains(t, out, "Chain dependent steps; parallelize independent branches")
+	assert.Contains(t, out, "three parallel actions")
+	assert.Contains(t, out, "shared purpose, target, hypothesis, or tool name does not by itself create a dependency")
+	assert.NotContains(t, out, "Worked investigation pattern")
+	assert.NotContains(t, out, "at most one targeted confirmation")
+}
+
+func TestCustomAgentsOptOutOfAccountContext(t *testing.T) {
+	custom := &nbCustomAgent{}
+	assert.False(t, ResolveAgentAccountContextEnabled(custom))
+
+	builtIn := &MockAgent{}
+	assert.True(t, ResolveAgentAccountContextEnabled(builtIn),
+		"agents without an explicit capability retain the existing default")
+}
+
+func TestReact3BasePromptNameIsolatesDatabaseBackedCustomAgents(t *testing.T) {
+	assert.Equal(t, nbprompts.PromptReact3CustomBase, react3BasePromptName(&nbCustomAgent{}))
+	assert.Equal(t, nbprompts.PromptReact3Base, react3BasePromptName(&MockAgent{}))
 }
 
 func TestReActPlannerStopWordsCoverAttributedObservations(t *testing.T) {
@@ -700,6 +764,42 @@ func TestReAct3ParseParallelActions(t *testing.T) {
 	assert.Contains(t, actions[0].Log, "checkout-svc")
 }
 
+func TestReAct3ParseParallelActionsStopsAtFirstPlannerDecision(t *testing.T) {
+	// Regression for conversation d3492f42: the model emitted several
+	// thought/action decisions in one completion. The parser previously paired
+	// the first <actions> with the final </actions> and flattened every action
+	// into one speculative mega-batch.
+	output := `<thought_action>
+		<thought>First gather independent evidence.</thought>
+		<actions>
+			<action><tool_name>logs</tool_name><tool_input>collector errors</tool_input></action>
+			<action><tool_name>kubectl</tool_name><tool_input>kubectl get pods</tool_input></action>
+		</actions>
+	</thought_action>
+	<thought_action>
+		<thought>Speculative follow-up that must wait for observations.</thought>
+		<actions>
+			<action><tool_name>kubectl</tool_name><tool_input>kubectl logs pod-a</tool_input></action>
+			<action><tool_name>metrics</tool_name><tool_input>collector traffic</tool_input></action>
+		</actions>
+	</thought_action>
+	<final_answer><content>Speculative conclusion.</content></final_answer>`
+
+	response := &llms.ContentResponse{
+		Choices: []*llms.ContentChoice{{Content: output}},
+	}
+
+	planner := &NBReActPlanner3{}
+	actions, finish, err := planner.parseOutputInternal(response, nil)
+
+	require.NoError(t, err)
+	assert.Nil(t, finish)
+	require.Len(t, actions, 2)
+	assert.Equal(t, "logs", actions[0].Tool)
+	assert.Equal(t, "kubectl", actions[1].Tool)
+	assert.NotContains(t, actions[1].ToolInput, "pod-a")
+}
+
 func TestReAct3ParseParallelActionsWithCDATA(t *testing.T) {
 	output := `<thought_action>
 		<thought>Fetching logs and metrics for the service.</thought>
@@ -778,6 +878,36 @@ func TestReAct3ParseParallelEmptyActionsBlock(t *testing.T) {
 	_, _, err := planner.parseOutputInternal(response, []NBAgentPlannerToolActionStep{})
 
 	assert.Error(t, err)
+}
+
+func TestReAct3DropsEmptyShellExecutionActions(t *testing.T) {
+	output := `<thought_action>
+		<thought>Collect independent evidence.</thought>
+		<actions>
+			<action><tool_name>custom_shell_execute</tool_name><tool_input></tool_input></action>
+			<action><tool_name>custom_shell_execute</tool_name><tool_input>query metrics</tool_input></action>
+			<action><tool_name>custom_shell_execute</tool_name><tool_input>query logs</tool_input></action>
+		</actions>
+	</thought_action>`
+
+	planner := &NBReActPlanner3{}
+	actions := planner.processToolActions(output)
+
+	require.Len(t, actions, 2)
+	assert.Equal(t, "query metrics", actions[0].ToolInput)
+	assert.Equal(t, "query logs", actions[1].ToolInput)
+}
+
+func TestReAct3RejectsSingularEmptyShellExecutionAction(t *testing.T) {
+	output := `<thought_action>
+		<thought>I have no command to run.</thought>
+		<action><tool_name>tbench_shell_execute</tool_name><tool_input>   </tool_input></action>
+	</thought_action>`
+
+	planner := &NBReActPlanner3{}
+	assert.Nil(t, planner.processToolAction(output))
+	assert.False(t, isEmptyShellExecutionAction("lookup", ""),
+		"no-input tools outside the shell family must remain valid")
 }
 
 func TestReAct3ParseParallelThreeActions(t *testing.T) {

@@ -17,8 +17,10 @@ export const parseExecutionBatchMetadata = (metadata) => {
   if (!parsed.execution_batch_id && plannerIteration <= 0) {
     return null;
   }
+  const hasExplicitBatchId = Boolean(parsed.execution_batch_id);
   return {
-    id: parsed.execution_batch_id ? String(parsed.execution_batch_id) : `iteration-${plannerIteration}`,
+    id: hasExplicitBatchId ? String(parsed.execution_batch_id) : `iteration-${plannerIteration}`,
+    hasExplicitBatchId,
     plannerIteration,
     mode: parsed.execution_mode || '',
     size: Number(parsed.execution_batch_size) || 0,

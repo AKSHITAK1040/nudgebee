@@ -210,6 +210,7 @@ func TestAllCategories_SampleLoad(t *testing.T) {
 	}{
 		{"k8s_lean", CategoryAgents},
 		{"react_3_base", CategoryPlanners},
+		{"react_3_custom_base", CategoryPlanners},
 		{"remediation_generate", CategoryTools},
 		{"response_formatter", CategoryUtilities},
 		{"time_handling_rules", CategoryFragments},

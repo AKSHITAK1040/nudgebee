@@ -1,0 +1,42 @@
+{
+  "name": "orca-planner-v1",
+  "orca_commit": "b8ab93ae5d2716ff8e7190196151acd4a15bf3d7",
+  "tasks": [
+    {
+      "id": "5b71925cf2820c86",
+      "class": "no-incident control",
+      "expected_root_causes": []
+    },
+    {
+      "id": "565fd756e6ec4732",
+      "class": "ambiguous latency control",
+      "expected_root_causes": []
+    },
+    {
+      "id": "bb4a194e8fa38186",
+      "class": "focused application incident",
+      "expected_root_causes": ["adManualGc", "adFailure"]
+    },
+    {
+      "id": "ccd93e3b6ef2813e",
+      "class": "multi-stage dependency incident",
+      "expected_root_causes": [
+        "adManualGc",
+        "productCatalogFailure",
+        "paymentFailure",
+        "paymentUnreachable"
+      ]
+    },
+    {
+      "id": "d1b569a7a4620ce2",
+      "class": "broad multi-root-cause incident",
+      "expected_root_causes": [
+        "adManualGc",
+        "productCatalogFailure",
+        "recommendationCacheFailure",
+        "cartFailure",
+        "paymentFailure"
+      ]
+    }
+  ]
+}

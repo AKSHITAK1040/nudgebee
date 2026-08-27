@@ -663,6 +663,24 @@ func ResolveAgentNotebookEnabled(agent NBAgent) bool {
 	return true
 }
 
+// NBAgentAccountContextProvider controls whether stable account-wide Global
+// Context is added to an agent's system prompt. Built-in agents include it by
+// default. User-curated custom agents opt out because their stored prompt and
+// explicitly selected tools are their context contract; a future custom-agent
+// setting can opt back in through this same capability.
+type NBAgentAccountContextProvider interface {
+	GetAccountContextEnabled() bool
+}
+
+// ResolveAgentAccountContextEnabled preserves the existing enabled default for
+// agents that do not declare an account-context preference.
+func ResolveAgentAccountContextEnabled(agent NBAgent) bool {
+	if p, ok := agent.(NBAgentAccountContextProvider); ok {
+		return p.GetAccountContextEnabled()
+	}
+	return true
+}
+
 // AgentModule identifies the functional bucket an agent belongs to. Used by
 // the Memory Architecture to scope per-module memory (Patterns, Collective),
 // filter tool visibility, and route signal collectors. Agents that span

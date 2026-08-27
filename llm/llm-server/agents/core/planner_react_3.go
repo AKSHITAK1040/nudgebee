@@ -1345,10 +1345,22 @@ func (o *NBReActPlanner3) processToolActions(output string) []NBAgentPlannerTool
 	// XmlExtractCDATA which would strip nested CDATA from child <action> blocks,
 	// destroying the structure when tool_input contains CDATA sections.
 	actionsStart := strings.Index(output, "<actions>")
-	actionsEnd := strings.LastIndex(output, "</actions>")
-	if actionsStart == -1 || actionsEnd == -1 || actionsEnd <= actionsStart {
+	if actionsStart == -1 {
 		return nil
 	}
+	// A planner turn may contain exactly one thought/action decision. Some
+	// models nevertheless emit a speculative sequence of several
+	// <thought_action> blocks in one completion. Using LastIndex here merged
+	// every later block into the first parallel batch, so tools that were meant
+	// to depend on earlier observations all ran at once. Parse only the first
+	// complete <actions> container; the next planner turn can then react to its
+	// real observations.
+	actionsRemainder := output[actionsStart+len("<actions>"):]
+	relativeActionsEnd := strings.Index(actionsRemainder, "</actions>")
+	if relativeActionsEnd == -1 {
+		return nil
+	}
+	actionsEnd := actionsStart + len("<actions>") + relativeActionsEnd
 	actionsBlock := strings.TrimSpace(output[actionsStart+len("<actions>") : actionsEnd])
 	if actionsBlock == "" {
 		return nil
@@ -1417,6 +1429,9 @@ func (o *NBReActPlanner3) processToolActions(output string) []NBAgentPlannerTool
 
 		toolInput = common.SubstituteDateMacros(toolInput)
 		toolInput = o.normalizeToolInput(toolName, toolInput)
+		if isEmptyShellExecutionAction(toolName, toolInput) {
+			continue
+		}
 
 		o.stepCount++
 		actions = append(actions, NBAgentPlannerToolAction{
@@ -1488,6 +1503,9 @@ func (o *NBReActPlanner3) processToolAction(output string) []NBAgentPlannerToolA
 
 	toolInput = common.SubstituteDateMacros(toolInput)
 	toolInput = o.normalizeToolInput(toolName, toolInput)
+	if isEmptyShellExecutionAction(toolName, toolInput) {
+		return nil
+	}
 
 	thought := common.XmlExtractTagContent(output, "thought")
 	if thought == "" {
@@ -1516,6 +1534,14 @@ func (o *NBReActPlanner3) processToolAction(output string) []NBAgentPlannerToolA
 			MemoryRefs: parseMemoryUsedFromActionContent(actionContent),
 		},
 	}
+}
+
+// isEmptyShellExecutionAction rejects placeholder shell calls before they can
+// become client-tool requests. Other tools may legitimately have an empty
+// input schema, so keep this guard narrowly scoped to the shell tool family.
+func isEmptyShellExecutionAction(toolName, toolInput string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(toolName)), "shell_execute") &&
+		strings.TrimSpace(toolInput) == ""
 }
 
 // normalizeToolInput delegates to the package-level normalizer so all planners
@@ -2385,7 +2411,8 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	tools := make([]toolcore.NBTool, len(toolsIn))
 	copy(tools, toolsIn)
 
-	reactBasePrompt, reactBaseErr := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptReact3Base, request.AccountId)
+	reactBasePromptName := react3BasePromptName(agent)
+	reactBasePrompt, reactBaseErr := nbprompts.GetPromptStrict(ctx.GetContext(), reactBasePromptName, request.AccountId)
 	if reactBaseErr != nil {
 		// This prompt backs every ReAct agent. Planning with an empty base is not a
 		// degraded run, it is a broken one — fail construction instead.
@@ -2474,8 +2501,10 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	// Stable account-wide context belongs in the account-scoped cacheable system
 	// prefix. Request/entry-point-specific AccountPrompt remains in the human
 	// message below so event-analysis traffic cannot churn the shared cache slot.
-	if accountContext := renderAccountContextBlock(request.AccountContext); accountContext != "" {
-		messageFormatters = append(messageFormatters, LiteralSystemMessage{Content: accountContext})
+	if ResolveAgentAccountContextEnabled(agent) {
+		if accountContext := renderAccountContextBlock(request.AccountContext); accountContext != "" {
+			messageFormatters = append(messageFormatters, LiteralSystemMessage{Content: accountContext})
+		}
 	}
 
 	// ReAct agents need no per-agent GC wiring. Custom-planner agents that bypass
@@ -2645,6 +2674,16 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		"channel_context_block": renderChannelContextBlock(request.ChannelContext),
 	}
 	return tmpl, tools, nil
+}
+
+// react3BasePromptName keeps database-backed custom agents isolated from the
+// built-in-agent planning policy while preserving the same React3 parser and
+// executor contract. Other agent implementations retain the established base.
+func react3BasePromptName(agent NBAgent) string {
+	if _, ok := agent.(*nbCustomAgent); ok {
+		return nbprompts.PromptReact3CustomBase
+	}
+	return nbprompts.PromptReact3Base
 }
 
 // NewReActAgent3 initializes a new instance of the react_3 planner.

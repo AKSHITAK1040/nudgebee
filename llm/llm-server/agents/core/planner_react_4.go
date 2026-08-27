@@ -213,8 +213,10 @@ func composeReact4SystemMessage(ctx *security.RequestContext, request NBAgentReq
 	if base := renderReact4Base(ctx, request, nbAgent, tools); strings.TrimSpace(base) != "" {
 		parts = append(parts, base)
 	}
-	if accountContext := renderAccountContextBlock(request.AccountContext); accountContext != "" {
-		parts = append(parts, accountContext)
+	if ResolveAgentAccountContextEnabled(nbAgent) {
+		if accountContext := renderAccountContextBlock(request.AccountContext); accountContext != "" {
+			parts = append(parts, accountContext)
+		}
 	}
 	if strings.TrimSpace(additionalAgentPrompt) != "" {
 		parts = append(parts, fmt.Sprintf("<additional_agent_prompt>\n%s\n</additional_agent_prompt>", additionalAgentPrompt))
