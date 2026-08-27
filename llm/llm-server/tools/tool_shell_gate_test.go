@@ -164,6 +164,149 @@ func TestShellTool_InferToolRequestType_UnknownCommandIsUnclassified(t *testing.
 	}
 }
 
+func TestShellTool_InferToolRequestType_ReadOnlyPipelineIsNotGated(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	input := `kubectl get pods -A | grep -E "clickhouse|redis" | head -20`
+
+	got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+	require.NoError(t, err)
+	assert.NotEqual(t, core.ToolRequestTypeUpdate, got,
+		"read-only kubectl pipelines must retain the leading command's classification")
+	if got == "" {
+		prompt, promptErr := tool.InferToolRequestTypePrompt(nil, "shell_execute", input)
+		require.NoError(t, promptErr)
+		assert.NotEmpty(t, prompt, "pipeline must dispatch to kubectl's prompt classifier")
+	}
+}
+
+func TestShellTool_InferToolRequestType_RegisteredCLINameInArgumentIsUnclassified(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		`grep -Ei "clickhouse|redis|postgres" /tmp/services.txt`,
+		`gh run view 123 --log-failed | grep clickhouse`,
+		`echo '== DB ERRORS =='; grep -iE "error|clickhouse|sql" logs.txt | head -50`,
+		`echo start && grep -iE "clickhouse|redis" logs.txt | head -20`,
+	}
+
+	for _, input := range inputs {
+		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+		require.NoError(t, err)
+		assert.NotEqual(t, core.ToolRequestTypeUpdate, got,
+			"registered CLI names used as data must not trigger a confirmation")
+	}
+}
+
+func TestShellTool_InferToolRequestType_LaterPipelineCLIIsGated(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"printf input | kubectl delete deployment prod",
+		`printf input | sh -c 'kubectl delete deployment prod'`,
+		"printf input | xargs kubectl delete deployment prod",
+		"printf input | nohup kubectl delete deployment prod",
+	}
+	for _, input := range inputs {
+		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+		require.NoError(t, err)
+		assert.Equal(t, core.ToolRequestTypeUpdate, got,
+			"a registered CLI in executable position later in a pipeline must fail closed")
+	}
+}
+
+func TestShellTool_InferToolRequestType_SecurityBypassVectorsAreGated(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"echo bypass & kubectl delete deployment prod",
+		"echo bypass 2>&1 & kubectl delete deployment prod",
+		"echo $(kubectl delete deployment prod)",
+		"echo `kubectl delete deployment prod`",
+		"exec kubectl delete deployment prod",
+		"nohup kubectl delete deployment prod",
+		"nice kubectl delete deployment prod",
+		"timeout 10s kubectl delete deployment prod",
+		"time kubectl delete deployment prod",
+		"watch kubectl delete deployment prod",
+		"echo prod | xargs kubectl delete deployment",
+		"cat <(kubectl delete deployment prod)",
+		"cat >(kubectl delete deployment prod)",
+		"> /dev/null kubectl delete deployment prod",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.Equal(t, core.ToolRequestTypeUpdate, got, "bypass vector %q must be gated", input)
+		})
+	}
+}
+
+func TestShellTool_InferToolRequestType_ArgumentOnlyUtilitiesRemainAllowed(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"cat services.txt | grep clickhouse",
+		"jq '.clickhouse' package.json",
+		"echo clickhouse | wc -l",
+		"printf '%s' kubectl",
+	}
+	for _, input := range inputs {
+		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+		require.NoError(t, err)
+		assert.NotEqual(t, core.ToolRequestTypeUpdate, got)
+	}
+}
+
+func TestShellTool_InferToolRequestType_ReadOnlyFallbackChainsAreNotGated(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"gh run view 32952788846 --repo nudgebee/opentelemetry-demo --log-failed || gh run view 32952788846 --repo nudgebee/opentelemetry-demo",
+		"gh api repos/nudgebee/opentelemetry-demo/actions/jobs/98157420693/logs || echo 'No logs API'",
+		"gh api repos/nudgebee/opentelemetry-demo/contents/.github/workflows 2>&1 || curl -s https://api.github.com/repos/nudgebee/opentelemetry-demo/contents/.github/workflows",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			fallbacks := splitShellFallbacks(input)
+			require.Len(t, fallbacks, 2)
+			assert.True(t, isKnownReadOnlyFallbackChain(fallbacks), "%q", fallbacks)
+			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.NotEqual(t, core.ToolRequestTypeUpdate, got)
+			prompt, promptErr := tool.InferToolRequestTypePrompt(nil, "shell_execute", input)
+			require.NoError(t, promptErr)
+			assert.NotEmpty(t, prompt, "read-only fallback must dispatch its leading gh command")
+		})
+	}
+}
+
+func TestShellTool_InferToolRequestType_ReadOnlyRedirectionsAreNotGated(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"gh run view 123 --log-failed 2>&1",
+		"gh run view 123 --log-failed >&2",
+		"gh run view 123 --log-failed &>run.log",
+		"kubectl get pods 2>&1",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.NotEqual(t, core.ToolRequestTypeUpdate, got)
+		})
+	}
+}
+
+func TestShellTool_InferToolRequestType_MutatingFallbackStillFailsClosed(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"gh run view 123 || kubectl delete deployment prod",
+		"gh api repos/org/repo || curl -X DELETE https://api.github.com/repos/org/repo",
+		"gh api repos/org/repo -X POST || echo failed",
+	}
+	for _, input := range inputs {
+		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+		require.NoError(t, err)
+		assert.Equal(t, core.ToolRequestTypeUpdate, got)
+	}
+}
+
 // TestShellTool_InferToolRequestType_BailoutShapesFailClosed pins that
 // shapes the leading-command parser cannot reduce (sh -c, cd &&, $(...),
 // backtick) still fail closed when they contain a registered CLI.

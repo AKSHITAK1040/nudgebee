@@ -50,10 +50,26 @@ import (
 // whose classifier is prompt-based rather than heuristic.
 func (m ShellTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
 	input = extractCommandFromToolInput(input)
-	if hasShellGateControlSyntax(input) && containsShellWrappableCommand(input) {
-		return core.ToolRequestTypeUpdate, nil
+	if hasShellGateControlSyntax(input) && containsExecutableShellWrappable(input) {
+		fallbacks := splitShellFallbacks(input)
+		if len(fallbacks) == 1 || !isKnownReadOnlyFallbackChain(fallbacks) {
+			return core.ToolRequestTypeUpdate, nil
+		}
+		input = fallbacks[0]
 	}
-	lead, cleaned := extractLeadingShellCommand(input)
+	stages := splitShellPipeline(input)
+	for _, stage := range stages[1:] {
+		lead, _ := extractLeadingShellCommand(stage)
+		leadBase := filepath.Base(lead)
+		if core.LookupShellWrappable(leadBase) != "" ||
+			((lead == "" || isShellExecutionWrapper(leadBase) || !isShellArgumentOnlyUtility(leadBase) ||
+				hasShellSubstitution(stage)) && containsShellWrappableCommand(stage)) {
+			// A registered CLI later in a pipeline is executable, but classifying
+			// it independently could miss state passed through stdin. Fail closed.
+			return core.ToolRequestTypeUpdate, nil
+		}
+	}
+	lead, cleaned := extractLeadingShellCommand(stages[0])
 	if lead == "" {
 		if containsShellWrappableCommand(input) {
 			return core.ToolRequestTypeUpdate, nil
@@ -62,7 +78,11 @@ func (m ShellTool) InferToolRequestType(ctx *security.RequestContext, toolName, 
 	}
 	ownerName := core.LookupShellWrappable(filepath.Base(lead))
 	if ownerName == "" {
-		if containsShellWrappableCommand(input) {
+		leadBase := filepath.Base(lead)
+		// Known argument-only utilities may safely contain a registered CLI name
+		// as data. Wrappers and other unknown commands fail closed.
+		if (isShellExecutionWrapper(leadBase) || !isShellArgumentOnlyUtility(leadBase) ||
+			hasShellSubstitution(input)) && containsShellWrappableCommand(input) {
 			return core.ToolRequestTypeUpdate, nil
 		}
 		return "", nil
@@ -79,6 +99,118 @@ func (m ShellTool) InferToolRequestType(ctx *security.RequestContext, toolName, 
 		return "", nil
 	}
 	return classifier.InferToolRequestType(ctx, tool.Name(), cleaned)
+}
+
+// containsExecutableShellWrappable inspects executable positions in compound
+// expressions. Unlike containsShellWrappableCommand, it does not treat command
+// arguments (such as a grep regex containing "clickhouse") as executables.
+func containsExecutableShellWrappable(input string) bool {
+	for _, segment := range splitShellCommandSegments(input) {
+		for _, stage := range splitShellPipeline(segment) {
+			lead, _ := extractLeadingShellCommand(stage)
+			if core.LookupShellWrappable(filepath.Base(lead)) != "" {
+				return true
+			}
+			leadBase := filepath.Base(lead)
+			if lead == "" || isShellExecutionWrapper(leadBase) ||
+				!isShellArgumentOnlyUtility(leadBase) || hasShellSubstitution(stage) {
+				// Preserve fail-closed handling for shell wrappers, substitutions,
+				// groups, and executable-valued variable assignments.
+				if containsShellWrappableCommand(stage) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// These utilities treat following tokens as data rather than executable
+// commands. Keep this deliberately narrow: awk, sed, find, xargs, shells, and
+// similar tools can execute arguments and therefore must use the fail-closed
+// fallback when a registered CLI appears later in the stage.
+var shellArgumentOnlyUtilities = map[string]struct{}{
+	"cat": {}, "cut": {}, "echo": {}, "egrep": {}, "fgrep": {}, "grep": {},
+	"head": {}, "jq": {}, "od": {}, "printf": {}, "rgrep": {}, "sort": {},
+	"tail": {}, "tr": {}, "uniq": {}, "wc": {}, "xxd": {},
+}
+
+func isShellArgumentOnlyUtility(command string) bool {
+	_, ok := shellArgumentOnlyUtilities[command]
+	return ok
+}
+
+func isShellExecutionWrapper(command string) bool {
+	switch command {
+	case "command", "exec", "nohup", "nice", "time", "timeout", "watch", "xargs":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasShellSubstitution(input string) bool {
+	return strings.Contains(input, "$(") || strings.Contains(input, "`") ||
+		strings.Contains(input, "<(") || strings.Contains(input, ">(")
+}
+
+func splitShellCommandSegments(input string) []string {
+	var parts []string
+	start := 0
+	var singleQuoted, doubleQuoted, escaped bool
+	for i := 0; i < len(input); i++ {
+		char := input[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if char == '\\' && !singleQuoted {
+			escaped = true
+			continue
+		}
+		if char == '\'' && !doubleQuoted {
+			singleQuoted = !singleQuoted
+			continue
+		}
+		if char == '"' && !singleQuoted {
+			doubleQuoted = !doubleQuoted
+			continue
+		}
+		if singleQuoted || doubleQuoted {
+			continue
+		}
+		separatorLen := 0
+		switch char {
+		case ';', '\n', '\r':
+			separatorLen = 1
+		case '&':
+			if i+1 < len(input) && input[i+1] == '&' {
+				separatorLen = 2
+			} else if !isShellRedirectionAmpersand(input, i) {
+				// Do not split descriptor or combined-output redirections.
+				separatorLen = 1
+			}
+		case '|':
+			if i+1 < len(input) && input[i+1] == '|' {
+				separatorLen = 2
+			}
+		}
+		if separatorLen > 0 {
+			parts = append(parts, strings.TrimSpace(input[start:i]))
+			i += separatorLen - 1
+			start = i + 1
+		}
+	}
+	if singleQuoted || doubleQuoted || escaped {
+		return []string{input}
+	}
+	parts = append(parts, strings.TrimSpace(input[start:]))
+	return parts
+}
+
+func isShellRedirectionAmpersand(input string, i int) bool {
+	return (i > 0 && (input[i-1] == '>' || input[i-1] == '<')) ||
+		(i+1 < len(input) && input[i+1] == '>')
 }
 
 // hasShellGateControlSyntax reports syntax that can execute more than one
@@ -111,7 +243,14 @@ func hasShellGateControlSyntax(input string) bool {
 		if char == '`' || (char == '$' && i+1 < len(input) && input[i+1] == '(') {
 			return true
 		}
-		if !doubleQuoted && strings.ContainsRune("|&;\n\r(){}", rune(char)) {
+		if !doubleQuoted && char == '|' && i+1 < len(input) && input[i+1] == '|' {
+			return true
+		}
+		if !doubleQuoted && char == '&' {
+			if !isShellRedirectionAmpersand(input, i) {
+				return true
+			}
+		} else if !doubleQuoted && strings.ContainsRune(";\n\r(){}", rune(char)) {
 			return true
 		}
 	}
@@ -133,7 +272,11 @@ func hasShellGateControlSyntax(input string) bool {
 // regression on those.
 func (m ShellTool) InferToolRequestTypePrompt(ctx *security.RequestContext, toolName, input string) (string, error) {
 	input = extractCommandFromToolInput(input)
-	lead, cleaned := extractLeadingShellCommand(input)
+	fallbacks := splitShellFallbacks(input)
+	if len(fallbacks) > 1 && isKnownReadOnlyFallbackChain(fallbacks) {
+		input = fallbacks[0]
+	}
+	lead, cleaned := extractLeadingShellCommand(splitShellPipeline(input)[0])
 	if lead == "" {
 		return "", nil
 	}
@@ -150,6 +293,131 @@ func (m ShellTool) InferToolRequestTypePrompt(ctx *security.RequestContext, tool
 		return "", nil
 	}
 	return classifier.InferToolRequestTypePrompt(ctx, tool.Name(), cleaned)
+}
+
+// splitShellFallbacks separates unquoted logical-OR fallback commands. A
+// fallback chain is treated specially only when every branch is a narrowly
+// recognized read operation; all other compound expressions still fail closed.
+func splitShellFallbacks(input string) []string {
+	var parts []string
+	start := 0
+	var singleQuoted, doubleQuoted, escaped bool
+	for i := 0; i < len(input); i++ {
+		char := input[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if char == '\\' && !singleQuoted {
+			escaped = true
+			continue
+		}
+		if char == '\'' && !doubleQuoted {
+			singleQuoted = !singleQuoted
+			continue
+		}
+		if char == '"' && !singleQuoted {
+			doubleQuoted = !doubleQuoted
+			continue
+		}
+		if char == '|' && i+1 < len(input) && input[i+1] == '|' && !singleQuoted && !doubleQuoted {
+			parts = append(parts, strings.TrimSpace(input[start:i]))
+			i++
+			start = i + 1
+		}
+	}
+	if singleQuoted || doubleQuoted || escaped {
+		return []string{input}
+	}
+	parts = append(parts, strings.TrimSpace(input[start:]))
+	return parts
+}
+
+func isKnownReadOnlyFallbackChain(parts []string) bool {
+	for _, part := range parts {
+		tokens, err := shlex.Split(part)
+		if err != nil || len(tokens) == 0 {
+			return false
+		}
+		switch filepath.Base(tokens[0]) {
+		case "echo":
+			continue
+		case "curl":
+			for _, token := range tokens[1:] {
+				if hasShellMutationFlag(token, "-d", "--data", "--data-raw", "--data-binary",
+					"-F", "--form", "-T", "--upload-file", "-X", "--request") {
+					return false
+				}
+			}
+		case "gh":
+			if len(tokens) >= 3 && tokens[1] == "run" && tokens[2] == "view" {
+				continue
+			}
+			if len(tokens) < 2 || tokens[1] != "api" {
+				return false
+			}
+			for _, token := range tokens[2:] {
+				if hasShellMutationFlag(token, "-X", "--method", "-f", "--raw-field",
+					"-F", "--field", "--input") {
+					return false
+				}
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func hasShellMutationFlag(token string, flags ...string) bool {
+	for _, flag := range flags {
+		if token == flag || strings.HasPrefix(token, flag+"=") ||
+			(len(flag) == 2 && strings.HasPrefix(token, flag) && len(token) > len(flag)) {
+			return true
+		}
+	}
+	return false
+}
+
+// splitShellPipeline separates unquoted pipeline stages. Unlike compound
+// operators, a pipe does not make a read-only leading CLI destructive; common
+// inspection commands such as `kubectl get ... | grep ...` should retain the
+// leading CLI's classification. Quoted pipes and logical OR (`||`) are not
+// separators. Malformed quoting is left intact so the existing conservative
+// bailout path handles it.
+func splitShellPipeline(input string) []string {
+	var stages []string
+	start := 0
+	var singleQuoted, doubleQuoted, escaped bool
+	for i := 0; i < len(input); i++ {
+		char := input[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if char == '\\' && !singleQuoted {
+			escaped = true
+			continue
+		}
+		if char == '\'' && !doubleQuoted {
+			singleQuoted = !singleQuoted
+			continue
+		}
+		if char == '"' && !singleQuoted {
+			doubleQuoted = !doubleQuoted
+			continue
+		}
+		if char == '|' && !singleQuoted && !doubleQuoted &&
+			(i == 0 || input[i-1] != '|') && (i+1 == len(input) || input[i+1] != '|') {
+			stages = append(stages, strings.TrimSpace(input[start:i]))
+			start = i + 1
+		}
+	}
+	if singleQuoted || doubleQuoted || escaped {
+		return []string{input}
+	}
+	stages = append(stages, strings.TrimSpace(input[start:]))
+	return stages
 }
 
 // containsShellWrappableCommand conservatively detects a registered CLI
