@@ -161,7 +161,7 @@ def _unquoted_label_class(opener: str, closer: str) -> str:
 
 
 def _node_token_pattern(suffix: str) -> str:
-    """One node-token regex fragment: an id, optionally followed by a
+    r"""One node-token regex fragment: an id, optionally followed by a
     shape-bracketed label - quoted or unquoted (real-world diagrams don't
     always quote, same tolerance mermaid_chart.py's xychart/pie parsers
     already give). Built as one alternation of fully-paired (opener,
@@ -175,13 +175,24 @@ def _node_token_pattern(suffix: str) -> str:
     consumed its own exact opener and exact closer, nothing to verify
     afterward. `suffix` keeps one occurrence's group names unique when
     several node tokens are embedded in one larger pattern (e.g. both
-    sides of an edge) - see _extract_node."""
+    sides of an edge) - see _extract_node.
+
+    The id itself is `\w+(?:-\w+)*` rather than plain `\w+` - real-world
+    (especially Kubernetes-sourced) diagrams routinely use kebab-case ids
+    like `cert-manager` or `actions-runner-system-1`, which `\w+` alone
+    can't match at all (verified: a live diagram's entire node list used
+    this style and failed to parse). Each hyphen must be immediately
+    followed by another word character rather than allowing a bare `[\w-]+`
+    run, so a hyphen that's actually the start of an unspaced arrow
+    (`A-->B`, `A---B`) is never swallowed into the id - `A` stops the id
+    there since the next `-` isn't followed by a word character, leaving
+    `-->`/`---` intact for _EDGE_ARROW to match."""
     branches = []
     for opener, closer in _OPEN_TO_CLOSE.items():
         key = _SHAPE_KEYS[opener] + suffix
         unquoted = _unquoted_label_class(opener, closer)
         branches.append(re.escape(opener) + f'(?:"(?P<q_{key}>[^"]*)"|(?P<u_{key}>{unquoted}))' + re.escape(closer))
-    return rf"(?P<id_{suffix}>\w+)(?:" + "|".join(branches) + r")?"
+    return rf"(?P<id_{suffix}>\w+(?:-\w+)*)(?:" + "|".join(branches) + r")?"
 
 
 def _extract_node(match: re.Match, suffix: str) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
@@ -503,7 +514,11 @@ def _strip_comment(line: str) -> str:
     return "%%".join(kept)
 
 
-_SINGLE_WORD_RE = re.compile(r"^\w+$")
+# Despite the name, this also accepts kebab-case (e.g. `cert-manager`) -
+# matches the same `\w+(?:-\w+)*` tolerance _node_token_pattern gives node
+# ids, so a kebab-case subgraph id isn't rejected while an identically-styled
+# node id is accepted.
+_SINGLE_WORD_RE = re.compile(r"^\w+(?:-\w+)*$")
 
 
 def _subgraph_id_from_match(sub_start: "re.Match") -> Optional[str]:

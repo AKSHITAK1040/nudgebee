@@ -21,6 +21,47 @@ class TestParseFlowchart:
         assert labels == {"S1": "API Gateway", "S2": "Auth Service"}
         assert [(*e.__dict__.values(),) for e in edges] == [("S1", "S2", None, "-->")]
 
+    def test_kebab_case_node_ids_parse(self):
+        # Real-world (especially Kubernetes-sourced) diagrams routinely use
+        # kebab-case ids like `cert-manager` - verified against a live
+        # diagram whose entire node list used this style and failed to
+        # parse when the id pattern was plain `\w+`.
+        parsed = _parse_flowchart('graph LR\n    cert-manager["cert-manager"] --> demo-vanshika["demo-vanshika"]\n')
+        assert parsed is not None
+        _, _, labels, _, edges = parsed
+        assert labels == {"cert-manager": "cert-manager", "demo-vanshika": "demo-vanshika"}
+        assert [(e.source, e.target) for e in edges] == [("cert-manager", "demo-vanshika")]
+
+    def test_kebab_case_subgraph_ids_parse(self):
+        # _SINGLE_WORD_RE (subgraph ids) needs the same kebab-case tolerance
+        # as the node-id pattern above - otherwise a kebab-case subgraph id
+        # like `cert-manager` isn't recognized as a valid subgraph id, and an
+        # edge referencing it registers a phantom node instead of pointing
+        # at the cluster.
+        code = (
+            "graph TD\n"
+            "    Cluster --> cert-manager\n"
+            '    subgraph cert-manager ["Cert Manager"]\n'
+            '        A["a"]\n'
+            "    end\n"
+        )
+        parsed = _parse_flowchart(code)
+        assert parsed is not None
+        _, root, labels, _, _ = parsed
+        assert "cert-manager" not in labels
+        assert root.children[0].subgraph_id == "cert-manager"
+
+    def test_kebab_case_node_id_does_not_swallow_an_unspaced_arrow(self):
+        # A hyphen must be immediately followed by another word character to
+        # join the id - otherwise a bare/kebab-case id right up against an
+        # unspaced arrow (`A-->B`, no surrounding whitespace) would greedily
+        # eat the arrow's leading dash(es) and break the parse.
+        for arrow in ("-->", "---", "-.->"):
+            parsed = _parse_flowchart(f"graph LR\n    cert-manager{arrow}B\n")
+            assert parsed is not None, arrow
+            _, _, _, _, edges = parsed
+            assert [(e.source, e.target, e.arrow) for e in edges] == [("cert-manager", "B", arrow)]
+
     def test_lr_direction_maps_through(self):
         parsed = _parse_flowchart('graph LR\n    A["a"] --> B["b"]\n')
         assert parsed[0] == "LR"
