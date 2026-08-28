@@ -293,6 +293,92 @@ func TestShellTool_InferToolRequestType_ReadOnlyRedirectionsAreNotGated(t *testi
 	}
 }
 
+func TestShellTool_InferToolRequestType_ProductionReadOnlyCompoundsAreNotGated(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"kubectl logs deployment/product-catalog -n demo > product.log && kubectl logs deployment/checkout -n demo > checkout.log && head -n 20 product.log checkout.log",
+		"kubectl get pod product-catalog -n demo -o yaml; kubectl logs pod/product-catalog -n demo --previous",
+		"kubectl get pods -A | grep -i chaos; kubectl get events -A | grep -i chaos",
+		"kubectl get pods -n demo && kubectl logs product-catalog -n demo --all-containers=true",
+		"env | grep -iE '(db|database|clickhouse|postgres|mysql|redis)' || true",
+		"aws rds describe-db-instances --max-items 10 2>&1 || true",
+		"for r in us-east-1 us-west-2; do echo $r; aws cloudwatch get-metric-data --region $r --start-time 2026-08-27T11:15:00Z --end-time 2026-08-27T11:35:00Z --metric-data-queries '[]' > /tmp/metrics_$r.json 2>&1; head /tmp/metrics_$r.json; done",
+		"gh api /repos/org/repo/actions/jobs/123 || true; echo check; gh api /repos/org/repo/check-runs/123 || true",
+		"gh api /repos/org/repo/actions/jobs/123 && gh run view 456 -R org/repo --log",
+		"gh api repos/org/repo/actions/runs/456/jobs && ls -la",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.Equal(t, core.ToolRequestTypeRead, got)
+		})
+	}
+}
+
+func TestShellTool_InferToolRequestType_MutatingCompoundBranchFailsClosed(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"kubectl get pods && kubectl delete deployment prod",
+		"aws rds describe-db-instances; aws rds delete-db-instance --db-instance-identifier prod",
+		"gh api repos/org/repo; gh api repos/org/repo/issues -X POST -f title=test",
+		"for r in us-east-1 us-west-2; do aws ec2 terminate-instances --region $r --instance-ids i-prod; done",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.Equal(t, core.ToolRequestTypeUpdate, got)
+		})
+	}
+}
+
+func TestStripShellRedirections(t *testing.T) {
+	inputs := map[string]string{
+		"kubectl get pods 2>&1":                           "kubectl get pods",
+		"kubectl get pods &>out":                          "kubectl get pods",
+		"kubectl get pods 2&>out":                         "kubectl get pods",
+		"kubectl get pods >&2":                            "kubectl get pods",
+		`kubectl get pods > "output file.txt"`:            "kubectl get pods",
+		"kubectl get pods > out.txt 2>&1":                 "kubectl get pods",
+		"kubectl 2>&1 delete deployment prod":             "kubectl 2>&1 delete deployment prod",
+		"kubectl get pods > output.txt delete deployment": "kubectl get pods > output.txt delete deployment",
+		"kubectl > output.txt delete deployment 2>&1":     "kubectl > output.txt delete deployment",
+	}
+	for input, want := range inputs {
+		t.Run(input, func(t *testing.T) {
+			assert.Equal(t, want, stripShellRedirections(input))
+		})
+	}
+}
+
+func TestShellTool_InferToolRequestType_MidCommandRedirectionCannotHideMutation(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		`kubectl 2>&1 delete deployment prod && echo done`,
+		`kubectl > output.txt delete deployment prod; echo done`,
+		`kubectl > output.txt delete deployment prod 2>&1 && echo done`,
+	}
+	for _, input := range inputs {
+		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+		require.NoError(t, err)
+		assert.Equal(t, core.ToolRequestTypeUpdate, got)
+	}
+}
+
+func TestShellTool_InferToolRequestType_WrappedReadOnlyCurlCompoundIsNotGated(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"sudo curl -s https://example.com || true",
+		"env TOKEN=value curl -s https://example.com || true",
+	}
+	for _, input := range inputs {
+		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+		require.NoError(t, err)
+		assert.Equal(t, core.ToolRequestTypeRead, got)
+	}
+}
+
 func TestShellTool_InferToolRequestType_MutatingFallbackStillFailsClosed(t *testing.T) {
 	tool := ShellTool{AccountId: "test-account"}
 	inputs := []string{
@@ -301,9 +387,11 @@ func TestShellTool_InferToolRequestType_MutatingFallbackStillFailsClosed(t *test
 		"gh api repos/org/repo -X POST || echo failed",
 	}
 	for _, input := range inputs {
-		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
-		require.NoError(t, err)
-		assert.Equal(t, core.ToolRequestTypeUpdate, got)
+		t.Run(input, func(t *testing.T) {
+			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.Equal(t, core.ToolRequestTypeUpdate, got)
+		})
 	}
 }
 

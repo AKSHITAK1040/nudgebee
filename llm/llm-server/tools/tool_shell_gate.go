@@ -50,12 +50,17 @@ import (
 // whose classifier is prompt-based rather than heuristic.
 func (m ShellTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
 	input = extractCommandFromToolInput(input)
-	if hasShellGateControlSyntax(input) && containsExecutableShellWrappable(input) {
-		fallbacks := splitShellFallbacks(input)
-		if len(fallbacks) == 1 || !isKnownReadOnlyFallbackChain(fallbacks) {
+	if hasShellGateControlSyntax(input) {
+		readOnly, err := m.isKnownReadOnlyCompound(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		if readOnly {
+			return core.ToolRequestTypeRead, nil
+		}
+		if containsExecutableShellWrappable(input) {
 			return core.ToolRequestTypeUpdate, nil
 		}
-		input = fallbacks[0]
 	}
 	stages := splitShellPipeline(input)
 	for _, stage := range stages[1:] {
@@ -99,6 +104,154 @@ func (m ShellTool) InferToolRequestType(ctx *security.RequestContext, toolName, 
 		return "", nil
 	}
 	return classifier.InferToolRequestType(ctx, tool.Name(), cleaned)
+}
+
+func (m ShellTool) isKnownReadOnlyCompound(ctx *security.RequestContext, input string) (bool, error) {
+	for _, segment := range splitShellCommandSegments(input) {
+		for _, stage := range splitShellPipeline(segment) {
+			stage = strings.TrimSpace(stage)
+			if stage == "" {
+				continue
+			}
+			if hasShellSubstitution(stage) && containsShellWrappableCommand(stage) {
+				return false, nil
+			}
+			lead, cleaned := extractLeadingShellCommand(stripShellRedirections(stage))
+			leadBase := filepath.Base(lead)
+			if lead == "" {
+				tokens, err := shlex.Split(stage)
+				if err == nil && len(tokens) == 1 && tokens[0] == "env" {
+					continue
+				}
+				if containsShellWrappableCommand(stage) {
+					return false, nil
+				}
+				continue
+			}
+			ownerName := core.LookupShellWrappable(leadBase)
+			if ownerName == "" {
+				if leadBase == "curl" && !isKnownReadOnlyFallbackCommand(cleaned) {
+					return false, nil
+				}
+				if (isShellExecutionWrapper(leadBase) || hasShellSubstitution(stage) ||
+					!isShellArgumentOnlyUtility(leadBase)) && containsShellWrappableCommand(stage) {
+					return false, nil
+				}
+				continue
+			}
+			tool, ok := core.GetNBTool(m.AccountId, ownerName)
+			if !ok {
+				return false, nil
+			}
+			if classifier, ok := tool.(core.ToolRequestInference); ok {
+				requestType, err := classifier.InferToolRequestType(ctx, tool.Name(), cleaned)
+				if err != nil {
+					return false, err
+				}
+				if requestType != core.ToolRequestTypeRead {
+					return false, nil
+				}
+				continue
+			}
+			if leadBase != "gh" || !isKnownReadOnlyGHCommand(cleaned) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+func stripShellRedirections(input string) string {
+	var singleQuoted, doubleQuoted, escaped bool
+	lastOperatorIdx := -1
+	for i := 0; i < len(input); i++ {
+		char := input[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if char == '\\' && !singleQuoted {
+			escaped = true
+			continue
+		}
+		if char == '\'' && !doubleQuoted {
+			singleQuoted = !singleQuoted
+			continue
+		}
+		if char == '"' && !singleQuoted {
+			doubleQuoted = !doubleQuoted
+			continue
+		}
+		if !singleQuoted && !doubleQuoted && (char == '>' || char == '<') {
+			lastOperatorIdx = i
+		}
+	}
+	if lastOperatorIdx >= 0 {
+		if !shellRedirectionEndsStage(input, lastOperatorIdx) {
+			return input
+		}
+		end := lastOperatorIdx
+		if end > 0 && input[end-1] == '&' {
+			end--
+		}
+		if end > 0 && input[end-1] >= '0' && input[end-1] <= '9' {
+			end--
+		}
+		return stripShellRedirections(strings.TrimSpace(input[:end]))
+	}
+	return input
+}
+
+func shellRedirectionEndsStage(input string, operatorIdx int) bool {
+	i := operatorIdx + 1
+	if i < len(input) && input[i] == '>' {
+		i++
+	}
+	for i < len(input) && (input[i] == ' ' || input[i] == '\t') {
+		i++
+	}
+	if i < len(input) && input[i] == '&' {
+		i++
+		for i < len(input) && ((input[i] >= '0' && input[i] <= '9') || input[i] == '-') {
+			i++
+		}
+	} else {
+		var quote byte
+		escaped := false
+		for i < len(input) {
+			char := input[i]
+			if escaped {
+				escaped = false
+				i++
+				continue
+			}
+			if char == '\\' && quote != '\'' {
+				escaped = true
+				i++
+				continue
+			}
+			if quote != 0 {
+				if char == quote {
+					quote = 0
+				}
+				i++
+				continue
+			}
+			if char == '\'' || char == '"' {
+				quote = char
+				i++
+				continue
+			}
+			if char == ' ' || char == '\t' {
+				break
+			}
+			i++
+		}
+	}
+	for i < len(input) && (input[i] == ' ' || input[i] == '\t') {
+		i++
+	}
+	return i == len(input)
 }
 
 // containsExecutableShellWrappable inspects executable positions in compound
@@ -272,9 +425,14 @@ func hasShellGateControlSyntax(input string) bool {
 // regression on those.
 func (m ShellTool) InferToolRequestTypePrompt(ctx *security.RequestContext, toolName, input string) (string, error) {
 	input = extractCommandFromToolInput(input)
-	fallbacks := splitShellFallbacks(input)
-	if len(fallbacks) > 1 && isKnownReadOnlyFallbackChain(fallbacks) {
-		input = fallbacks[0]
+	if hasShellGateControlSyntax(input) {
+		readOnly, err := m.isKnownReadOnlyCompound(ctx, input)
+		if err != nil {
+			return "", err
+		}
+		if readOnly {
+			input = firstRegisteredShellStage(input)
+		}
 	}
 	lead, cleaned := extractLeadingShellCommand(splitShellPipeline(input)[0])
 	if lead == "" {
@@ -293,6 +451,18 @@ func (m ShellTool) InferToolRequestTypePrompt(ctx *security.RequestContext, tool
 		return "", nil
 	}
 	return classifier.InferToolRequestTypePrompt(ctx, tool.Name(), cleaned)
+}
+
+func firstRegisteredShellStage(input string) string {
+	for _, segment := range splitShellCommandSegments(input) {
+		for _, stage := range splitShellPipeline(segment) {
+			lead, _ := extractLeadingShellCommand(stage)
+			if core.LookupShellWrappable(filepath.Base(lead)) != "" {
+				return stage
+			}
+		}
+	}
+	return input
 }
 
 // splitShellFallbacks separates unquoted logical-OR fallback commands. A
@@ -335,34 +505,50 @@ func splitShellFallbacks(input string) []string {
 
 func isKnownReadOnlyFallbackChain(parts []string) bool {
 	for _, part := range parts {
-		tokens, err := shlex.Split(part)
-		if err != nil || len(tokens) == 0 {
+		if !isKnownReadOnlyFallbackCommand(part) {
 			return false
 		}
-		switch filepath.Base(tokens[0]) {
-		case "echo":
-			continue
-		case "curl":
-			for _, token := range tokens[1:] {
-				if hasShellMutationFlag(token, "-d", "--data", "--data-raw", "--data-binary",
-					"-F", "--form", "-T", "--upload-file", "-X", "--request") {
-					return false
-				}
-			}
-		case "gh":
-			if len(tokens) >= 3 && tokens[1] == "run" && tokens[2] == "view" {
-				continue
-			}
-			if len(tokens) < 2 || tokens[1] != "api" {
+	}
+	return true
+}
+
+func isKnownReadOnlyFallbackCommand(input string) bool {
+	tokens, err := shlex.Split(input)
+	if err != nil || len(tokens) == 0 {
+		return false
+	}
+	switch filepath.Base(tokens[0]) {
+	case "echo":
+		return true
+	case "curl":
+		for _, token := range tokens[1:] {
+			if hasShellMutationFlag(token, "-d", "--data", "--data-raw", "--data-binary",
+				"-F", "--form", "-T", "--upload-file", "-X", "--request") {
 				return false
 			}
-			for _, token := range tokens[2:] {
-				if hasShellMutationFlag(token, "-X", "--method", "-f", "--raw-field",
-					"-F", "--field", "--input") {
-					return false
-				}
-			}
-		default:
+		}
+		return true
+	case "gh":
+		return isKnownReadOnlyGHCommand(input)
+	default:
+		return false
+	}
+}
+
+func isKnownReadOnlyGHCommand(input string) bool {
+	tokens, err := shlex.Split(input)
+	if err != nil || len(tokens) < 2 || filepath.Base(tokens[0]) != "gh" {
+		return false
+	}
+	if len(tokens) >= 3 && tokens[1] == "run" && tokens[2] == "view" {
+		return true
+	}
+	if tokens[1] != "api" {
+		return false
+	}
+	for _, token := range tokens[2:] {
+		if hasShellMutationFlag(token, "-X", "--method", "-f", "--raw-field",
+			"-F", "--field", "--input") {
 			return false
 		}
 	}
