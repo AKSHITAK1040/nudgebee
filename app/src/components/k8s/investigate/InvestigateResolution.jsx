@@ -15,6 +15,9 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
   const [requestBody, setRequestBody] = useState({});
   const [selectedOption, setSelectedOption] = useState('');
   const [loading, setLoading] = useState(false);
+  // Kept in state (not just a toast) so the reason stays on screen next to the diff the user was
+  // reading. A toast disappears; the question "why did that fail?" does not.
+  const [submitError, setSubmitError] = useState('');
   const [validationError, setValidationError] = useState({
     imageChangeContainerName: '',
     imageNameWithTag: '',
@@ -298,10 +301,19 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
     return valid;
   };
 
+  // The dialog stays open on failure. Closing it discarded the diff the user was reading and left
+  // only a toast, so retrying meant navigating back to the event and reopening the dialog.
+  const showFailure = (reason) => {
+    const message = reason || 'The request was rejected and no reason was returned.';
+    setSubmitError(message);
+    updateInvestigateSuccessSnackBar('error', `Failed to apply resolution: ${message}`);
+  };
+
   const handleSubmit = () => {
     if (!validateValuesBeforeSubmit()) {
       return;
     }
+    setSubmitError('');
     setLoading(true);
     apiRecommendations
       .applyRecommendation(
@@ -320,22 +332,36 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
       .then((res) => {
         if (!res?.errors) {
           updateInvestigateSuccessSnackBar('success', 'Resolution applied successfully');
-        } else {
-          updateInvestigateSuccessSnackBar('error', `Failed to apply resolution ${parseHttpResponseBodyMessage(res)}`);
+          handleClose();
+          return;
         }
+        showFailure(parseHttpResponseBodyMessage(res));
       })
-      .catch(() => {
-        updateInvestigateSuccessSnackBar('error', 'Failed to apply resolution');
+      .catch((err) => {
+        // Transport and 5xx failures used to surface as a fixed string, so the actual reason never
+        // reached anyone — an apiserver rejection read the same as a network blip.
+        showFailure(parseHttpResponseBodyMessage(err?.response?.data) || err?.message);
       })
       .finally(() => {
         setLoading(false);
-        handleClose();
       });
   };
 
   return (
     <>
       <Box p={`${ds.space.mul(0, 10)} 0px`}>{renderConditionalFields()}</Box>
+      {submitError && (
+        <Box
+          sx={{
+            p: ds.space[3],
+            borderRadius: ds.radius.sm,
+            border: `1px solid ${ds.red[200]}`,
+            background: ds.red[100],
+          }}
+        >
+          <Typography sx={{ fontSize: ds.text.small, color: ds.red[700] }}>{submitError}</Typography>
+        </Box>
+      )}
       <Box
         display='flex'
         alignItems='center'

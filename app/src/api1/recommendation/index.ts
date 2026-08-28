@@ -1681,6 +1681,7 @@ const apiRecommendations = {
             status_message
             type_reference_id
             resolver_type
+            resolver_display_name
             created_at
             updated_at
           }

@@ -334,3 +334,30 @@ func TestNormalizePlan_OrdersFixesBeforeMitigations(t *testing.T) {
 		[]string{plan.Actions[0].Action, plan.Actions[1].Action, plan.Actions[2].Action},
 		"fixes first (best first), mitigations after — even a 40%% fix outranks a 50%% mitigation")
 }
+
+// A failed execute must still be recorded. Gating the resolution on success meant "nothing was
+// tried here" and "three things were tried and all failed" looked identical in the resolutions
+// list, which is the opposite of what an operator needs.
+func TestShouldPersistRemediationResolution_RecordsFailuresAndOnlyExecute(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		eventId string
+		slot    string
+		want    bool
+	}{
+		{"execute slot", "evt-1", RemediationSlotExecute, true},
+		{"empty slot defaults to execute", "evt-1", "", true},
+		{"slot casing and padding ignored", "evt-1", "  EXECUTE  ", true},
+		// A verify observes and a rollback reverses; neither resolves the event.
+		{"verify is not a resolution", "evt-1", "verify", false},
+		{"rollback is not a resolution", "evt-1", "rollback", false},
+		// Ad-hoc runs outside an event have nothing to attach to.
+		{"no event id", "", RemediationSlotExecute, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := shouldPersistRemediationResolution(tc.eventId, tc.slot); got != tc.want {
+				t.Errorf("shouldPersistRemediationResolution(%q, %q) = %v; want %v", tc.eventId, tc.slot, got, tc.want)
+			}
+		})
+	}
+}

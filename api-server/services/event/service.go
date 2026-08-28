@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"nudgebee/services/account"
 	"nudgebee/services/account/adapter"
+	"nudgebee/services/audit"
 	"nudgebee/services/common"
 	"nudgebee/services/config"
 	"nudgebee/services/event/lifecycle"
@@ -547,6 +548,7 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 					ProviderConfig: query.ProviderConfig,
 				}
 			} else if restart {
+				restartAction, restartParams := restartActionFor(r)
 				recommendationRequest = adapter.ApplyRecommendationRequest{
 					Data: query.Data.(map[string]any),
 					Recommendation: models.Recommendation{
@@ -556,13 +558,9 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 						CloudAccountId: *r.CloudAccountId,
 						TenantId:       *r.Tenant,
 						Recommendation: models.NewJsonObject(map[string]any{
-							"account_id":  *r.CloudAccountId,
-							"action_name": "delete_pod",
-							"action_params": map[string]any{
-								"name":      r.SubjectName,
-								"namespace": r.SubjectNamespace,
-								"previous":  false,
-							},
+							"account_id":    *r.CloudAccountId,
+							"action_name":   restartAction,
+							"action_params": restartParams,
 						}),
 						AccountObjectId: &query.EventId,
 					},
@@ -665,6 +663,7 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 					ProviderConfig: query.ProviderConfig,
 				}
 			} else if restart {
+				restartAction, restartParams := restartActionFor(r)
 				recommendationRequest = adapter.ApplyRecommendationRequest{
 					Data: query.Data.(map[string]any),
 					Recommendation: models.Recommendation{
@@ -674,13 +673,9 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 						CloudAccountId: *r.CloudAccountId,
 						TenantId:       *r.Tenant,
 						Recommendation: models.NewJsonObject(map[string]any{
-							"account_id":  *r.CloudAccountId,
-							"action_name": "delete_pod",
-							"action_params": map[string]any{
-								"name":      r.SubjectName,
-								"namespace": r.SubjectNamespace,
-								"previous":  false,
-							},
+							"account_id":    *r.CloudAccountId,
+							"action_name":   restartAction,
+							"action_params": restartParams,
 						}),
 						AccountObjectId: &query.EventId,
 					},
@@ -1116,6 +1111,11 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 
 	resp, err := adptr.ApplyRecommendation(ctx, recommendationRequest, convertedRecommendationResolution, recommendationResolutionId)
 
+	// Applying a resolution mutates customer cluster state through the agent, so it is audited the
+	// same way the remediation panel audits its commands. This path wrote a resolution row but no
+	// audit at all, so a revert left no compliance-grade record of who ran it or whether it took.
+	auditEventResolutionApply(ctx, r, recommendationRequest, err)
+
 	if err != nil {
 		ctx.GetLogger().Error("error applying recommendation", "error", err)
 		if _, updateErr := dbms.Db.Exec("UPDATE event_resolution SET status = $2, updated_at = $3, status_message = $4 WHERE id = $1", resolution.Id, models.RecommendationResolutionStatusFailed, time.Now().UTC().Format(time.RFC3339), err.Error()); updateErr != nil {
@@ -1163,6 +1163,122 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 		Status:     models.RecommendationStatus(string(recommendationStatus)),
 	}, nil
 
+}
+
+// restartActionFor decides how "Restart" is carried out for an event.
+//
+// It dispatched delete_pod unconditionally. Deleting one pod of a Deployment restarts that replica
+// and leaves the others on the old state, which is not what an operator means by restarting a
+// workload — and on a controller with several replicas it does not clear the condition. The agent
+// exposes rollout_restart for Deployment/StatefulSet/DaemonSet/Rollout, which cycles every replica
+// through the controller the way `kubectl rollout restart` does.
+//
+// A bare Pod has no controller to roll, so it keeps delete_pod: recreation is the only restart
+// available, and for a standalone pod that is the whole workload anyway.
+func restartActionFor(r models.Event) (string, map[string]any) {
+	ownerKind := ""
+	if r.SubjectOwnerKind != nil {
+		ownerKind = *r.SubjectOwnerKind
+	}
+	owner := ""
+	if r.SubjectOwner != nil {
+		owner = *r.SubjectOwner
+	}
+	// Params carry plain strings. The pointers these come from marshal to the same JSON, but a
+	// map holding *string forces every reader — the audit record among them — to know which
+	// fields are pointers, and one that guessed wrong silently dropped the name.
+	namespace := stringValue(r.SubjectNamespace)
+	if owner != "" {
+		if _, ok := rolloutRestartableKinds[strings.ToLower(ownerKind)]; ok {
+			return "rollout_restart", map[string]any{
+				"kind":      ownerKind,
+				"name":      owner,
+				"namespace": namespace,
+			}
+		}
+	}
+	return "delete_pod", map[string]any{
+		"name":      stringValue(r.SubjectName),
+		"namespace": namespace,
+		"previous":  false,
+	}
+}
+
+// Kinds the agent's rollout_restart handler supports. Compared lowercased because subject_owner_kind
+// is not written consistently — cloud_resourses alone carries both "Pod" and "pod".
+var rolloutRestartableKinds = map[string]struct{}{
+	"deployment":  {},
+	"statefulset": {},
+	"daemonset":   {},
+	"rollout":     {},
+}
+
+// stringValue reads a param that may be either a string or a *string.
+func stringValue(v any) string {
+	switch value := v.(type) {
+	case string:
+		return value
+	case *string:
+		if value != nil {
+			return *value
+		}
+	}
+	return ""
+}
+
+// auditEventResolutionApply records who applied a resolution to an event, and whether the dispatch
+// succeeded. Best-effort: an audit failure must never fail the apply that already happened.
+func auditEventResolutionApply(ctx *security.RequestContext, r models.Event, request adapter.ApplyRecommendationRequest, applyErr error) {
+	actionName := ""
+	params := map[string]any{}
+	if obj, ok := request.Recommendation.Recommendation.Object().(map[string]any); ok {
+		actionName, _ = obj["action_name"].(string)
+		if p, ok := obj["action_params"].(map[string]any); ok {
+			// Only the coordinates — the full params carry an entire manifest on the revert path.
+			for _, k := range []string{"kind", "name", "namespace"} {
+				if v, ok := p[k]; ok {
+					params[k] = v
+				}
+			}
+		}
+	}
+	status := audit.EventStatusSuccess
+	if applyErr != nil {
+		status = audit.EventStatusFailure
+		params["error"] = applyErr.Error()
+	}
+	sc := ctx.GetSecurityContext()
+	if sc == nil {
+		return
+	}
+	accountId := ""
+	if r.CloudAccountId != nil {
+		accountId = *r.CloudAccountId
+	}
+	// The action params carry the name as a string on some paths and a *string on others
+	// (delete_pod passes r.SubjectName straight through), so handle both rather than silently
+	// dropping the target from the audit record.
+	target := actionName
+	if name := stringValue(params["name"]); name != "" {
+		target = fmt.Sprintf("%s/%s", actionName, name)
+	}
+	auditEvent := audit.Audit{
+		UserId:        sc.GetUserId(),
+		TenantId:      sc.GetTenantId(),
+		AccountId:     accountId,
+		EventTime:     time.Now().UTC(),
+		EventCategory: audit.EventCategoryRecommendation,
+		EventType:     audit.EventTypeRecommendationApply,
+		EventTarget:   target,
+		EventState:    map[string]any{"event_id": r.Id, "action_name": actionName},
+		EventActor:    audit.EventActorUiService,
+		EventAction:   audit.EventActionExecute,
+		EventStatus:   status,
+		EventAttr:     params,
+	}
+	if err := audit.CreateAudit(ctx, &audit.AuditRequest{Audits: []audit.Audit{auditEvent}}); err != nil {
+		ctx.GetLogger().Error("failed to create audit event for event resolution apply", "error", err)
+	}
 }
 
 // getRevertRecommendationRequest builds the params that undo the configuration

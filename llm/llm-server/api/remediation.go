@@ -526,6 +526,9 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 	if s, ok := result.(string); ok {
 		raw = s
 	}
+	// Whether the executor actually told us how the command exited. False means "ran, outcome
+	// unknown" rather than "ran and succeeded".
+	exitCodeReported := false
 	if execErr != nil {
 		// Transport failure — the command may not have run at all.
 		ctx.GetLogger().Error("remediation_execute: command failed", "error", execErr)
@@ -542,6 +545,12 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 		response.Stdout = stdout
 		response.Stderr = stderr
 		response.ExitCode = exitCode
+		// An unparsed result means the executor merged stdout/stderr to text and discarded the exit
+		// code, so there is nothing to judge by. Treating that as success is the only workable
+		// default — flipping it to failure would mark every merged-output command failed — but the
+		// resolution must not then claim the command was verified. exitCodeReported carries that
+		// distinction to the record; see persistRemediationExecution.
+		exitCodeReported = parsed
 		response.Success = !parsed || exitCode == 0
 		if !response.Success && response.Error == "" {
 			response.Error = stderr
@@ -553,31 +562,59 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 	// A resolution says how the event was acted on, so only the state-changing execute command earns
 	// one. A verify observes and a rollback reverses; filing those as resolutions counted one
 	// remediation attempt three times and listed an undo as though it resolved the event.
-	slot := strings.ToLower(strings.TrimSpace(request.Slot))
-	isExecuteSlot := slot == "" || slot == RemediationSlotExecute
-	if response.Success && request.EventId != "" && isExecuteSlot {
-		persistRemediationExecution(ctx, request.EventId, sc.GetUserId(), command, response.ExitCode)
+	//
+	// Failures DO earn one. Gating the insert on response.Success meant a command that ran and
+	// failed left no product-visible trace at all: the resolutions list showed only the attempts
+	// that worked, so "nothing was tried here" and "three things were tried and all failed" looked
+	// identical. The operator needs the second one most.
+	if shouldPersistRemediationResolution(request.EventId, request.Slot) {
+		persistRemediationExecution(ctx, request.EventId, sc.GetUserId(), command, response.ExitCode, response.Success, exitCodeReported)
 	}
 	c.JSON(200, buildApiResponse(response, nil))
 }
 
-// persistRemediationExecution records a successful command run as an event_resolution row so the UI
-// can mark the action already-applied. Best-effort: a DB failure must not fail the (already-run) command.
-func persistRemediationExecution(ctx *security.RequestContext, eventId, userId, command string, exitCode int) {
+// shouldPersistRemediationResolution decides whether a command run earns an event_resolution row.
+// Deliberately independent of whether the command succeeded: a failed execute is exactly the run an
+// operator most needs to see recorded. Slot still gates it, because a verify observes and a rollback
+// reverses — filing those as resolutions counted one attempt three times and listed an undo as
+// though it resolved the event.
+func shouldPersistRemediationResolution(eventId, slot string) bool {
+	if eventId == "" {
+		return false
+	}
+	normalized := strings.ToLower(strings.TrimSpace(slot))
+	return normalized == "" || normalized == RemediationSlotExecute
+}
+
+// persistRemediationExecution records a command run as an event_resolution row so the UI can mark the
+// action already-applied, or show that it was tried and failed. Best-effort: a DB failure must not
+// fail the (already-run) command.
+func persistRemediationExecution(ctx *security.RequestContext, eventId, userId, command string, exitCode int, success, exitCodeReported bool) {
 	dbManager, err := common.GetDatabaseManager(common.Metastore)
 	if err != nil {
 		ctx.GetLogger().Warn("remediation: database unavailable, execution not persisted", "error", err)
 		return
 	}
 	repo := events.NewEventAnalysisRepository(dbManager)
-	data, err := json.Marshal(map[string]any{"command": command, "exit_code": exitCode})
+	data, err := json.Marshal(map[string]any{
+		"command":            command,
+		"exit_code":          exitCode,
+		"success":            success,
+		"exit_code_reported": exitCodeReported,
+	})
 	if err != nil {
 		return
 	}
 	// The resolutions list shows status_message next to the row. A fixed string there told the reader
 	// nothing they could not already see from the row's type, so record the outcome instead.
+	// Say which of the two happened. "exit code 0" and "we never learned the exit code" are very
+	// different facts, and recording the second as the first is how a command that quietly failed
+	// ends up on the page as a success.
 	statusMessage := fmt.Sprintf("Ran from the remediation panel, exit code %d", exitCode)
-	if err := repo.InsertRemediationExecution(ctx, eventId, userId, command, string(data), statusMessage, true); err != nil {
+	if !exitCodeReported {
+		statusMessage = "Ran from the remediation panel — the executor reported no exit code, so the outcome is unverified"
+	}
+	if err := repo.InsertRemediationExecution(ctx, eventId, userId, command, string(data), statusMessage, success); err != nil {
 		ctx.GetLogger().Warn("remediation: failed to persist execution", "error", err)
 	}
 }
