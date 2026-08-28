@@ -1165,8 +1165,25 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 
 }
 
+// getRevertRecommendationRequest builds the params that undo the configuration
+// change recorded on the event.
+//
+// It adds the changed field paths (`revert_paths`), which is what the Go agent
+// acts on. Sending only the evidence's pre-change manifest — all this used to do
+// — never worked there: the manifest is serialized snake_case for Hikaru wire
+// compatibility, so the agent's dynamic client fed it straight to the apiserver,
+// which dropped every renamed key and rejected the remains ("spec.selector:
+// Invalid value: {}: empty selector is invalid for deployment"). Replaying a
+// stored snapshot is also wrong independently of the casing: it clobbers every
+// unrelated change made since the event and trips immutable-field validation.
+// Given the paths, the agent applies them to the live object instead.
+//
+// The manifest still goes out under its per-kind field because tenants not yet
+// migrated off the Python agent are served by that agent's replace_workload,
+// which consumes exactly this shape via Hikaru and ignores unknown params. The
+// Go agent prefers revert_paths whenever they are present. Drop the manifest
+// once the Python agent is retired.
 func getRevertRecommendationRequest(cr models.Resource, r models.Event) (map[string]any, error) {
-	oldYaml := ""
 	if cr.ResourceId == nil {
 		return map[string]any{}, common.ErrorBadRequest("event resolution: cannot revert, event is not linked to a cloud resource")
 	}
@@ -1174,45 +1191,95 @@ func getRevertRecommendationRequest(cr models.Resource, r models.Event) (map[str
 	if len(resourceKeys) != 3 {
 		return map[string]any{}, fmt.Errorf("resolution: service key is not correct")
 	}
-	if r.Evidences.IsArray() {
-		for _, item := range r.Evidences.Array() {
-			switch v := item.(type) {
-			case map[string]any:
-				if evidenceType, ok := v["type"].(string); ok {
-					if evidenceType == "diff" {
-						if dataMap, ok := v["data"].(map[string]any); ok {
-							if oldVal, ok := dataMap["old"]; ok {
-								switch old := oldVal.(type) {
-								case string:
-									oldYaml = old
-								default:
-									slog.Warn("Unexpected type for 'old'", "type", fmt.Sprintf("%T", old))
-								}
-							} else {
-								slog.Warn("'old' key not found in dataMap")
-							}
-						}
-					}
-				}
-			default:
-				slog.Warn("Unknown type for evidence item", "type", fmt.Sprintf("%T", v))
-			}
-		}
+	kind := resourceKeys[1]
+	request := map[string]any{
+		"name":      resourceKeys[2],
+		"namespace": r.SubjectNamespace,
+		"kind":      kind,
 	}
-	if oldYaml != "" {
+	revertPaths := extractRevertPaths(r)
+	if len(revertPaths) > 0 {
+		request["revert_paths"] = revertPaths
+	}
+	if oldYaml := extractDiffOldManifest(r); oldYaml != "" {
 		var yamlMap map[string]any
-		err := yaml.Unmarshal([]byte(oldYaml), &yamlMap)
-		if err != nil {
-			return map[string]any{}, common.ErrorBadRequest("container_name not found")
+		if err := yaml.Unmarshal([]byte(oldYaml), &yamlMap); err != nil {
+			return map[string]any{}, common.ErrorBadRequest("event resolution: the recorded pre-change manifest is not valid YAML")
 		}
-
-		return map[string]any{
-			"name":                           resourceKeys[2],
-			"namespace":                      r.SubjectNamespace,
-			"kind":                           resourceKeys[1],
-			strings.ToLower(resourceKeys[1]): yamlMap}, nil
+		request[strings.ToLower(kind)] = yamlMap
 	}
-	return map[string]any{}, nil
+	if len(revertPaths) == 0 && request[strings.ToLower(kind)] == nil {
+		return map[string]any{}, common.ErrorBadRequest("event resolution: cannot revert, this event has no recorded configuration change to undo")
+	}
+	return request, nil
+}
+
+// extractDiffOldManifest returns the pre-change manifest recorded on the diff
+// evidence. Only the Python agent can consume it; see
+// getRevertRecommendationRequest.
+func extractDiffOldManifest(r models.Event) string {
+	if r.Evidences == nil || !r.Evidences.IsArray() {
+		return ""
+	}
+	for _, item := range r.Evidences.Array() {
+		evidence, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if evidenceType, _ := evidence["type"].(string); evidenceType != "diff" {
+			continue
+		}
+		dataMap, ok := evidence["data"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if oldYaml, ok := dataMap["old"].(string); ok && oldYaml != "" {
+			return oldYaml
+		}
+	}
+	return ""
+}
+
+// extractRevertPaths pulls {path, old} pairs out of the event's diff evidence.
+// `old` is passed through untouched, including a null — the agent reads a null
+// (or absent) old value as "the change added this field", which reverts to
+// removing it rather than writing a null.
+func extractRevertPaths(r models.Event) []any {
+	if r.Evidences == nil || !r.Evidences.IsArray() {
+		return nil
+	}
+	var paths []any
+	for _, item := range r.Evidences.Array() {
+		evidence, ok := item.(map[string]any)
+		if !ok {
+			slog.Warn("Unknown type for evidence item", "type", fmt.Sprintf("%T", item))
+			continue
+		}
+		if evidenceType, _ := evidence["type"].(string); evidenceType != "diff" {
+			continue
+		}
+		dataMap, ok := evidence["data"].(map[string]any)
+		if !ok {
+			continue
+		}
+		updatedValues, ok := dataMap["updated_values"].([]any)
+		if !ok {
+			slog.Warn("diff evidence has no updated_values; cannot build a revert", "event_id", r.Id)
+			continue
+		}
+		for _, uv := range updatedValues {
+			change, ok := uv.(map[string]any)
+			if !ok {
+				continue
+			}
+			path, _ := change["path"].(string)
+			if path == "" {
+				continue
+			}
+			paths = append(paths, map[string]any{"path": path, "old": change["old"]})
+		}
+	}
+	return paths
 }
 
 // hasInProgressRecommendation looks for an existing InProgress resolution for

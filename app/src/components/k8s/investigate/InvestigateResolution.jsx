@@ -71,24 +71,36 @@ const InvestigateResolution = ({ row, handleClose, updateInvestigateSuccessSnack
     const diff = row?.evidences.find((f) => f.type == 'diff')?.data ?? '';
     if (diff) {
       diffExists = true;
-      const oldData = yaml.load(diff.old);
-      const newData = yaml.load(diff.new);
-      revertChanges = diff.updated_paths.map((path) => {
-        const updatedPath = path.replace(/^(StatefulSet|DaemonSet|Deployment|ReplicaSet)\./, '');
-        const oldValue = getNestedValue(oldData, updatedPath);
-        const newValue = getNestedValue(newData, updatedPath);
-        return [
-          {
-            text: updatedPath,
-          },
-          {
-            text: JSON.stringify(oldValue) ?? '',
-          },
-          {
-            text: JSON.stringify(newValue) ?? '',
-          },
-        ];
-      });
+      const stripKind = (path) => path.replace(/^(StatefulSet|DaemonSet|Deployment|ReplicaSet|Rollout)\./, '');
+      // A value the change added has no "old" (and one it deleted has no "new").
+      // Render that as a dash rather than "" so the row doesn't read as "the
+      // field was an empty string".
+      const renderValue = (value) => (value === null || value === undefined || value === '' ? '—' : JSON.stringify(value));
+      // Prefer updated_values: it records old/new per path directly. Re-deriving
+      // them by walking diff.old/diff.new renders blanks whenever the field's
+      // YAML key differs from the path, because the snapshot is serialised
+      // snake_case while the paths are camelCase — e.g. the path
+      // spec.template.spec.initContainers[0].image has no match in a snapshot
+      // that spells it init_containers.
+      const updatedValues = Array.isArray(diff.updated_values) ? diff.updated_values : [];
+      if (updatedValues.length) {
+        revertChanges = updatedValues.map((change) => [
+          { text: stripKind(change?.path ?? '') },
+          { text: renderValue(change?.old) },
+          { text: renderValue(change?.new) },
+        ]);
+      } else {
+        const oldData = yaml.load(diff.old);
+        const newData = yaml.load(diff.new);
+        revertChanges = (diff.updated_paths ?? []).map((path) => {
+          const updatedPath = stripKind(path);
+          return [
+            { text: updatedPath },
+            { text: renderValue(getNestedValue(oldData, updatedPath)) },
+            { text: renderValue(getNestedValue(newData, updatedPath)) },
+          ];
+        });
+      }
     }
 
     if (isRevertTheDevelopment) {
