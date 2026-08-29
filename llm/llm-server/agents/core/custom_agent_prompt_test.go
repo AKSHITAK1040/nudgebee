@@ -54,3 +54,27 @@ func TestNilToolUsageWriteWouldPanic(t *testing.T) {
 		prompt.ToolUsage["some_tool"] = []string{"a description"}
 	})
 }
+
+func TestCustomAgentThinkingLevel(t *testing.T) {
+	tests := []struct {
+		name   string
+		config map[string]any
+		want   string
+	}{
+		{name: "absent", config: nil, want: ThinkingLevelLow},
+		{name: "low", config: map[string]any{"thinking_level": "LOW"}, want: ThinkingLevelLow},
+		{name: "trimmed", config: map[string]any{"thinking_level": " medium "}, want: ThinkingLevelMedium},
+		{name: "unknown", config: map[string]any{"thinking_level": "enthusiastic"}, want: ThinkingLevelLow},
+		{name: "wrong type", config: map[string]any{"thinking_level": 2}, want: ThinkingLevelLow},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &nbCustomAgent{agent: AgentDto{Config: tc.config}}
+			assert.Equal(t, tc.want, ResolveAgentThinkingLevel(agent))
+		})
+	}
+
+	assert.Empty(t, ResolveAgentThinkingLevel(&MockAgent{}),
+		"agents without the optional capability must preserve default resolution")
+}

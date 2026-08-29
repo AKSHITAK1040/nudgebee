@@ -166,6 +166,15 @@ func TestCustomAgentsOptOutOfAccountContext(t *testing.T) {
 		"agents without an explicit capability retain the existing default")
 }
 
+func TestCustomAgentsOptOutOfMemory(t *testing.T) {
+	custom := &nbCustomAgent{}
+	assert.False(t, ResolveAgentMemoryEnabled(custom))
+
+	builtIn := &MockAgent{}
+	assert.True(t, ResolveAgentMemoryEnabled(builtIn),
+		"agents without an explicit capability retain the existing default")
+}
+
 func TestReact3BasePromptNameIsolatesDatabaseBackedCustomAgents(t *testing.T) {
 	assert.Equal(t, nbprompts.PromptReact3CustomBase, react3BasePromptName(&nbCustomAgent{}))
 	assert.Equal(t, nbprompts.PromptReact3Base, react3BasePromptName(&MockAgent{}))

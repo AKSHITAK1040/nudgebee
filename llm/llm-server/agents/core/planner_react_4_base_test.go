@@ -11,13 +11,17 @@ import (
 )
 
 func renderReact4BaseWithRoles(t *testing.T, notebookEnabled, hypothesisModeEnabled, orchestratorMode, executorMode bool) string {
+	return renderReact4BaseWithModes(t, notebookEnabled, hypothesisModeEnabled, orchestratorMode, executorMode, true)
+}
+
+func renderReact4BaseWithModes(t *testing.T, notebookEnabled, hypothesisModeEnabled, orchestratorMode, executorMode, isInvestigation bool) string {
 	t.Helper()
 	base := nbprompts.GetPrompt(context.Background(), nbprompts.PromptReact4Base, "")
 	assert.NotEmpty(t, base, "embedded react_4 base prompt must load")
 
 	vars := []string{
 		"notebook_enabled", "hypothesis_mode_enabled", "orchestrator_mode", "executor_mode",
-		"delegate_agent_enabled",
+		"delegate_agent_enabled", "is_investigation",
 		"context_management_rules", "time_handling_rules", "data_protection_rules",
 		"code_analysis_rules", "security_rules", "memory_consumption_rules", "async_completion_rules",
 	}
@@ -28,6 +32,7 @@ func renderReact4BaseWithRoles(t *testing.T, notebookEnabled, hypothesisModeEnab
 		"hypothesis_mode_enabled":  hypothesisModeEnabled,
 		"orchestrator_mode":        orchestratorMode,
 		"executor_mode":            executorMode,
+		"is_investigation":         isInvestigation,
 		"context_management_rules": "",
 		"time_handling_rules":      "",
 		"data_protection_rules":    "",
@@ -38,6 +43,70 @@ func renderReact4BaseWithRoles(t *testing.T, notebookEnabled, hypothesisModeEnab
 	})
 	assert.NoError(t, err, "react_4 base prompt must render without template errors")
 	return out
+}
+
+func TestReAct4BaseInvestigationGating(t *testing.T) {
+	assert.Contains(t, renderReact4BaseWithModes(t, true, true, true, false, true), "INVESTIGATION DISCIPLINE")
+	assert.NotContains(t, renderReact4BaseWithModes(t, true, false, false, false, false), "INVESTIGATION DISCIPLINE")
+}
+
+func renderReact4CustomBase(t *testing.T, notebookEnabled, isInvestigation bool) string {
+	t.Helper()
+	base := nbprompts.GetPrompt(context.Background(), nbprompts.PromptReact4CustomBase, "")
+	assert.NotEmpty(t, base, "embedded react_4 custom base prompt must load")
+
+	tmpl := prompts.NewPromptTemplate(base, []string{
+		"is_investigation", "notebook_enabled", "time_handling_rules", "security_rules",
+	})
+	out, err := tmpl.Format(map[string]any{
+		"notebook_enabled":    notebookEnabled,
+		"is_investigation":    isInvestigation,
+		"time_handling_rules": "",
+		"security_rules":      "",
+	})
+	assert.NoError(t, err, "react_4 custom base prompt must render")
+	return out
+}
+
+func TestReAct4BasePromptNameIsolatesDatabaseBackedCustomAgents(t *testing.T) {
+	assert.Equal(t, nbprompts.PromptReact4CustomBase, react4BasePromptName(&nbCustomAgent{}))
+	assert.Equal(t, nbprompts.PromptReact4Base, react4BasePromptName(&MockAgent{}))
+}
+
+func TestReAct4CustomBaseIsCompactAndGeneric(t *testing.T) {
+	out := renderReact4CustomBase(t, true, true)
+
+	assert.Contains(t, out, "native functions")
+	assert.Contains(t, out, "fewest planner turns and tool")
+	assert.Contains(t, out, "complete, verified result")
+	assert.Contains(t, out, "Multiple sibling calls may use the same tool")
+	assert.Contains(t, out, "one bounded invocation")
+	assert.Contains(t, out, "deliberately")
+	assert.Contains(t, out, "Unexpected tool or transport truncation")
+	assert.Contains(t, out, "Classify each invocation from its")
+	assert.Contains(t, out, "other useful independent calls")
+	assert.Contains(t, out, "use at most one bounded")
+	assert.Contains(t, out, "the next tool turn must implement")
+	assert.Contains(t, out, "group multiple")
+	assert.Contains(t, out, "every result is clearly labeled")
+	assert.Contains(t, out, "update_notebook")
+	assert.Contains(t, out, "<final_answer>")
+
+	assert.NotContains(t, out, "HYPOTHESIS DISCIPLINE")
+	assert.NotContains(t, out, "DELEGATION:")
+	assert.NotContains(t, out, "code_analyzer")
+	assert.NotContains(t, out, "kubectl")
+	assert.Less(t, len(out), 7000, "custom-agent base should remain compact")
+}
+
+func TestReAct4CustomBaseNotebookGating(t *testing.T) {
+	assert.Contains(t, renderReact4CustomBase(t, true, true), "YOUR NOTEBOOK")
+	assert.NotContains(t, renderReact4CustomBase(t, false, true), "YOUR NOTEBOOK")
+}
+
+func TestReAct4CustomBaseInvestigationGating(t *testing.T) {
+	assert.Contains(t, renderReact4CustomBase(t, true, true), "INVESTIGATION PATTERN")
+	assert.NotContains(t, renderReact4CustomBase(t, true, false), "INVESTIGATION PATTERN")
 }
 
 // react_4 is a HYBRID contract: actions are native tool calls, but the final
@@ -177,13 +246,14 @@ func TestReAct4Base_NoDelegationSectionWhenToolAbsent(t *testing.T) {
 	base := nbprompts.GetPrompt(context.Background(), nbprompts.PromptReact4Base, "")
 	tmpl := prompts.NewPromptTemplate(base, []string{
 		"notebook_enabled", "hypothesis_mode_enabled", "orchestrator_mode", "executor_mode",
-		"delegate_agent_enabled",
+		"delegate_agent_enabled", "is_investigation",
 		"context_management_rules", "time_handling_rules", "data_protection_rules",
 		"code_analysis_rules", "security_rules", "memory_consumption_rules", "async_completion_rules",
 	})
 	out, err := tmpl.Format(map[string]any{
 		"notebook_enabled": true, "hypothesis_mode_enabled": true,
 		"orchestrator_mode": true, "executor_mode": false,
+		"is_investigation":         true,
 		"delegate_agent_enabled":   false,
 		"context_management_rules": "", "time_handling_rules": "", "data_protection_rules": "",
 		"code_analysis_rules": "", "security_rules": "", "memory_consumption_rules": "",

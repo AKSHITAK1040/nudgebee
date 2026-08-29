@@ -243,16 +243,14 @@ func ensureNotebookTool(ctx *security.RequestContext, accountId string, tools []
 	return tools
 }
 
-// renderReact4Base renders the react_4 base system prompt with the same
-// role-mode gates and shared-rule fragments react_3 uses (resolveReact3RoleModes,
-// resolveHypothesisModeEnabled, the versioned prompt tree's shared-rule
-// fragments), so a react_4 agent runs with the same operational guidance as its
-// react_3 counterpart — only the response-format section differs (native tools
-// instead of XML). Returns "" on any load/render error; the caller falls back to
-// the agent prompt alone. Every prompt loaded here is verified at startup by
-// MustResolveAll, so an error is a build defect rather than a runtime condition.
+// renderReact4Base renders the provider-native planner contract. Built-in agents
+// receive the same role gates and shared fragments as react_3. Database-backed
+// custom agents receive the compact custom base plus only the generally applicable
+// time and security fragments; their stored instructions define everything else.
+// Returns "" on any load/render error; the caller falls back to the agent prompt.
 func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agent NBAgent, tools []toolcore.NBTool) string {
-	base, baseErr := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptReact4Base, request.AccountId)
+	basePromptName := react4BasePromptName(agent)
+	base, baseErr := nbprompts.GetPromptStrict(ctx.GetContext(), basePromptName, request.AccountId)
 	if baseErr != nil || strings.TrimSpace(base) == "" {
 		ctx.GetLogger().Error("react4: failed to load base prompt; using agent prompt only", "error", baseErr)
 		return ""
@@ -261,24 +259,37 @@ func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agen
 	notebookEnabled := ResolveAgentNotebookEnabled(agent)
 	hypothesisModeEnabled := resolveHypothesisModeEnabled(request, agent)
 	orchestratorMode, executorMode := resolveReact3RoleModes(request)
+	promptVariant := promptVariantFromCtx(ctx)
+	if promptVariant == promptVariantLean {
+		notebookEnabled = false
+		hypothesisModeEnabled = false
+		orchestratorMode = false
+	}
+	isInvestigation := promptVariant != promptVariantLean && promptVariant != promptVariantQuery
 
-	// Shared-rule fragments resolve with an empty accountID (include-only, no
-	// per-account override), matching reActCreatePrompt3. async_completion_rules is
-	// derived per-agent (asyncCompletionRules), not loaded as a fragment.
-	contextManagementRules, err1 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptContextContinuity, "")
-	timeHandlingRules, err2 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptTimeHandlingRules, "")
-	dataProtectionRules, err3 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptDataProtectionRules, "")
-	codeAnalysisRules, err4 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptCodeAnalysisRules, "")
-	securityRules, err5 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptSecurityRules, "")
-	memoryConsumptionRules, err6 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptMemoryConsumptionRules, "")
-	if fragErr := errors.Join(err1, err2, err3, err4, err5, err6); fragErr != nil {
+	// Fragment lookups use an empty account ID (include-only), matching react_3.
+	// Custom agents deliberately skip built-in-only fragments rather than paying
+	// their DB/cache lookup cost merely to omit their text from the template.
+	timeHandlingRules, timeErr := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptTimeHandlingRules, "")
+	securityRules, securityErr := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptSecurityRules, "")
+	var contextManagementRules, dataProtectionRules, codeAnalysisRules, memoryConsumptionRules string
+	var builtInFragErr error
+	if basePromptName == nbprompts.PromptReact4Base {
+		var err1, err2, err3, err4 error
+		contextManagementRules, err1 = nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptContextContinuity, "")
+		dataProtectionRules, err2 = nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptDataProtectionRules, "")
+		codeAnalysisRules, err3 = nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptCodeAnalysisRules, "")
+		memoryConsumptionRules, err4 = nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptMemoryConsumptionRules, "")
+		builtInFragErr = errors.Join(err1, err2, err3, err4)
+	}
+	if fragErr := errors.Join(timeErr, securityErr, builtInFragErr); fragErr != nil {
 		ctx.GetLogger().Error("react4: failed to load shared-rule fragment; using agent prompt only", "error", fragErr)
 		return ""
 	}
 
 	vars := []string{
 		"notebook_enabled", "hypothesis_mode_enabled", "orchestrator_mode", "executor_mode",
-		"delegate_agent_enabled",
+		"delegate_agent_enabled", "is_investigation",
 		"context_management_rules", "time_handling_rules", "data_protection_rules",
 		"code_analysis_rules", "security_rules", "memory_consumption_rules", "async_completion_rules",
 	}
@@ -286,6 +297,7 @@ func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agen
 	out, err := tmpl.Format(map[string]any{
 		"notebook_enabled":        notebookEnabled,
 		"hypothesis_mode_enabled": hypothesisModeEnabled,
+		"is_investigation":        isInvestigation,
 		// Gates the DELEGATION section. react_4 shipped with the delegate_agent
 		// TOOL available but no guidance on when to use it, so the model kept
 		// multi-step discovery inline: on one comparison case the orchestrator made
@@ -307,6 +319,16 @@ func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agen
 		return ""
 	}
 	return out
+}
+
+// react4BasePromptName keeps database-backed custom agents isolated from the
+// built-in orchestration, infrastructure, delegation, and hypothesis guidance.
+// It mirrors react3BasePromptName; all built-in agents retain react_4_base.
+func react4BasePromptName(agent NBAgent) string {
+	if _, ok := agent.(*nbCustomAgent); ok {
+		return nbprompts.PromptReact4CustomBase
+	}
+	return nbprompts.PromptReact4Base
 }
 
 func (o *NBReActPlanner4) GetTools() []toolcore.NBTool { return o.tools }
@@ -414,6 +436,9 @@ func (o *NBReActPlanner4) Plan(
 		// (OpenAI, Anthropic, Gemini) reject a request that carries an empty tools
 		// array with a 400, so pass WithTools only when llmTools is non-empty.
 		opts := []llms.CallOption{llms.WithTemperature(0.0)}
+		if level := ResolveAgentThinkingLevel(o.nbAgent); level != "" {
+			opts = append(opts, WithThinkingLevel(level))
+		}
 		if len(o.llmTools) > 0 {
 			opts = append(opts, llms.WithTools(o.llmTools))
 		}

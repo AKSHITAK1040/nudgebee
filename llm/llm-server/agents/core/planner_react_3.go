@@ -1833,6 +1833,14 @@ func (o *NBReActPlanner3) Plan(
 				}
 			}
 
+			// Agent-level policy is the final authority. Database-backed custom
+			// agents default to low reasoning (and may explicitly override it),
+			// matching react_4. Built-in agents do not implement this optional
+			// capability, so their orchestrator/model resolution remains unchanged.
+			if level := ResolveAgentThinkingLevel(o.nbAgent); level != "" {
+				callOptions = append(callOptions, WithThinkingLevel(level))
+			}
+
 			if stopWords := reactPlannerStopWords(provider, model); len(stopWords) > 0 {
 				callOptions = append(callOptions, llms.WithStopWords(stopWords))
 			}

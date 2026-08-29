@@ -94,6 +94,8 @@ type nbCustomAgent struct {
 // planner silently injects shell_execute / load_skills on top of the user's selection.
 var _ DefaultToolsOptOut = (*nbCustomAgent)(nil)
 var _ NBAgentAccountContextProvider = (*nbCustomAgent)(nil)
+var _ NBAgentMemoryProvider = (*nbCustomAgent)(nil)
+var _ NBAgentThinkingLevelProvider = (*nbCustomAgent)(nil)
 
 // OptOutDefaultTools implements DefaultToolsOptOut. Custom agents are user-curated:
 // the operator picks the tool list explicitly via the UI/API. The planner must not
@@ -108,6 +110,27 @@ func (a *nbCustomAgent) OptOutDefaultTools() bool {
 // can be large and may introduce unrelated infrastructure assumptions.
 func (a *nbCustomAgent) GetAccountContextEnabled() bool {
 	return false
+}
+
+// GetMemoryEnabled keeps database-backed custom agents isolated from account
+// and conversation memory. Their stored prompt and explicitly selected tools
+// define the context available to the agent.
+func (a *nbCustomAgent) GetMemoryEnabled() bool {
+	return false
+}
+
+// GetThinkingLevel reads the optional custom-agent planner preference. Custom
+// agents default to low reasoning so their focused prompt/tool contract does not
+// inherit a potentially expensive provider default. A valid explicit setting
+// remains authoritative.
+func (a *nbCustomAgent) GetThinkingLevel() string {
+	level, _ := a.agent.Config["thinking_level"].(string)
+	level = strings.ToLower(strings.TrimSpace(level))
+	switch level {
+	case ThinkingLevelMinimal, ThinkingLevelLow, ThinkingLevelMedium, ThinkingLevelHigh:
+		return level
+	}
+	return ThinkingLevelLow
 }
 
 func (a *nbCustomAgent) GetName() string {

@@ -5,6 +5,86 @@
 **Adapter:** `tbench/nubi_agent.py` + PR #30036 (always container-script delivery)
 **Provider:** googleai/gemini-3-flash-preview
 
+## 2026-08-29 validation addendum
+
+This addendum records the 17-task regression sample run after the adapter began
+providing a bounded environment capability map, custom-agent memory was disabled,
+shell pager defaults were made non-interactive, and timeout cleanup was added.
+It intentionally preserves the historical baseline below.
+
+### Final four-task control sample
+
+After isolating database-backed custom agents behind a compact ReAct-4 base,
+passing a bounded terminal capability map from the adapter, and tightening the
+reference TBench agent's forward-progress guidance, the same four tasks were run
+sequentially with a 345-second adapter deadline:
+
+| Task | Result | Agent time | Tool calls | Conversation |
+|---|---:|---:|---:|---|
+| `intrusion-detection` | completed, 5/7 | 4m35s | 8 | `611fa0e9-4f6a-42a0-9a51-3676d329d7f8` |
+| `password-recovery` | **2/2 pass** | 3m37s | 7 | `48c463b1-80b1-49b3-8b65-2a275aea7826` |
+| `organization-json-generator` | **4/4 pass** | 2m49s | 5 | `d5a29b37-e0c2-4ba1-8934-e408ca01c471` |
+| `gpt2-codegolf` | timeout, 0/1 | 5m54s | 12 | `2e4fc544-28e2-4636-8b9c-026c45e8aab1` |
+
+Three of four tasks completed normally and two resolved fully. This is the
+pre-lifecycle-steering control set for future custom-agent planner experiments.
+It shows that ordinary artifact tasks now transition to implementation earlier,
+while `gpt2-codegolf` remains dominated by solution derivation and repeated
+tokenizer/model prototypes rather than generic environment discovery.
+
+### Headline
+
+| View | Resolved | Meaning |
+|---|---:|---|
+| Initial full run `2026-08-28__18-11-09` | 4/17 (24%) | One run under the pre-update configuration |
+| Best observed after targeted reruns | **9/17 (53%)** | Best grader result per task; useful for capability, not statistical pass rate |
+
+The five additional functional resolutions were `fibonacci-server`, `fix-git`,
+`organization-json-generator`, `processing-pipeline`, and `password-recovery`.
+`password-recovery` passed its grader after producing the required artifact, but
+the conversation itself exceeded the agent deadline; it therefore remains an
+orchestration-efficiency failure despite being a functional pass.
+
+### Latest classification
+
+| Task | Latest/best result | Classification |
+|---|---|---|
+| `hello-world` | pass | clean pass |
+| `openssl-selfsigned-cert` | pass | functional pass; earlier run exceeded conversation deadline |
+| `fix-pandas-version` | pass | functional pass; earlier run exceeded conversation deadline |
+| `csv-to-parquet` | pass | functional pass; earlier run exceeded conversation deadline |
+| `fibonacci-server` | pass, 4 tools, ~2m19s agent time | clean improvement from 11 tools / ~5m41s |
+| `fix-git` | pass | clean after non-interactive pager defaults |
+| `organization-json-generator` | pass, 5 tools, ~2m49s agent time | clean pass in final control run |
+| `processing-pipeline` | pass, 9 tools, ~4m13s | clean pass |
+| `password-recovery` | pass, 7 tools, ~3m37s agent time | clean pass in final control run |
+| `intrusion-detection` | completed, 5/7, 8 tools, ~4m35s | no timeout; two correctness checks remain |
+| `count-dataset-tokens` | timeout, 0/1 | remote dataset/tokenizer exploration exceeded deadline |
+| `gpt2-codegolf` | timeout, 0/1 | prolonged tokenizer design; no implementation |
+| `hf-model-inference` | timeout, 0/4 | dependency installation consumed nearly the full deadline |
+| `decommissioning-service-with-sensitive-data` | 5/6 | encrypted archive failed content/decryption validation |
+| `swe-bench-astropy-1` | 13/15 | implementation incomplete; two separability cases fail |
+| `nginx-request-logging` | 7/8 | grader requires directives in `nginx.conf` although task names `conf.d/benchmark-site.conf` |
+| `vim-terminal-task` | 4/5 | grader additionally requires executable bit not stated by task |
+
+The six-task closing batch is `2026-08-29__09-56-43` (raw 1/6); the passing
+task was `password-recovery`. The raw number is intentionally not combined with
+the initial 4/17 because the batch contains only prior failures and ran four
+trials concurrently.
+
+### Conclusions
+
+- The adapter changes improved deterministic shell behavior, eliminated orphaned
+  conversations on timeout, and materially reduced bootstrap work on tasks such
+  as `fibonacci-server`.
+- The dominant remaining issue is agent efficiency: several tasks still spend
+  their budget exploring or installing dependencies instead of implementing and
+  verifying early.
+- Two failures (`nginx-request-logging`, `vim-terminal-task`) have meaningful
+  task/grader contract mismatches and should not be used alone to tune prompts.
+- A clean, fixed-config 17-task rerun is required before treating 9/17 as a new
+  release baseline. Best-of-targeted-reruns measures capability and is optimistic.
+
 > ⚠️ **The previous baseline (2026-05-06) is invalidated.** It was taken with a server-side regression introduced by #29973 active in `main`. That regression caused every multi-step task to get stuck after its first shell command — which the failure-mode classifier scored as `agent_timeout`, `latency-bound`, or `hung-command`. With the fix landed, those tasks actually run to completion; the original numbers and per-task categorization were therefore contaminated and are retained at the bottom of this file for reference only.
 >
 > The numbers below come from **17 curated tasks** picked across the original baseline's failure-mode buckets (3 confirm-no-regress passers, 4 near-pass, 4 latency-bound, 1 high-difficulty, plus 5 from a targeted re-run set). They are the **interim** post-fix picture; a clean full 80-task re-run is the next milestone (TODO at the bottom).

@@ -24,6 +24,20 @@ tb harness → NuBiAgent → POST /v1/completions/chat (@tbench, async)
    until status ∈ {COMPLETED, FAILED, TERMINATED}
 ```
 
+Before starting the conversation, the adapter performs one bounded read-only
+probe inside the task container. The initial request includes the verified
+working directory, OS/kernel, architecture, available and unavailable common
+executables, their first-line versions, and a capped directory listing. It
+never includes arbitrary environment variables or file contents, and the
+output is escaped and truncated before prompt injection. Agent instructions
+should reuse this capability map instead of requiring generic `uname`, `pwd`,
+version, directory, or executable-discovery calls on every task.
+
+The reference agent prompt also prohibits inspecting benchmark tests/reference
+solutions, dumping the complete environment, and recursively searching `/`.
+These are both benchmark-integrity rules and safeguards against discovery loops
+that consume the task deadline without producing an artifact.
+
 ## Prerequisites
 
 1. **NuBi running locally** — `cd llm/llm-server && make run` (default port 8005 or 9999).
@@ -56,7 +70,9 @@ tb harness → NuBiAgent → POST /v1/completions/chat (@tbench, async)
 | `NUBI_AGENT_NAME` | `tbench` | Agent the query is routed to (`@<name>` prefix) |
 | `NUBI_POLL_INTERVAL` | `2` | Seconds between `chat_get` polls |
 | `NUBI_CMD_TIMEOUT` | `600` | Per-shell-command wallclock cap (`SIGINT` on timeout, partial output returned) |
-| `NUBI_TASK_TIMEOUT` | `1800` | Outer cap on the whole trial |
+| `NUBI_TASK_TIMEOUT` | _(auto)_ | Explicit adapter deadline; otherwise derived from Terminal-Bench's effective task timeout |
+| `NUBI_ORPHAN_CHECK_INTERVAL` | `2` | Seconds between checks that stop NuBi when the harness leaves the agent phase |
+| `NUBI_TIMEOUT_GRACE` | `15` | Seconds reserved before the harness deadline to stop the NuBi conversation cleanly |
 
 ## Running tests
 

@@ -650,6 +650,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// (or the tenant is not allowlisted) the legacy notebook remains primary.
 	tenantID := ctx.GetSecurityContext().GetTenantId()
 	memoryModuleActive := isMemoryV2ActiveFn(tenantID)
+	memoryEnabled := ResolveAgentMemoryEnabled(agent)
 
 	memChan := make(chan string, 1)
 	memV2Chan := make(chan string, 1)
@@ -661,7 +662,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// distinct parent agent as a sub-agent (the canonical test in promptVariantForRequest).
 	isSubAgentInvocation := !isTopLevelInvocation ||
 		(request.ParentAgentId != "" && request.ParentAgentId != request.AgentId)
-	if isSubAgentInvocation {
+	if isSubAgentInvocation || !memoryEnabled {
 		// Empty sends keep the collectors below unblocked.
 		memChan <- ""
 		memV2Chan <- ""
@@ -680,7 +681,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// Collect results
 	kbStart := time.Now()
 	kbResult = <-kbChan
-	if memoryModuleActive {
+	if memoryModuleActive && memoryEnabled {
 		// Reference context, not working state: seeding the notebook handed
 		// every injected memory the authority of the agent's own prior
 		// findings. The planner frames it as <user_memory>; the notebook
@@ -691,7 +692,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 		initialNotebook = <-memChan
 		<-memV2Chan // drain
 	}
-	ctx.GetLogger().Info("agentexecutor: KB and memory retrieval complete", "duration", time.Since(kbStart).String(), "memory_module_active", memoryModuleActive)
+	ctx.GetLogger().Info("agentexecutor: KB and memory retrieval complete", "duration", time.Since(kbStart).String(), "memory_module_active", memoryModuleActive, "agent_memory_enabled", memoryEnabled)
 
 	if len(kbResult.prompt.Instructions) > 0 {
 		basePrompt = kbResult.prompt

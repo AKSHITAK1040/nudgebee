@@ -681,6 +681,38 @@ func ResolveAgentAccountContextEnabled(agent NBAgent) bool {
 	return true
 }
 
+// NBAgentMemoryProvider controls whether conversation memory is retrieved and
+// composed for an agent. Built-in agents retain memory by default. User-curated
+// custom agents opt out because their stored prompt and explicitly selected
+// tools are their context contract; a future custom-agent setting can opt back
+// in through this same capability.
+type NBAgentMemoryProvider interface {
+	GetMemoryEnabled() bool
+}
+
+// ResolveAgentMemoryEnabled preserves the existing enabled default for agents
+// that do not declare a memory preference.
+func ResolveAgentMemoryEnabled(agent NBAgent) bool {
+	if p, ok := agent.(NBAgentMemoryProvider); ok {
+		return p.GetMemoryEnabled()
+	}
+	return true
+}
+
+// NBAgentThinkingLevelProvider allows an agent to request a provider-native
+// reasoning level for its planner calls. An empty value preserves the resolved
+// model/default configuration.
+type NBAgentThinkingLevelProvider interface {
+	GetThinkingLevel() string
+}
+
+func ResolveAgentThinkingLevel(agent NBAgent) string {
+	if p, ok := agent.(NBAgentThinkingLevelProvider); ok {
+		return p.GetThinkingLevel()
+	}
+	return ""
+}
+
 // AgentModule identifies the functional bucket an agent belongs to. Used by
 // the Memory Architecture to scope per-module memory (Patterns, Collective),
 // filter tool visibility, and route signal collectors. Agents that span

@@ -38,6 +38,7 @@ const (
 	PromptReact3Base                         = "react_3_base"
 	PromptReact3CustomBase                   = "react_3_custom_base"
 	PromptReact4Base                         = "react_4_base"
+	PromptReact4CustomBase                   = "react_4_custom_base"
 	PromptReactCritiquer                     = "react_critiquer"
 	PromptConfigAutoSelection                = "config_auto_selection"
 	PromptRemediationGenerate                = "remediation_generate"
@@ -98,6 +99,7 @@ var promptCategories = map[string]PromptCategory{
 	PromptReact3Base:                         CategoryPlanners,
 	PromptReact3CustomBase:                   CategoryPlanners,
 	PromptReact4Base:                         CategoryPlanners,
+	PromptReact4CustomBase:                   CategoryPlanners,
 	PromptReactCritiquer:                     CategoryPlanners,
 	PromptConfigAutoSelection:                CategoryTools,
 	PromptRemediationGenerate:                CategoryTools,
