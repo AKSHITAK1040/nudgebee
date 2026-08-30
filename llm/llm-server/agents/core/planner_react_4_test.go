@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,6 +222,16 @@ func TestReAct4_ExtractNotebookContent(t *testing.T) {
 	assert.Equal(t, `{"other":"x"}`, extractNotebookContent(`{"other":"x"}`))
 }
 
+func TestReAct4_ExtractNotebookUpdate(t *testing.T) {
+	content, appendEntry := extractNotebookUpdate(`{"content":"new evidence","append":true}`)
+	assert.Equal(t, "new evidence", content)
+	assert.True(t, appendEntry)
+
+	content, appendEntry = extractNotebookUpdate(`{"content":"full state"}`)
+	assert.Equal(t, "full state", content)
+	assert.False(t, appendEntry, "replacement must remain the backward-compatible default")
+}
+
 func TestReAct4_RefreshNotebookFromSteps_PicksLatest(t *testing.T) {
 	o := &NBReActPlanner4{}
 	steps := []NBAgentPlannerToolActionStep{
@@ -230,6 +241,43 @@ func TestReAct4_RefreshNotebookFromSteps_PicksLatest(t *testing.T) {
 	}
 	o.refreshNotebookFromSteps(steps)
 	assert.Equal(t, "second", o.Notebook)
+}
+
+func TestReAct4_RefreshNotebookFromSteps_AppendsTimestampedIdempotentJournalEntry(t *testing.T) {
+	o := &NBReActPlanner4{Notebook: "## Initial state\n- H1 [OPEN]"}
+	step := NBAgentPlannerToolActionStep{
+		Action: NBAgentPlannerToolAction{
+			Tool:             toolcore.NotebookToolName,
+			ToolInput:        `{"content":"H1 is supported by error traces","append":true}`,
+			ToolID:           "call-journal-1",
+			PlannerIteration: 4,
+		},
+		Status: ToolStatusSuccess,
+	}
+
+	o.refreshNotebookFromSteps([]NBAgentPlannerToolActionStep{step})
+	first := o.Notebook
+	assert.Contains(t, first, "## Initial state\n- H1 [OPEN]")
+	assert.Contains(t, first, "## Journal entry — ")
+	assert.Contains(t, first, " · Iteration 4")
+	assert.Contains(t, first, "<!-- notebook-entry:call-journal-1 -->")
+	assert.Contains(t, first, "H1 is supported by error traces")
+
+	o.refreshNotebookFromSteps([]NBAgentPlannerToolActionStep{step})
+	assert.Equal(t, first, o.Notebook, "replaying the same successful tool step must not append twice")
+	assert.Equal(t, 1, strings.Count(o.Notebook, "notebook-entry:call-journal-1"))
+}
+
+func TestReAct4_RefreshNotebookFromSteps_ReplacementAfterAppendStillReplacesWholeDocument(t *testing.T) {
+	o := &NBReActPlanner4{Notebook: "older journal"}
+	o.refreshNotebookFromSteps([]NBAgentPlannerToolActionStep{{
+		Action: NBAgentPlannerToolAction{
+			Tool:      toolcore.NotebookToolName,
+			ToolInput: `{"content":"consolidated state","append":false}`,
+		},
+		Status: ToolStatusSuccess,
+	}})
+	assert.Equal(t, "consolidated state", o.Notebook)
 }
 
 func TestReAct4_RenderStepsToMessages_PairsAndSkipsNotebook(t *testing.T) {

@@ -61,10 +61,11 @@ body: |2
   {{if .notebook_enabled}}
   YOUR NOTEBOOK:
 
-  Maintain concise working state with the `update_notebook` tool. Call it with
-  the full replacement body in `content`. Record verified capabilities, completed
-  requirements, current evidence, and open questions. You may update it in the
-  same turn as an independent read-only call.
+  Maintain concise working state with the `update_notebook` tool. Use the full
+  body in `content` for a replacement, or set `append: true` for a chronological
+  evidence or correction entry. Record verified capabilities, completed requirements,
+  current evidence, and open questions. You may update it in the same turn as
+  another independent, non-conflicting call.
   {{end}}
 
   FINAL ANSWER FORMAT:

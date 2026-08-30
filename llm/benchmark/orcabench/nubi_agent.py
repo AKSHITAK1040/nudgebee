@@ -7,6 +7,7 @@ sole scorer and reads ``/app/report.md`` after this agent exits.
 """
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -41,6 +42,8 @@ _WAITING_FOR_TOOL = "WAITING_FOR_CLIENT_TOOL"
 _AGENT_WAITING = "waiting_for_client_tool"
 _DEFAULT_MAX_TOOL_OUTPUT_CHARS = 12_000
 _DEFAULT_CONVERSATION_VISIBILITY_TIMEOUT = 15.0
+_TELEMETRY_HELPER_SOURCE = Path(__file__).with_name("telemetry_helper.py")
+_TELEMETRY_HELPER_TARGET = "/tmp/nubi-orca/telemetry.py"
 _ENVIRONMENT_DISCOVERY_COMMAND = r"""printf 'os='
 uname -srm 2>/dev/null || printf 'unknown'
 printf '\nworking_directory='
@@ -71,12 +74,26 @@ try:
     with urllib.request.urlopen(request, timeout=5) as response:
         datasources = json.load(response)
     for datasource in datasources:
+        uid = datasource.get('uid', 'unknown')
+        datasource_type = datasource.get('type', 'unknown')
         print(
             "datasource."
-            f"{datasource.get('uid', 'unknown')}="
-            f"{datasource.get('type', 'unknown')}:"
+            f"{uid}="
+            f"{datasource_type}:"
             f"{datasource.get('name', 'unknown')}"
         )
+        print(f"datasource.{uid}.proxy_path=/api/datasources/proxy/uid/{uid}")
+        if datasource_type == "prometheus":
+            print(f"datasource.{uid}.query_path=/api/v1/query")
+            print(f"datasource.{uid}.query_range_path=/api/v1/query_range")
+            print(f"datasource.{uid}.time_unit=unix_seconds")
+        elif datasource_type == "jaeger":
+            print(f"datasource.{uid}.services_path=/api/services")
+            print(f"datasource.{uid}.traces_path=/api/traces")
+            print(f"datasource.{uid}.time_unit=unix_microseconds")
+        elif "opensearch" in datasource_type:
+            print(f"datasource.{uid}.search_path=/<index-pattern>/_search")
+            print(f"datasource.{uid}.time_unit=iso8601")
 except Exception:
     pass
 PY
@@ -326,6 +343,7 @@ class NuBiHarborAgent(BaseAgent):
         instruction: str,
         environment: BaseEnvironment,
     ) -> str:
+        helper_available = await self._stage_telemetry_helper(environment)
         result = await environment.exec(
             command=_ENVIRONMENT_DISCOVERY_COMMAND,
             timeout_sec=10,
@@ -335,6 +353,20 @@ class NuBiHarborAgent(BaseAgent):
         capabilities = result.stdout.strip()
         if not capabilities:
             return instruction
+        if helper_available:
+            capabilities += (
+                f"\nhelper.telemetry={_TELEMETRY_HELPER_TARGET}"
+                "\nhelper.metrics=python3 /tmp/nubi-orca/telemetry.py --uid <uid> "
+                "metrics --query <promql> [--start <iso-or-epoch> "
+                "--end <iso-or-epoch> --step <duration>]"
+                "\nhelper.logs=python3 /tmp/nubi-orca/telemetry.py --uid <uid> "
+                "logs --index <pattern> (--body <json> | --body-file <path>)"
+                "\nhelper.services=python3 /tmp/nubi-orca/telemetry.py --uid <uid> "
+                "services"
+                "\nhelper.traces=python3 /tmp/nubi-orca/telemetry.py --uid <uid> "
+                "traces --service <service> --start <iso-or-epoch> "
+                "--end <iso-or-epoch> [--limit <count> --tags <json>]"
+            )
         return (
             f"{instruction}\n\n"
             "<verified_environment_capabilities>\n"
@@ -346,10 +378,30 @@ class NuBiHarborAgent(BaseAgent):
             "whether GRAFANA_URL exists. Reuse any datasource UID/type entries "
             "as authoritative for this run; do not call /api/datasources when "
             "those entries are present. Only rediscover a datasource if a "
-            "provided UID fails. Refer to GRAFANA_URL by variable name; its value "
+            "provided UID fails. When helper.telemetry is present, use it for "
+            "Grafana proxy authentication, request encoding, and timestamp "
+            "conversion instead of rebuilding those mechanics. Refer to "
+            "GRAFANA_URL by variable name; its value "
             "is intentionally not included. This map does not replace "
             "source-specific schema discovery or evidence collection."
         )
+
+    async def _stage_telemetry_helper(
+        self, environment: BaseEnvironment
+    ) -> bool:
+        try:
+            encoded = base64.b64encode(_TELEMETRY_HELPER_SOURCE.read_bytes()).decode(
+                "ascii"
+            )
+            command = (
+                "mkdir -p /tmp/nubi-orca && python3 -c \"import base64; "
+                f"open('{_TELEMETRY_HELPER_TARGET}', 'wb').write("
+                f"base64.b64decode('{encoded}'))\""
+            )
+            result = await environment.exec(command=command, timeout_sec=10)
+            return result.return_code == 0
+        except (OSError, AttributeError):
+            return False
 
     async def _poll_until_visible(
         self,

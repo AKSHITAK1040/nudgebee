@@ -56,6 +56,24 @@ func TestReAct4_ShouldCritique(t *testing.T) {
 		o := &NBReActPlanner4{enableCritique: false, request: NBAgentRequest{AgentId: "a1", Query: "why is the pod crashing"}}
 		assert.False(t, o.shouldCritique())
 	})
+
+	t.Run("database custom agent defaults off", func(t *testing.T) {
+		setCritiqueFlag(t, true)
+		o := &NBReActPlanner4{
+			nbAgent: &nbCustomAgent{agent: AgentDto{Config: map[string]any{}}},
+			request: NBAgentRequest{AgentId: "custom", Query: "why is the pod crashing"},
+		}
+		assert.False(t, o.shouldCritique())
+	})
+
+	t.Run("database custom agent can opt in", func(t *testing.T) {
+		setCritiqueFlag(t, true)
+		o := &NBReActPlanner4{
+			nbAgent: &nbCustomAgent{agent: AgentDto{Config: map[string]any{"enable_shared_critiquer": true}}},
+			request: NBAgentRequest{AgentId: "custom", Query: "why is the pod crashing"},
+		}
+		assert.True(t, o.shouldCritique())
+	})
 }
 
 func TestReAct4_FlattenTranscript_SkipsNotebookAndFormats(t *testing.T) {

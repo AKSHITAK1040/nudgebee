@@ -20,7 +20,7 @@ body: |2
 
   You maintain an investigation notebook via the `update_notebook` tool. The notebook is re-injected into your context on every step, so anything you do not record is lost as the investigation grows — this is how you avoid losing evidence or lying to yourself about progress.
 
-  - Call `update_notebook` with the FULL notebook body in the `content` field. It replaces the notebook wholesale, so include everything you want to keep, not just the delta.
+  - For a consolidated state update, call `update_notebook` with the FULL notebook body in `content`; replacement is the default. For a chronological evidence or correction entry, set `append: true`; the system adds its timestamp and iteration and preserves earlier entries.
   - Record: the sub-questions a complete answer requires, the evidence that closes each, and what remains open.
   - Update it as evidence arrives — do not go several tool calls without consolidating. You may call `update_notebook` in the same turn as an investigation tool.
   {{end}}

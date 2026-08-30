@@ -18,12 +18,13 @@ import (
 // docs/planner_react_4.md and the `think` tool for the same control-tool shape.
 const NotebookToolName = core.NotebookToolName
 
-// notebookContentArg is the schema field carrying the full notebook body.
+// notebookContentArg is the schema field carrying replacement or journal content.
 const notebookContentArg = "content"
+const notebookAppendArg = "append"
 
-const notebookEmptyRejectionMsg = "update_notebook requires a non-empty 'content' field holding the FULL notebook body " +
-	"(hypotheses with [SUPPORTED]/[REFUTED] markers, evidence, and resolved status). " +
-	"The content replaces the notebook wholesale — include everything you want to keep, not just the delta."
+const notebookEmptyRejectionMsg = "update_notebook requires a non-empty 'content' field. " +
+	"By default it must contain the FULL replacement notebook body; with 'append' set to true, " +
+	"it must contain one journal entry."
 
 func init() {
 	core.RegisterNBToolFactory(NotebookToolName, func(accountId string) (core.NBTool, error) {
@@ -40,7 +41,8 @@ func (t *notebookTool) Description() string {
 	return "Record or update your investigation notebook — the durable state of the analysis. " +
 		"USE to maintain the hypothesis tree (candidate root causes with [SUPPORTED]/[REFUTED] markers), " +
 		"the evidence that closes each sub-question, and what remains open. " +
-		"The 'content' field REPLACES the notebook wholesale, so include the full body you want to keep — not just the change. " +
+		"By default, the 'content' field REPLACES the notebook wholesale, so include the full body you want to keep — not just the change. " +
+		"Set 'append' to true to add a timestamped journal entry without changing earlier entries; use a new entry to explicitly correct or supersede an earlier finding. " +
 		"Update it as evidence arrives; it is carried into every subsequent step and persisted across turns. " +
 		"This does not answer the user — emit the final answer directly when the investigation is complete."
 }
@@ -51,7 +53,12 @@ func (t *notebookTool) InputSchema() core.ToolSchema {
 		Properties: map[string]core.ToolSchemaProperty{
 			notebookContentArg: {
 				Type:        core.ToolSchemaTypeString,
-				Description: "The full notebook body to store: hypothesis tree, evidence, resolved status, and open questions. Replaces the previous notebook.",
+				Description: "Notebook content. This is the full replacement body unless append is true, in which case it is one journal entry.",
+			},
+			notebookAppendArg: {
+				Type:        core.ToolSchemaTypeBoolean,
+				Description: "Append content as a timestamped journal entry instead of replacing the notebook. Defaults to false.",
+				Default:     false,
 			},
 		},
 		Required: []string{notebookContentArg},

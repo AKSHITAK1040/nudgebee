@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1072,19 +1073,22 @@ func (o *NBReActPlanner4) renderObservation(step *NBAgentPlannerToolActionStep, 
 	return obs
 }
 
-// refreshNotebookFromSteps sets o.Notebook to the content of the most recent
-// update_notebook step, so the human message reflects the latest state the model
-// recorded. update_notebook is dispatched like any other tool; its observation
-// carries the content the model wrote.
+// refreshNotebookFromSteps applies the most recent successful update_notebook
+// step. Replacement remains the default. An append request adds a server-framed
+// journal entry; its stable marker prevents replay after persistence retries or
+// suspend/resume from duplicating the entry.
 func (o *NBReActPlanner4) refreshNotebookFromSteps(steps []NBAgentPlannerToolActionStep) {
 	for i := len(steps) - 1; i >= 0; i-- {
 		step := &steps[i]
 		if !isNotebookToolName(step.Action.Tool) || step.Status != ToolStatusSuccess {
 			continue
 		}
-		content := extractNotebookContent(step.Action.ToolInput)
+		content, appendEntry := extractNotebookUpdate(step.Action.ToolInput)
 		if content == "" {
 			return
+		}
+		if appendEntry {
+			content = o.appendNotebookJournalEntry(content, step.Action, i)
 		}
 		if content != o.Notebook {
 			o.Notebook = content
@@ -1095,6 +1099,31 @@ func (o *NBReActPlanner4) refreshNotebookFromSteps(steps []NBAgentPlannerToolAct
 		}
 		return
 	}
+}
+
+func (o *NBReActPlanner4) appendNotebookJournalEntry(content string, action NBAgentPlannerToolAction, stepIndex int) string {
+	entryID := action.ToolID
+	if entryID == "" {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%s", action.PlannerIteration, stepIndex, content)))
+		entryID = fmt.Sprintf("%x", sum[:8])
+	}
+	marker := fmt.Sprintf("<!-- notebook-entry:%s -->", entryID)
+	if strings.Contains(o.Notebook, marker) {
+		return o.Notebook
+	}
+
+	iteration := action.PlannerIteration
+	if iteration <= 0 {
+		iteration = stepIndex + 1
+	}
+	entry := fmt.Sprintf(
+		"## Journal entry — %s · Iteration %d\n%s\n\n%s",
+		time.Now().UTC().Format(time.RFC3339), iteration, marker, strings.TrimSpace(content),
+	)
+	if strings.TrimSpace(o.Notebook) == "" {
+		return entry
+	}
+	return strings.TrimRight(o.Notebook, "\n") + "\n\n" + entry
 }
 
 // persistNotebook mirrors ReAct3's notebook visibility contract without
@@ -1165,17 +1194,23 @@ func (o *NBReActPlanner4) persistNotebook(content string, turnIdx int, stats not
 // arguments payload, which is a JSON string like {"content":"..."}. Falls back
 // to the raw string when it is not JSON with a content field.
 func extractNotebookContent(args string) string {
+	content, _ := extractNotebookUpdate(args)
+	return content
+}
+
+func extractNotebookUpdate(args string) (content string, appendEntry bool) {
 	args = strings.TrimSpace(args)
 	if args == "" {
-		return ""
+		return "", false
 	}
 	parsed := map[string]any{}
 	if err := common.UnmarshalJson([]byte(args), &parsed); err == nil {
 		if c, ok := parsed["content"].(string); ok && strings.TrimSpace(c) != "" {
-			return c
+			appendEntry, _ = parsed["append"].(bool)
+			return c, appendEntry
 		}
 	}
-	return args
+	return args, false
 }
 
 const react4CritiqueMaxRetries = 2

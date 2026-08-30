@@ -96,6 +96,7 @@ var _ DefaultToolsOptOut = (*nbCustomAgent)(nil)
 var _ NBAgentAccountContextProvider = (*nbCustomAgent)(nil)
 var _ NBAgentMemoryProvider = (*nbCustomAgent)(nil)
 var _ NBAgentThinkingLevelProvider = (*nbCustomAgent)(nil)
+var _ NBAgentReActPlannerCritiqueSupport = (*nbCustomAgent)(nil)
 
 // OptOutDefaultTools implements DefaultToolsOptOut. Custom agents are user-curated:
 // the operator picks the tool list explicitly via the UI/API. The planner must not
@@ -117,6 +118,14 @@ func (a *nbCustomAgent) GetAccountContextEnabled() bool {
 // define the context available to the agent.
 func (a *nbCustomAgent) GetMemoryEnabled() bool {
 	return false
+}
+
+// CritiqueEnabled keeps the shared ReAct critiquer opt-in for database-backed
+// custom agents. Their stored prompt and selected tools define an independent
+// completion contract that the built-in critiquer must not override by default.
+func (a *nbCustomAgent) CritiqueEnabled() bool {
+	enabled, _ := a.agent.Config["enable_shared_critiquer"].(bool)
+	return enabled
 }
 
 // GetThinkingLevel reads the optional custom-agent planner preference. Custom

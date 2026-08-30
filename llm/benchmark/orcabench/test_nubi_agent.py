@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import httpx
 import pytest
+from orcabench import telemetry_helper
 
 from orcabench.nubi_agent import (
     _ENVIRONMENT_DISCOVERY_COMMAND,
@@ -21,19 +22,28 @@ from orcabench.nubi_agent import (
 )
 
 
-def test_orca_prompt_separates_discovery_collection_and_finalization():
+def test_orca_prompt_defines_evidence_and_delivery_contracts():
     prompt = Path(__file__).with_name("orca-agent.yaml").read_text()
 
-    assert "Phase 1 — Capability discovery" in prompt
-    assert "Do not decide whether an incident occurred during this phase" in prompt
-    assert "Phase 2 — Evidence collection" in prompt
-    assert "Capability discovery is not a completed investigation" in prompt
-    assert "immediately continue to Phase 2" in prompt
-    assert "tool calls together so they can execute in parallel" in prompt
-    assert "Phase 3 — Confirmation" in prompt
-    assert "Use at most one additional evidence round" in prompt
-    assert "Phase 4 — Finalization" in prompt
-    assert "must only write `/app/report.md`" in prompt
+    assert "Investigation contract" in prompt
+    assert "Use only executables marked available" in prompt
+    assert "Turn 1 (Parallel Telemetry Sweep)" in prompt
+    assert "native sibling `orca_shell_execute`" in prompt
+    assert "equal-duration window immediately preceding it" in prompt
+    assert "use unbounded historical results as the baseline" in prompt
+    assert "Turn 2 (Targeted Confirmation)" in prompt
+    assert "clean results on other surfaces do not erase it" in prompt
+    assert "repair only that evidence branch" in prompt
+    assert "Map the reported symptom to the most relevant services" in prompt
+    assert "do not let unrelated background" in prompt
+    assert "`update_notebook` using `append: true`" in prompt
+    assert "Declare no incident only when Metrics, Logs, and Traces" in prompt
+    assert "Application errors alone do not establish an incident" in prompt
+    assert "Historical recurrence does not make a target-window event healthy" in prompt
+    assert "`state: ENABLED` only proves that the flag is" in prompt
+    assert "runtime flag activation, the corresponding code mechanism" in prompt
+    assert "Delivery contract" in prompt
+    assert "Writing `/app/report.md` is strictly terminal" in prompt
     assert "uname -a &&" not in prompt
 
 
@@ -339,8 +349,14 @@ datasource.webstore-logs=grafana-opensearch-datasource:OpenSearch
         agent._instruction_with_environment_hint("investigate", environment)
     )
 
-    assert environment.commands == [(_ENVIRONMENT_DISCOVERY_COMMAND, 10)]
+    assert len(environment.commands) == 2
+    assert environment.commands[0][1] == 10
+    assert "/tmp/nubi-orca/telemetry.py" in environment.commands[0][0]
+    assert environment.commands[1] == (_ENVIRONMENT_DISCOVERY_COMMAND, 10)
     assert "printf '\\n'\n    python3 - <<'PY'" in _ENVIRONMENT_DISCOVERY_COMMAND
+    assert "query_range_path=/api/v1/query_range" in _ENVIRONMENT_DISCOVERY_COMMAND
+    assert "traces_path=/api/traces" in _ENVIRONMENT_DISCOVERY_COMMAND
+    assert "search_path=/<index-pattern>/_search" in _ENVIRONMENT_DISCOVERY_COMMAND
     assert instruction.startswith("investigate\n\n<verified_environment_capabilities>")
     assert "executable.jq=missing" in instruction
     assert "datasource.webstore-metrics=prometheus:Prometheus" in instruction
@@ -348,6 +364,12 @@ datasource.webstore-logs=grafana-opensearch-datasource:OpenSearch
     assert "authoritative for this run" in instruction
     assert "do not call /api/datasources" in instruction
     assert "Only rediscover a datasource if a provided UID fails" in instruction
+    assert "helper.telemetry=/tmp/nubi-orca/telemetry.py" in instruction
+    assert "helper.metrics=python3 /tmp/nubi-orca/telemetry.py --uid <uid>" in instruction
+    assert "helper.logs=python3 /tmp/nubi-orca/telemetry.py --uid <uid>" in instruction
+    assert "helper.traces=python3 /tmp/nubi-orca/telemetry.py --uid <uid>" in instruction
+    assert "helper.telemetry_usage=" not in instruction
+    assert "use it for Grafana proxy authentication" in instruction
     assert "Refer to GRAFANA_URL by variable name" in instruction
 
 
@@ -373,6 +395,61 @@ def test_environment_hint_does_not_block_run_when_discovery_fails(tmp_path: Path
     )
 
     assert instruction == "investigate"
+
+
+def test_telemetry_helper_converts_iso_timestamps():
+    assert telemetry_helper._timestamp("2026-04-21T13:00:00Z", "seconds") == (
+        "1776776400"
+    )
+    assert telemetry_helper._timestamp(
+        "2026-04-21T13:00:00Z", "microseconds"
+    ) == "1776776400000000"
+
+
+@pytest.mark.parametrize(
+    ("value", "unit", "expected"),
+    [
+        ("1776776400", "seconds", "1776776400"),
+        ("1776776400000", "seconds", "1776776400"),
+        ("1776776400000000", "seconds", "1776776400"),
+        ("1776776400000000000", "seconds", "1776776400"),
+        ("1776776400", "microseconds", "1776776400000000"),
+        ("1776776400000", "microseconds", "1776776400000000"),
+        ("1776776400000000", "microseconds", "1776776400000000"),
+        ("1776776400000000000", "microseconds", "1776776400000000"),
+    ],
+)
+def test_telemetry_helper_normalizes_numeric_epoch_units(value, unit, expected):
+    assert telemetry_helper._timestamp(value, unit) == expected
+
+
+def test_telemetry_helper_builds_bounded_metric_request():
+    args = telemetry_helper._parser().parse_args(
+        [
+            "--uid",
+            "webstore-metrics",
+            "metrics",
+            "--query",
+            "up",
+            "--start",
+            "2026-04-21T12:00:00Z",
+            "--end",
+            "2026-04-21T13:00:00Z",
+        ]
+    )
+    with patch.object(
+        telemetry_helper, "_request", return_value={"status": "success"}
+    ) as request:
+        assert telemetry_helper._execute(args) == {"status": "success"}
+
+    (path,) = request.call_args.args
+    assert path.endswith("/api/v1/query_range")
+    assert request.call_args.kwargs["params"] == {
+        "query": "up",
+        "start": "1776772800",
+        "end": "1776776400",
+        "step": "15s",
+    }
 
 
 def test_initial_poll_retries_transient_not_found(tmp_path: Path):

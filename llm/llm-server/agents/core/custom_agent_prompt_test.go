@@ -8,6 +8,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCustomAgentSharedCritiquerIsOptIn(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  map[string]any
+		enabled bool
+	}{
+		{name: "missing config defaults off", config: map[string]any{}, enabled: false},
+		{name: "explicit false", config: map[string]any{"enable_shared_critiquer": false}, enabled: false},
+		{name: "explicit true", config: map[string]any{"enable_shared_critiquer": true}, enabled: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &nbCustomAgent{agent: AgentDto{Config: tt.config}}
+			assert.Equal(t, tt.enabled, agent.CritiqueEnabled())
+		})
+	}
+}
+
 // A custom agent's prompt is stored as JSON, and tool_usage is omitempty. Any
 // agent authored outside the UI — through the ai_create_agent API, a migration,
 // or by hand — normally has no tool_usage key at all, which unmarshals to a nil
