@@ -236,3 +236,11 @@ func (m GitlabCliTool) InferToolRequestTypePrompt(ctx *security.RequestContext, 
 	`
 	return prompt, nil
 }
+
+func (m GitlabCliTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
+	requestType := inferNestedCLIRequestType(input, "glab", gitlabReadActions, gitlabCreateActions, gitlabUpdateActions, gitlabDeleteActions)
+	if requestType == "" {
+		ctx.GetLogger().Warn("gitlab: action not recognized by heuristic, falling through to LLM classification", "input", input)
+	}
+	return requestType, nil
+}

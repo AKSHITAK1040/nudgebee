@@ -260,3 +260,11 @@ func (m ArgoCDExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestConte
 	`
 	return prompt, nil
 }
+
+func (m ArgoCDExecuteTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
+	requestType := inferNestedCLIRequestType(input, "argocd", argoReadActions, argoCreateActions, argoUpdateActions, argoDeleteActions)
+	if requestType == "" {
+		ctx.GetLogger().Warn("argocd: action not recognized by heuristic, falling through to LLM classification", "input", input)
+	}
+	return requestType, nil
+}

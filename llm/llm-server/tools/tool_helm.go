@@ -187,6 +187,14 @@ func (m HelmExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestContext
 	return prompt, nil
 }
 
+func (m HelmExecuteTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
+	requestType := inferHelmRequestType(input)
+	if requestType == "" {
+		ctx.GetLogger().Warn("helm: action not recognized by heuristic, falling through to LLM classification", "input", input)
+	}
+	return requestType, nil
+}
+
 func (m HelmExecuteTool) ConfigSchema(ctx *security.RequestContext) core.ToolConfigSchema {
 	return core.ToolConfigSchema{
 		Type:         core.ToolSchemaTypeObject,

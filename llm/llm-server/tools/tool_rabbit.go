@@ -317,6 +317,14 @@ func (m RabbitExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestConte
 	return prompt, nil
 }
 
+func (m RabbitExecuteTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
+	requestType := inferRabbitRequestType(input)
+	if requestType == "" {
+		ctx.GetLogger().Warn("rabbitmq: action not recognized by heuristic, falling through to LLM classification", "input", input)
+	}
+	return requestType, nil
+}
+
 func (m RabbitExecuteTool) IdentifyConfig(ctx core.NbToolContext, input core.NBToolCallRequest, availableConfigs []core.ToolConfig) (core.ToolConfig, error) {
 	instanceName := ""
 

@@ -225,6 +225,14 @@ func (m RedisExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestContex
 	return prompt, nil
 }
 
+func (m RedisExecuteTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
+	requestType := inferRedisRequestType(input)
+	if requestType == "" {
+		ctx.GetLogger().Warn("redis: action not recognized by heuristic, falling through to LLM classification", "input", input)
+	}
+	return requestType, nil
+}
+
 func (m RedisExecuteTool) IdentifyConfig(ctx core.NbToolContext, input core.NBToolCallRequest, availableConfigs []core.ToolConfig) (core.ToolConfig, error) {
 	instanceName := ""
 
