@@ -255,6 +255,48 @@ func resolveOrchestratorThinkingLevel(model string) string {
 	return orch
 }
 
+// looksLikeCapabilityRefusal reports whether a final answer is the model saying
+// it could not do the work, rather than an answer to the question. Paired with
+// "no tool ran" it identifies the failure mode where a model emits a
+// well-formed <final_answer> declining to act — which the executor would
+// otherwise return to the user as a legitimate result.
+//
+// Deliberately narrow: it only runs when zero tools executed on a top-level
+// agent, so a genuine "no matching resources found" answer (which follows a
+// tool call) is never affected.
+func looksLikeCapabilityRefusal(answer string) bool {
+	a := strings.ToLower(answer)
+	if a == "" {
+		return false
+	}
+	for _, marker := range capabilityRefusalMarkers {
+		if strings.Contains(a, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// capabilityRefusalMarkers is built once at package init rather than rebuilt
+// on every call.
+var capabilityRefusalMarkers = []string{
+	// Claims of inability.
+	"unable to", "can't retrieve", "cannot retrieve", "can\u2019t retrieve",
+	"can't provide", "cannot provide", "can\u2019t provide",
+	"not available", "unavailable", "no tool", "without querying",
+	"no command was executed", "no tool was executed", "no query was executed",
+	"no cluster query", "cannot execute", "can't execute",
+	// Announcements of an action that was never taken. A final answer that
+	// says it WILL query is a <thought_action> the model failed to emit —
+	// with zero tools run, it is as empty as an outright refusal.
+	"i need to query", "i need to run", "i need to retrieve", "i need to check",
+	"i will query", "i will run", "i will retrieve", "i will fetch", "i will check",
+	"i'll query", "i'll run", "i'll retrieve", "i'll fetch", "i'll check",
+	"i\u2019ll query", "i\u2019ll run", "i\u2019ll retrieve", "i\u2019ll fetch", "i\u2019ll check",
+	"i'm retrieving", "i am retrieving", "i\u2019m retrieving",
+	"don't yet have", "do not yet have", "don\u2019t yet have",
+}
+
 func reactPlannerStopWords(provider, model string) []string {
 	if IsOpenAIModelWithoutStopSupport(provider, model) {
 		return nil
@@ -1834,11 +1876,12 @@ func (o *NBReActPlanner3) Plan(
 			// slowing down sub-agents like kubectl, logs, etc.
 			topLevel := o.isTopLevelAgent()
 			isInvestigation := IsInvestigationRequestTask(o.request.Query)
-			// A top-level answer that ran NO tools and then claims it could not get
-			// the data is a refusal, not an answer. Short live-state questions ("get
-			// me pod count in X") classify as Query, so the refusal ships. Critique
-			// those too: the extra call only happens on a path that already produced
-			// nothing.
+			// A top-level answer that ran NO tools and then claims it could not
+			// get the data is a refusal, not an answer — and it reaches the user
+			// verbatim, because the gate below only fires for queries that parse
+			// as investigations. Short live-state questions ("get me pod count in
+			// X") classify as Query, so the refusal ships. Critique those too:
+			// the extra call only happens on a path that already produced nothing.
 			// Steps THIS turn, not conversation-wide: a resumed conversation carries
 			// prior turns' steps, which would mask a follow-up that ran no tools.
 			noToolRefusal := topLevel && len(intermediateSteps)-o.turnStartStepIndex == 0 &&
@@ -2406,7 +2449,6 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 				"data_protection_rules",
 				"code_analysis_rules",
 				"security_rules",
-				"memory_consumption_rules",
 				"async_completion_rules",
 			},
 		),
@@ -2654,46 +2696,4 @@ func NewReActAgent3(ctx *security.RequestContext, request NBAgentRequest, nbAgen
 		notebookFirstUpdateTurn: -1,
 		compressionTracker:      NewCompressionTracker(),
 	}, nil
-}
-
-// looksLikeCapabilityRefusal reports whether a final answer is the model saying
-// it could not do the work, rather than an answer to the question. Paired with
-// "no tool ran" it identifies the failure mode where a model emits a
-// well-formed <final_answer> declining to act — which the executor would
-// otherwise return to the user as a legitimate result.
-//
-// Deliberately narrow: it only runs when zero tools executed on a top-level
-// agent, so a genuine "no matching resources found" answer (which follows a
-// tool call) is never affected.
-func looksLikeCapabilityRefusal(answer string) bool {
-	a := strings.ToLower(answer)
-	if a == "" {
-		return false
-	}
-	for _, marker := range capabilityRefusalMarkers {
-		if strings.Contains(a, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-// capabilityRefusalMarkers is built once at package init rather than rebuilt
-// on every call.
-var capabilityRefusalMarkers = []string{
-	// Claims of inability.
-	"unable to", "can't retrieve", "cannot retrieve", "can\u2019t retrieve",
-	"can't provide", "cannot provide", "can\u2019t provide",
-	"not available", "unavailable", "no tool", "without querying",
-	"no command was executed", "no tool was executed", "no query was executed",
-	"no cluster query", "cannot execute", "can't execute",
-	// Announcements of an action that was never taken. A final answer that
-	// says it WILL query is a <thought_action> the model failed to emit —
-	// with zero tools run, it is as empty as an outright refusal.
-	"i need to query", "i need to run", "i need to retrieve", "i need to check",
-	"i will query", "i will run", "i will retrieve", "i will fetch", "i will check",
-	"i'll query", "i'll run", "i'll retrieve", "i'll fetch", "i'll check",
-	"i\u2019ll query", "i\u2019ll run", "i\u2019ll retrieve", "i\u2019ll fetch", "i\u2019ll check",
-	"i'm retrieving", "i am retrieving", "i\u2019m retrieving",
-	"don't yet have", "do not yet have", "don\u2019t yet have",
 }
