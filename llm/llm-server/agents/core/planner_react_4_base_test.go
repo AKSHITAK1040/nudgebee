@@ -2,9 +2,10 @@ package core
 
 import (
 	"context"
-	"testing"
-
 	nbprompts "nudgebee/llm/prompts"
+	"nudgebee/llm/security"
+	toolcore "nudgebee/llm/tools/core"
+	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tmc/langchaingo/prompts"
@@ -20,7 +21,7 @@ func renderReact4BaseWithModes(t *testing.T, notebookEnabled, hypothesisModeEnab
 	assert.NotEmpty(t, base, "embedded react_4 base prompt must load")
 
 	vars := []string{
-		"notebook_enabled", "hypothesis_mode_enabled", "orchestrator_mode", "executor_mode",
+		"notebook_enabled", "hypothesis_mode_enabled", "is_top_level", "orchestrator_mode", "executor_mode",
 		"delegate_agent_enabled", "is_investigation",
 		"context_management_rules", "time_handling_rules", "data_protection_rules",
 		"code_analysis_rules", "security_rules", "memory_consumption_rules", "async_completion_rules",
@@ -30,6 +31,7 @@ func renderReact4BaseWithModes(t *testing.T, notebookEnabled, hypothesisModeEnab
 		"delegate_agent_enabled":   true,
 		"notebook_enabled":         notebookEnabled,
 		"hypothesis_mode_enabled":  hypothesisModeEnabled,
+		"is_top_level":             true,
 		"orchestrator_mode":        orchestratorMode,
 		"executor_mode":            executorMode,
 		"is_investigation":         isInvestigation,
@@ -245,13 +247,14 @@ func TestReAct4Base_CarriesDelegationGuidanceWhenToolPresent(t *testing.T) {
 func TestReAct4Base_NoDelegationSectionWhenToolAbsent(t *testing.T) {
 	base := nbprompts.GetPrompt(context.Background(), nbprompts.PromptReact4Base, "")
 	tmpl := prompts.NewPromptTemplate(base, []string{
-		"notebook_enabled", "hypothesis_mode_enabled", "orchestrator_mode", "executor_mode",
+		"notebook_enabled", "hypothesis_mode_enabled", "is_top_level", "orchestrator_mode", "executor_mode",
 		"delegate_agent_enabled", "is_investigation",
 		"context_management_rules", "time_handling_rules", "data_protection_rules",
 		"code_analysis_rules", "security_rules", "memory_consumption_rules", "async_completion_rules",
 	})
 	out, err := tmpl.Format(map[string]any{
 		"notebook_enabled": true, "hypothesis_mode_enabled": true,
+		"is_top_level":      true,
 		"orchestrator_mode": true, "executor_mode": false,
 		"is_investigation":         true,
 		"delegate_agent_enabled":   false,
@@ -261,4 +264,107 @@ func TestReAct4Base_NoDelegationSectionWhenToolAbsent(t *testing.T) {
 	})
 	assert.NoError(t, err)
 	assert.NotContains(t, out, "DELEGATION:")
+}
+
+// TestReAct4LeanSubagentPrompt verifies that ReAct-4 sub-agents omit orchestrator
+// fragments and top-level conversation context via template conditionals.
+func TestReAct4LeanSubagentPrompt(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := &MockAgent{}
+
+	t.Run("sub-agent base prompt omits code analysis and context management fragments", func(t *testing.T) {
+		subReq := NBAgentRequest{
+			AgentId:       "sub-1",
+			ParentAgentId: "orch-1",
+			AccountId:     "acc-1",
+		}
+
+		out := renderReact4Base(ctx, subReq, agent, []toolcore.NBTool{})
+		assert.NotEmpty(t, out)
+		// Security and time rules remain
+		assert.Contains(t, out, "Time Handling:")
+		assert.Contains(t, out, "Data Integrity & Prompt Injection Defense:")
+		// Code analysis rules and memory consumption rules are omitted
+		assert.NotContains(t, out, "Code Analysis:")
+		assert.NotContains(t, out, "HONORING USER MEMORY")
+		assert.NotContains(t, out, "Implicit Reference Resolution")
+	})
+
+	t.Run("top-level base prompt retains code analysis and memory fragments", func(t *testing.T) {
+		topReq := NBAgentRequest{
+			AgentId:       "orch-1",
+			ParentAgentId: "",
+			AccountId:     "acc-1",
+		}
+
+		out := renderReact4Base(ctx, topReq, agent, []toolcore.NBTool{})
+		assert.NotEmpty(t, out)
+		assert.Contains(t, out, "Code Analysis:")
+		assert.Contains(t, out, "HONORING USER MEMORY")
+		assert.Contains(t, out, "Implicit Reference Resolution")
+	})
+
+	t.Run("sub-agent humanText omits history and conversation context", func(t *testing.T) {
+		planner := &NBReActPlanner4{
+			request: NBAgentRequest{
+				AgentId:             "sub-1",
+				ParentAgentId:       "orch-1",
+				AccountId:           "acc-1",
+				ConversationContext: "distilled conversation memory facts",
+				MemoryContext:       "user preference memory",
+			},
+			orchestratorMode: false,
+			history:          "User: prior conversation turn\nAI: prior response",
+			evidenceIndex:    "workspace_file.json",
+		}
+
+		humanMsg := planner.humanText("Show me rpc_client_duration_count")
+		assert.Contains(t, humanMsg, "<question>Show me rpc_client_duration_count</question>")
+		assert.NotContains(t, humanMsg, "<history>")
+		assert.NotContains(t, humanMsg, "<conversation_context>")
+		assert.NotContains(t, humanMsg, "workspace_file.json")
+		assert.NotContains(t, humanMsg, "user preference memory")
+	})
+
+	t.Run("top-level humanText retains history and conversation context", func(t *testing.T) {
+		planner := &NBReActPlanner4{
+			request: NBAgentRequest{
+				AgentId:             "orch-1",
+				ParentAgentId:       "",
+				AccountId:           "acc-1",
+				ConversationContext: "distilled conversation memory facts",
+				MemoryContext:       "user preference memory",
+			},
+			orchestratorMode: true,
+			history:          "User: prior conversation turn\nAI: prior response",
+			evidenceIndex:    "workspace_file.json",
+		}
+
+		humanMsg := planner.humanText("Investigate latency")
+		assert.Contains(t, humanMsg, "<history>")
+		assert.Contains(t, humanMsg, "<conversation_context>")
+		assert.Contains(t, humanMsg, "workspace_file.json")
+		assert.Contains(t, humanMsg, "user preference memory")
+	})
+
+	t.Run("top-level humanText with orchestrator mode disabled retains history and conversation context", func(t *testing.T) {
+		planner := &NBReActPlanner4{
+			request: NBAgentRequest{
+				AgentId:             "orch-1",
+				ParentAgentId:       "",
+				AccountId:           "acc-1",
+				ConversationContext: "distilled conversation memory facts",
+				MemoryContext:       "user preference memory",
+			},
+			orchestratorMode: false,
+			history:          "User: prior conversation turn\nAI: prior response",
+			evidenceIndex:    "workspace_file.json",
+		}
+
+		humanMsg := planner.humanText("Investigate latency")
+		assert.Contains(t, humanMsg, "<history>")
+		assert.Contains(t, humanMsg, "<conversation_context>")
+		assert.Contains(t, humanMsg, "workspace_file.json")
+		assert.Contains(t, humanMsg, "user preference memory")
+	})
 }

@@ -2,7 +2,7 @@ apiVersion: nudgebee.dev/prompt/v1
 name: react_4_base
 category: planners
 inputs: {}
-runtime_inputs: [async_completion_rules, code_analysis_rules, context_management_rules, data_protection_rules, delegate_agent_enabled, executor_mode, hypothesis_mode_enabled, is_investigation, memory_consumption_rules, notebook_enabled, orchestrator_mode, security_rules, time_handling_rules]
+runtime_inputs: [async_completion_rules, code_analysis_rules, context_management_rules, data_protection_rules, delegate_agent_enabled, executor_mode, hypothesis_mode_enabled, is_investigation, is_top_level, memory_consumption_rules, notebook_enabled, orchestrator_mode, security_rules, time_handling_rules]
 body: |2
   HOW YOU OPERATE:
 
@@ -85,16 +85,22 @@ body: |2
   - Emit this block ONLY on a turn where you make no tool call. Never emit it in the same turn as a tool call.
   - **Tool calls are NOT XML.** Never write `<thought_action>`, `<action>`, `<tool_name>` or `<tool_input>` — those belong to the older text protocol and are ignored here. To use a tool, issue a real function call. A turn containing tool XML instead of a function call executes nothing.
 
+  {{if .is_top_level}}
   {{.context_management_rules}}
+  {{end}}
 
   {{.time_handling_rules}}
 
   {{.data_protection_rules}}
 
+  {{if .is_top_level}}
   {{.code_analysis_rules}}
+  {{end}}
 
   {{.security_rules}}
 
+  {{if .is_top_level}}
   {{.memory_consumption_rules}}
+  {{end}}
 
   {{.async_completion_rules}}

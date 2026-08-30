@@ -65,6 +65,8 @@ type NBReActPlanner4 struct {
 	// (fetchEvidenceIndex) into a per-iteration one.
 	userContextBlock string
 	evidenceIndex    string
+	orchestratorMode bool
+	humanPrompt      prompts.PromptTemplate
 
 	// Notebook is the durable investigation state. It is derived at the start of
 	// every Plan() from the most recent update_notebook step in intermediateSteps
@@ -125,16 +127,25 @@ type refinementRecord struct {
 func NewReActAgent4(ctx *security.RequestContext, request NBAgentRequest, nbAgent NBAgent, systemMessage string, extraMessages []prompts.MessageFormatter, initialNotebook string) (*NBReActPlanner4, error) {
 	tools, agentAdditionalPrompt := resolveReact4Tools(ctx, request, nbAgent, systemMessage)
 
+	isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
+
 	// First-name greeting personalisation, top-level turns only (sub-agents don't
 	// greet) — same gate reActCreatePrompt3 applies.
 	userContextBlock := ""
-	if request.ParentAgentId == "" || request.ParentAgentId == request.AgentId {
+	if isTopLevel {
 		userContextBlock = renderUserContextBlock(ctx)
+	}
+	orchMode, _ := resolveReact3RoleModes(request)
+	evidenceIndex := ""
+	if isTopLevel {
+		evidenceIndex = fetchEvidenceIndex(ctx, request)
 	}
 
 	return &NBReActPlanner4{
 		userContextBlock:      userContextBlock,
-		evidenceIndex:         fetchEvidenceIndex(ctx, request),
+		evidenceIndex:         evidenceIndex,
+		orchestratorMode:      orchMode,
+		humanPrompt:           newReact4HumanPromptTemplate(),
 		ctx:                   ctx,
 		request:               request,
 		nbAgent:               nbAgent,
@@ -288,8 +299,9 @@ func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agen
 		return ""
 	}
 
+	isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
 	vars := []string{
-		"notebook_enabled", "hypothesis_mode_enabled", "orchestrator_mode", "executor_mode",
+		"notebook_enabled", "hypothesis_mode_enabled", "is_top_level", "orchestrator_mode", "executor_mode",
 		"delegate_agent_enabled", "is_investigation",
 		"context_management_rules", "time_handling_rules", "data_protection_rules",
 		"code_analysis_rules", "security_rules", "memory_consumption_rules", "async_completion_rules",
@@ -305,6 +317,7 @@ func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agen
 		// 31 LLM calls under react_4 versus 9 under react_3, and orchestrator calls
 		// carry the full accumulated context. Same gate react_3 uses.
 		"delegate_agent_enabled":   HasDelegateAgentTool(tools),
+		"is_top_level":             isTopLevel,
 		"orchestrator_mode":        orchestratorMode,
 		"executor_mode":            executorMode,
 		"context_management_rules": contextManagementRules,
@@ -873,50 +886,85 @@ func (o *NBReActPlanner4) buildMessages(input string, steps []NBAgentPlannerTool
 	return messages
 }
 
-// humanText renders the dynamic per-turn human message. Kept out of the system
-// message so the cached system prefix stays stable across turns.
+const react4HumanPromptTemplate = `The current date and time is {{.today}}.
+{{if .kb_prestep_content}}
+{{.kb_prestep_content}}
+{{end}}{{if .skill_lists_menu}}
+{{.skill_lists_menu}}
+{{end}}{{if .global_preferences_block}}
+{{.global_preferences_block}}
+{{end}}{{if .user_context_block}}
+{{.user_context_block}}
+{{end}}{{if .is_top_level}}{{if .conversation_context}}
+<conversation_context>
+{{.conversation_context}}
+</conversation_context>
+{{end}}{{if .history}}
+<history>
+{{.history}}
+</history>
+{{end}}{{if .evidence_index}}
+{{.evidence_index}}
+{{end}}{{if .memory_context_block}}
+{{.memory_context_block}}
+{{end}}{{if .channel_context_block}}
+{{.channel_context_block}}
+{{end}}{{end}}{{if .notebook}}
+<notebook>
+{{.notebook}}
+</notebook>
+{{end}}
+<question>{{.input}}</question>`
+
+// newReact4HumanPromptTemplate constructs the pre-parsed human prompt template
+// once at planner construction to avoid parsing overhead on every iteration.
+func newReact4HumanPromptTemplate() prompts.PromptTemplate {
+	vars := []string{
+		"today", "kb_prestep_content", "skill_lists_menu", "global_preferences_block",
+		"user_context_block", "is_top_level", "orchestrator_mode", "conversation_context", "history",
+		"evidence_index", "memory_context_block", "channel_context_block", "notebook", "input",
+	}
+	return prompts.NewPromptTemplate(react4HumanPromptTemplate, vars)
+}
+
+// humanText renders the dynamic per-turn human message using template evaluation.
+// Kept out of the system message so the cached system prefix stays stable across turns.
 func (o *NBReActPlanner4) humanText(input string) string {
-	var b strings.Builder
-	// Block order mirrors reActCreatePrompt3's human-message template so react_4
-	// presents the same context in the same sequence; only the scratchpad is
-	// absent, replaced by the reconstructed native tool turns that follow.
-	fmt.Fprintf(&b, "The current date and time is %s.\n", time.Now().UTC().Format("Monday, January 2, 2006, 15:04:05 UTC"))
-	// KB pre-step content + the skill-lists menu, so KB/skill-driven flows (and
-	// the load_skills tool) have the context react_3 provides.
-	if kb := strings.TrimSpace(o.request.KBPrestepContent); kb != "" {
-		fmt.Fprintf(&b, "\n%s\n", kb)
+	tmpl := o.humanPrompt
+	if tmpl.Template == "" {
+		tmpl = newReact4HumanPromptTemplate()
 	}
-	if menu := strings.TrimSpace(o.request.SkillListsMenu); menu != "" {
-		fmt.Fprintf(&b, "\n%s\n", menu)
+
+	isTopLevel := o.isTopLevel()
+	var memoryContextBlock, channelContextBlock string
+	if isTopLevel {
+		memoryContextBlock = strings.TrimSpace(renderMemoryContextBlock(o.request.MemoryContext))
+		channelContextBlock = strings.TrimSpace(renderChannelContextBlock(o.request.ChannelContext))
 	}
-	// Request-specific preferences live in the human message so event-analysis
-	// traffic does not bust the Account-scope system cache, matching react_3.
-	if gp := strings.TrimSpace(renderGlobalPreferencesBlock(o.request.AccountPrompt)); gp != "" {
-		fmt.Fprintf(&b, "\n%s\n", gp)
+
+	out, err := tmpl.Format(map[string]any{
+		"today":                    time.Now().UTC().Format("Monday, January 2, 2006, 15:04:05 UTC"),
+		"kb_prestep_content":       strings.TrimSpace(o.request.KBPrestepContent),
+		"skill_lists_menu":         strings.TrimSpace(o.request.SkillListsMenu),
+		"global_preferences_block": strings.TrimSpace(renderGlobalPreferencesBlock(o.request.AccountPrompt)),
+		"user_context_block":       strings.TrimSpace(o.userContextBlock),
+		"is_top_level":             isTopLevel,
+		"orchestrator_mode":        o.orchestratorMode,
+		"conversation_context":     strings.TrimSpace(o.request.ConversationContext),
+		"history":                  strings.TrimSpace(o.history),
+		"evidence_index":           strings.TrimSpace(o.evidenceIndex),
+		"memory_context_block":     memoryContextBlock,
+		"channel_context_block":    channelContextBlock,
+		"notebook":                 strings.TrimSpace(o.Notebook),
+		"input":                    input,
+	})
+	if err != nil {
+		if o.ctx != nil && o.ctx.GetLogger() != nil {
+			o.ctx.GetLogger().Error("react4: failed to format human message template", "error", err)
+		}
+		return fmt.Sprintf("<question>%s</question>", input)
 	}
-	if uc := strings.TrimSpace(o.userContextBlock); uc != "" {
-		fmt.Fprintf(&b, "\n%s\n", uc)
-	}
-	if ctxStr := strings.TrimSpace(o.request.ConversationContext); ctxStr != "" {
-		fmt.Fprintf(&b, "\n<conversation_context>\n%s\n</conversation_context>\n", ctxStr)
-	}
-	if h := strings.TrimSpace(o.history); h != "" {
-		fmt.Fprintf(&b, "\n<history>\n%s\n</history>\n", h)
-	}
-	if ei := strings.TrimSpace(o.evidenceIndex); ei != "" {
-		fmt.Fprintf(&b, "\n%s\n", ei)
-	}
-	if nb := strings.TrimSpace(o.Notebook); nb != "" {
-		fmt.Fprintf(&b, "\n<notebook>\n%s\n</notebook>\n", nb)
-	}
-	if mc := strings.TrimSpace(renderMemoryContextBlock(o.request.MemoryContext)); mc != "" {
-		fmt.Fprintf(&b, "\n%s\n", mc)
-	}
-	if cc := strings.TrimSpace(renderChannelContextBlock(o.request.ChannelContext)); cc != "" {
-		fmt.Fprintf(&b, "\n%s\n", cc)
-	}
-	fmt.Fprintf(&b, "\n<question>%s</question>", input)
-	return b.String()
+	return out
 }
 
 // renderStepsToMessages reconstructs the native tool-calling history from the

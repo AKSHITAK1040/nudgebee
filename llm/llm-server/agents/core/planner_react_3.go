@@ -2475,6 +2475,7 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 				"delegate_agent_enabled",
 				"notebook_enabled",
 				"hypothesis_mode_enabled",
+				"is_top_level",
 				"orchestrator_mode",
 				"executor_mode",
 				"is_investigation",
@@ -2484,6 +2485,7 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 				"data_protection_rules",
 				"code_analysis_rules",
 				"security_rules",
+				"memory_consumption_rules",
 				"async_completion_rules",
 			},
 		),
@@ -2553,10 +2555,12 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		messageFormatters = append(messageFormatters, LiteralSystemMessage{Content: agentPrompt})
 	}
 
+	isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
+
 	// First name for greeting personalisation, top-level turns only (sub-agents
 	// don't greet). Human-message → per-user, cache-safe. "" when name unknown.
 	userContextBlock := ""
-	if request.ParentAgentId == "" || request.ParentAgentId == request.AgentId {
+	if isTopLevel {
 		userContextBlock = renderUserContextBlock(ctx)
 	}
 
@@ -2572,19 +2576,21 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 {{.skill_lists_menu}}
 {{.global_preferences_block}}
 {{.user_context_block}}
-<task_context>
+{{if .is_top_level}}<task_context>
 **Previous Conversation Context:** {{.conversation_context}}
 **Previous Messages (History):**
 {{.history}}
 {{.evidence_index}}
 </task_context>
-
+{{end}}
 {{if .notebook}}<notebook_content>
 {{.notebook}}
 </notebook_content>
 {{end}}
+{{if .is_top_level}}
 {{.memory_context_block}}
 {{.channel_context_block}}
+{{end}}
 <question>{{.input}}</question>
 
 {{.scratchpad}}`
@@ -2603,6 +2609,8 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		"skill_lists_menu",
 		"memory_context_block",
 		"channel_context_block",
+		"is_top_level",
+		"orchestrator_mode",
 	}))
 
 	tools = FilterTools(tools, request.Capabilities)
@@ -2637,6 +2645,15 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	if err != nil {
 		return prompts.ChatPromptTemplate{}, nil, fmt.Errorf("reactagent3: loading PromptMemoryConsumptionRules fragment: %w", err)
 	}
+
+	evidenceIndex := ""
+	var memoryContextBlock, channelContextBlock string
+	if isTopLevel {
+		evidenceIndex = fetchEvidenceIndex(ctx, request)
+		memoryContextBlock = renderMemoryContextBlock(request.MemoryContext)
+		channelContextBlock = renderChannelContextBlock(request.ChannelContext)
+	}
+
 	tmpl.PartialVariables = map[string]any{
 		// System message template vars (stable — cached across conversations)
 		"tool_names":                   reActPromptToolNames(tools),
@@ -2644,6 +2661,7 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		"delegate_agent_enabled":       HasDelegateAgentTool(tools),
 		"notebook_enabled":             notebookEnabled,
 		"hypothesis_mode_enabled":      hypothesisModeEnabled,
+		"is_top_level":                 isTopLevel,
 		"orchestrator_mode":            orchestratorMode,
 		"executor_mode":                executorMode,
 		"is_investigation":             isInvestigation,
@@ -2656,30 +2674,17 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		"memory_consumption_rules":     memoryConsumptionRules,
 		"async_completion_rules":       asyncCompletionRules(agent),
 		// Human message template vars (dynamic — change per conversation/iteration)
-		"today":                time.Now().UTC().Format("Monday, January 2, 2006, 15:04:05 UTC"),
-		"history":              previousMessageStr,
-		"conversation_context": conversationContext,
-		// FS evidence recall (flag-gated): an always-visible list of the exact
-		// workspace files earlier tool calls saved, so the model greps them by
-		// real name instead of re-fetching or hallucinating a filename. Empty
-		// (renders nothing) when the flag is off or no files exist.
-		"evidence_index":           fetchEvidenceIndex(ctx, request),
+		"today":                    time.Now().UTC().Format("Monday, January 2, 2006, 15:04:05 UTC"),
+		"history":                  previousMessageStr,
+		"conversation_context":     conversationContext,
+		"evidence_index":           evidenceIndex,
 		"scratchpad":               "", // default; overridden per-iteration in fullInputs
 		"global_preferences_block": renderGlobalPreferencesBlock(request.AccountPrompt),
 		"user_context_block":       userContextBlock,
-		// KB pre-step output — empty on the legacy path; populated into the human
-		// message (above the scratchpad, so compression never drops it) when the
-		// KB pre-step is enabled.
-		"kb_prestep_content": request.KBPrestepContent,
-		"skill_lists_menu":   request.SkillListsMenu,
-		// Memories are reference material, not the agent's own working state —
-		// rendered as a framed block beside the channel context rather than
-		// seeded into the notebook, where they carried the authority of prior
-		// findings.
-		"memory_context_block": renderMemoryContextBlock(request.MemoryContext),
-		// Sits above the question so context compression never trims it away
-		// before the model reads what it is meant to be grounded in.
-		"channel_context_block": renderChannelContextBlock(request.ChannelContext),
+		"kb_prestep_content":       request.KBPrestepContent,
+		"skill_lists_menu":         request.SkillListsMenu,
+		"memory_context_block":     memoryContextBlock,
+		"channel_context_block":    channelContextBlock,
 	}
 	return tmpl, tools, nil
 }

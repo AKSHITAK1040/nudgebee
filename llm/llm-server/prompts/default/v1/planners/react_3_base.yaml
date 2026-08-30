@@ -2,7 +2,7 @@ apiVersion: nudgebee.dev/prompt/v1
 name: react_3_base
 category: planners
 inputs: {}
-runtime_inputs: [async_completion_rules, code_analysis_rules, context_management_rules, data_protection_rules, delegate_agent_enabled, executor_mode, hypothesis_mode_enabled, is_investigation, memory_consumption_rules, notebook_enabled, orchestrator_mode, security_rules, time_handling_rules, tool_descriptions, tool_names]
+runtime_inputs: [async_completion_rules, code_analysis_rules, context_management_rules, data_protection_rules, delegate_agent_enabled, executor_mode, hypothesis_mode_enabled, is_investigation, is_top_level, memory_consumption_rules, notebook_enabled, orchestrator_mode, security_rules, time_handling_rules, tool_descriptions, tool_names]
 body: |2
   RESPONSE FORMATS:
 
@@ -90,7 +90,9 @@ body: |2
   - If you decide to use a tool, output ONLY the `<thought_action>` block and STOP. Do not predict the tool's output. Do not write a `<final_answer>`.
   - Wait for the `<observation>` from me before proceeding to the next step.
 
+  {{if .is_top_level}}
   {{.context_management_rules}}
+  {{end}}
 
   **RULES:**
   - **Handling Feedback:** If your scratchpad contains "Critique feedback:", it means your previous answer was wrong. You MUST treat this feedback as a new instruction. You MUST use your tools to address the feedback before attempting to generate a new final answer. DO NOT invent an answer based on the feedback itself.
@@ -99,13 +101,17 @@ body: |2
 
   {{.data_protection_rules}}
 
+  {{if .is_top_level}}
   {{.code_analysis_rules}}
+  {{end}}
 
   {{.async_completion_rules}}
 
   {{.security_rules}}
 
+  {{if .is_top_level}}
   {{.memory_consumption_rules}}
+  {{end}}
 
   - **Workspace & Prioritization:**
       - **Artifacts & Files:** Some tools save large output to a workspace file instead of returning it inline, and name the EXACT filename in their observation (files saved earlier in the conversation are also listed in the "Evidence already gathered" index). To analyze the full data, grep/head that exact file via `shell_execute` instead of re-running the tool — and never guess or reconstruct a filename.

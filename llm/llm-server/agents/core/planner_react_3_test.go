@@ -38,7 +38,7 @@ func renderReact3BaseWithRoles(t *testing.T, notebookEnabled, hypothesisModeEnab
 	vars := []string{
 		"tool_names", "tool_descriptions",
 		"delegate_agent_enabled", "notebook_enabled", "hypothesis_mode_enabled",
-		"orchestrator_mode", "executor_mode", "is_investigation",
+		"is_top_level", "orchestrator_mode", "executor_mode", "is_investigation",
 		"conversation_context_enabled", "context_management_rules", "time_handling_rules",
 		"data_protection_rules", "code_analysis_rules", "security_rules",
 		"memory_consumption_rules", "async_completion_rules",
@@ -50,6 +50,7 @@ func renderReact3BaseWithRoles(t *testing.T, notebookEnabled, hypothesisModeEnab
 		"delegate_agent_enabled":       false,
 		"notebook_enabled":             notebookEnabled,
 		"hypothesis_mode_enabled":      hypothesisModeEnabled,
+		"is_top_level":                 true,
 		"orchestrator_mode":            orchestratorMode,
 		"executor_mode":                executorMode,
 		"is_investigation":             true, // keep the full (investigation) prompt for these role/hypothesis fences
@@ -1977,4 +1978,148 @@ func TestReAct3HumanPrompt_TodayIncludesTimeOfDay(t *testing.T) {
 	wantDate := time.Now().UTC().Format("January 2, 2006")
 	assert.Contains(t, humanText, wantDate,
 		"today's date component must be rendered in UTC, matching time.Now().UTC()")
+}
+
+// TestReAct3LeanSubagentPrompt verifies that sub-agents omit orchestrator rule
+// fragments and top-level conversation history via template conditionals.
+func TestReAct3LeanSubagentPrompt(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := &MockAgent{}
+	histMessages := []prompts.MessageFormatter{
+		prompts.NewHumanMessagePromptTemplate("User: prior message in conversation", nil),
+		prompts.NewAIMessagePromptTemplate("AI: prior response with lots of text", nil),
+	}
+
+	t.Run("sub-agent prompt omits history and heavy fragments via template conditional", func(t *testing.T) {
+		subAgentReq := NBAgentRequest{
+			AgentId:             "sub-1",
+			ParentAgentId:       "orch-1",
+			AccountId:           "acc-1",
+			ConversationContext: "distilled conversation memory facts",
+			MemoryContext:       "user preference memory",
+			ChannelContext:      "slack channel context",
+		}
+
+		tmpl, _, err := reActCreatePrompt3(ctx, "agent prompt", []toolcore.NBTool{}, subAgentReq.ConversationContext, histMessages, subAgentReq, agent)
+		assert.NoError(t, err)
+
+		promptValue, err := tmpl.FormatPrompt(map[string]any{
+			"input":      "show metrics",
+			"scratchpad": "",
+			"notebook":   "",
+		})
+		assert.NoError(t, err)
+
+		messages := promptValue.Messages()
+		systemText := messages[0].GetContent()
+		humanText := messages[len(messages)-1].GetContent()
+
+		// System prompt: non-essential fragments omitted for sub-agent
+		assert.NotContains(t, systemText, "Code Analysis:")
+		assert.NotContains(t, systemText, "HONORING USER MEMORY")
+		assert.NotContains(t, systemText, "Implicit Reference Resolution")
+
+		// System prompt: security and time rules preserved
+		assert.Contains(t, systemText, "Time Handling:")
+		assert.Contains(t, systemText, "Data Integrity & Prompt Injection Defense:")
+
+		// Human prompt: task_context, history, memory, channel context omitted for sub-agent
+		assert.NotContains(t, humanText, "<task_context>")
+		assert.NotContains(t, humanText, "distilled conversation memory facts")
+		assert.NotContains(t, humanText, "slack channel context")
+		assert.Contains(t, humanText, "<question>show metrics</question>")
+	})
+
+	t.Run("top-level agent retains full history and fragments via template conditional", func(t *testing.T) {
+		topLevelReq := NBAgentRequest{
+			AgentId:             "orch-1",
+			ParentAgentId:       "",
+			AccountId:           "acc-1",
+			ConversationContext: "distilled conversation memory facts",
+			MemoryContext:       "user preference memory",
+			ChannelContext:      "slack channel context",
+		}
+
+		tmpl, _, err := reActCreatePrompt3(ctx, "agent prompt", []toolcore.NBTool{}, topLevelReq.ConversationContext, histMessages, topLevelReq, agent)
+		assert.NoError(t, err)
+
+		promptValue, err := tmpl.FormatPrompt(map[string]any{
+			"input":      "investigate latency",
+			"scratchpad": "",
+			"notebook":   "",
+		})
+		assert.NoError(t, err)
+
+		messages := promptValue.Messages()
+		systemText := messages[0].GetContent()
+		humanText := messages[len(messages)-1].GetContent()
+
+		assert.Contains(t, systemText, "Code Analysis:")
+		assert.Contains(t, systemText, "HONORING USER MEMORY")
+		assert.Contains(t, systemText, "Implicit Reference Resolution")
+		assert.Contains(t, humanText, "<task_context>")
+		assert.Contains(t, humanText, "distilled conversation memory facts")
+		assert.Contains(t, humanText, "slack channel context")
+	})
+
+	t.Run("top-level agent with orchestrator mode disabled retains history and conversation context", func(t *testing.T) {
+		orig := config.Config.LlmServerReact3OrchestratorModeEnabled
+		config.Config.LlmServerReact3OrchestratorModeEnabled = false
+		defer func() { config.Config.LlmServerReact3OrchestratorModeEnabled = orig }()
+
+		topLevelReq := NBAgentRequest{
+			AgentId:             "orch-1",
+			ParentAgentId:       "",
+			AccountId:           "acc-1",
+			ConversationContext: "distilled conversation memory facts",
+			MemoryContext:       "user preference memory",
+			ChannelContext:      "slack channel context",
+		}
+
+		tmpl, _, err := reActCreatePrompt3(ctx, "agent prompt", []toolcore.NBTool{}, topLevelReq.ConversationContext, histMessages, topLevelReq, agent)
+		assert.NoError(t, err)
+
+		promptValue, err := tmpl.FormatPrompt(map[string]any{
+			"input":      "investigate latency",
+			"scratchpad": "",
+			"notebook":   "",
+		})
+		assert.NoError(t, err)
+
+		messages := promptValue.Messages()
+		humanText := messages[len(messages)-1].GetContent()
+		assert.Contains(t, humanText, "<task_context>")
+		assert.Contains(t, humanText, "distilled conversation memory facts")
+		assert.Contains(t, humanText, "slack channel context")
+	})
+
+	t.Run("top-level agent with lean variant retains history and conversation context", func(t *testing.T) {
+		leanCtx := security.NewRequestContextForSuperAdmin()
+		leanCtx.SetContext(context.WithValue(leanCtx.GetContext(), ContextKeyPromptVariant, promptVariantLean))
+
+		topLevelReq := NBAgentRequest{
+			AgentId:             "orch-1",
+			ParentAgentId:       "",
+			AccountId:           "acc-1",
+			ConversationContext: "distilled conversation memory facts",
+			MemoryContext:       "user preference memory",
+			ChannelContext:      "slack channel context",
+		}
+
+		tmpl, _, err := reActCreatePrompt3(leanCtx, "agent prompt", []toolcore.NBTool{}, topLevelReq.ConversationContext, histMessages, topLevelReq, agent)
+		assert.NoError(t, err)
+
+		promptValue, err := tmpl.FormatPrompt(map[string]any{
+			"input":      "investigate latency",
+			"scratchpad": "",
+			"notebook":   "",
+		})
+		assert.NoError(t, err)
+
+		messages := promptValue.Messages()
+		humanText := messages[len(messages)-1].GetContent()
+		assert.Contains(t, humanText, "<task_context>")
+		assert.Contains(t, humanText, "distilled conversation memory facts")
+		assert.Contains(t, humanText, "slack channel context")
+	})
 }
