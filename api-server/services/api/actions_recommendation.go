@@ -586,9 +586,9 @@ func handleRecommendationAction(actionPayload *ActionRequest, c *gin.Context, tr
 }
 
 // scanVmAccount queues an on-demand scan for every discovery datasource that
-// targets req.AccountId — the manual-trigger counterpart to cron.go's daily
-// "VM Vulnerability Scan" job, scoped to one account instead of every
-// tenant. Lives in the api package (not vmpackage) because vmpackage/queue
+// runs in or targets req.AccountId — the manual-trigger counterpart to
+// cron.go's daily "VM Vulnerability Scan" job, scoped to one account instead
+// of every tenant. Lives in the api package (not vmpackage) because vmpackage/queue
 // already imports vmpackage (see consumer.go), so vmpackage importing
 // vmpackage/queue back would be a cycle; cron.go's handler is the existing
 // precedent for this same list-then-publish glue.
