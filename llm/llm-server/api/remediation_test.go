@@ -361,3 +361,54 @@ func TestShouldPersistRemediationResolution_RecordsFailuresAndOnlyExecute(t *tes
 		})
 	}
 }
+
+// A verify asserts something about observed state. "Exited 0" is not the same as "confirmed the fix",
+// and collapsing the two is how an operator is told a problem is solved when nothing was checked.
+func TestVerificationPassed(t *testing.T) {
+	result := func(success bool, stdout string) tools.RemediationExecutionResult {
+		return tools.RemediationExecutionResult{Success: success, Stdout: stdout}
+	}
+
+	t.Run("observed something and succeeded", func(t *testing.T) {
+		if got := verificationPassed(result(true, "deployment \"web\" successfully rolled out"), true); got != true {
+			t.Errorf("got %v; want true", got)
+		}
+	})
+
+	t.Run("ran and failed", func(t *testing.T) {
+		if got := verificationPassed(result(false, ""), true); got != false {
+			t.Errorf("got %v; want false", got)
+		}
+	})
+
+	// The case this exists for: exit 0 having observed nothing proves nothing.
+	t.Run("exited 0 observing nothing is not a pass", func(t *testing.T) {
+		for _, empty := range []string{"", "   ", "\n\t "} {
+			if got := verificationPassed(result(true, empty), true); got != nil {
+				t.Errorf("stdout %q: got %v; want nil", empty, got)
+			}
+		}
+	})
+
+	// The executor merged stdout/stderr and discarded the exit code, so there is nothing to judge by
+	// — even when output came back.
+	t.Run("no exit code reported is not a pass", func(t *testing.T) {
+		if got := verificationPassed(result(true, "some output"), false); got != nil {
+			t.Errorf("got %v; want nil", got)
+		}
+	})
+}
+
+// A verify must never file a resolution of its own — that counted one remediation attempt three
+// times. It annotates the execute attempt instead.
+func TestVerifySlotDoesNotCreateItsOwnResolution(t *testing.T) {
+	if shouldPersistRemediationResolution("evt-1", RemediationSlotVerify) {
+		t.Error("verify must not create a resolution")
+	}
+	if !isVerifySlot(RemediationSlotVerify) || !isVerifySlot("  VERIFY  ") {
+		t.Error("isVerifySlot must ignore casing and padding, as the slot gate does")
+	}
+	if isVerifySlot(RemediationSlotExecute) || isVerifySlot("rollback") {
+		t.Error("only verify is a verify")
+	}
+}

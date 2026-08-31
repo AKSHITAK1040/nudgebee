@@ -264,11 +264,16 @@ type RemediationExecuteRequest struct {
 	// that undid the fix. Every slot is still audited. Empty is treated as execute so a caller that
 	// omits it keeps its resolution.
 	Slot string `json:"slot"`
+	// ExecuteCommand is the execute slot's command, sent when Slot is "verify". It is the
+	// correlation key back to the attempt being verified: the execute run stored it as the
+	// resolution's type_reference_id. Without it a verify result has no attempt to attach to.
+	ExecuteCommand string `json:"execute_command"`
 }
 
 // Command slots within one action.
 const (
 	RemediationSlotExecute = "execute"
+	RemediationSlotVerify  = "verify"
 )
 
 // processRemediationGenerate turns the completed investigation into a structured remediation plan
@@ -569,8 +574,80 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 	// identical. The operator needs the second one most.
 	if shouldPersistRemediationResolution(request.EventId, request.Slot) {
 		persistRemediationExecution(ctx, request.EventId, sc.GetUserId(), command, response.ExitCode, response.Success, exitCodeReported)
+	} else if isVerifySlot(request.Slot) && request.EventId != "" && request.ExecuteCommand != "" {
+		// A verify does not earn its own resolution — that was the triple-counting bug. It annotates
+		// the attempt it checked, so "it ran" and "the check confirmed it" are one record.
+		persistRemediationVerification(ctx, request.EventId, request.ExecuteCommand, command, response, exitCodeReported)
 	}
 	c.JSON(200, buildApiResponse(response, nil))
+}
+
+// isVerifySlot reports whether this run is an action's verify command.
+func isVerifySlot(slot string) bool {
+	return strings.EqualFold(strings.TrimSpace(slot), RemediationSlotVerify)
+}
+
+// verificationPassed decides what a verify run proved. Three-valued on purpose:
+//
+//	true  — the check ran and observed something consistent with the fix
+//	false — the check ran and failed
+//	nil   — the check ran and proved nothing
+//
+// nil is the case worth having. A verify asserts something about observed state, so a command that
+// exits 0 having observed nothing has verified nothing: a selector matching no object, a query
+// returning no rows and a log tail with no lines all exit 0. Reporting that as success tells the
+// operator the fix held when nothing was actually checked.
+func verificationPassed(response tools.RemediationExecutionResult, exitCodeReported bool) any {
+	switch {
+	case !exitCodeReported:
+		// The executor merged output and discarded the exit code; there is nothing to judge by.
+		return nil
+	case !response.Success:
+		return false
+	case strings.TrimSpace(response.Stdout) == "":
+		return nil
+	default:
+		return true
+	}
+}
+
+// persistRemediationVerification records the outcome of a verify command onto the execute attempt
+// it checked, under data.verify. Best-effort: the command has already run, and failing to annotate
+// it must not fail the response.
+//
+// "passed" is deliberately three-valued. A verify asserts something about observed state, so a
+// command that exits 0 having observed nothing has not verified anything — a selector matching no
+// object and a query returning no rows both exit 0. That case records passed=null, which the UI
+// reads as "needs checking" rather than as confirmation.
+func persistRemediationVerification(ctx *security.RequestContext, eventId, executeCommand, verifyCommand string, response tools.RemediationExecutionResult, exitCodeReported bool) {
+	dbManager, err := common.GetDatabaseManager(common.Metastore)
+	if err != nil {
+		ctx.GetLogger().Warn("remediation: database unavailable, verification not persisted", "error", err)
+		return
+	}
+	passed := verificationPassed(response, exitCodeReported)
+	verify := map[string]any{
+		"ran":     true,
+		"passed":  passed,
+		"command": verifyCommand,
+		"output":  truncateForRecord(response.Stdout),
+		"at":      time.Now().UTC().Format(time.RFC3339),
+	}
+	repo := events.NewEventAnalysisRepository(dbManager)
+	if err := repo.RecordRemediationVerification(ctx, eventId, executeCommand, verify); err != nil {
+		ctx.GetLogger().Warn("remediation: failed to persist verification", "error", err)
+	}
+}
+
+// truncateForRecord caps command output stored on a resolution. The row is read to render one line
+// in the UI, not to archive logs.
+func truncateForRecord(out string) string {
+	const max = 2000
+	out = strings.TrimSpace(out)
+	if len(out) > max {
+		return out[:max] + "…"
+	}
+	return out
 }
 
 // shouldPersistRemediationResolution decides whether a command run earns an event_resolution row.

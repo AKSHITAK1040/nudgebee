@@ -925,6 +925,43 @@ func (r *EventAnalysisRepository) GetKnowledgebase(ctx *security.RequestContext,
 // InsertRemediationExecution records that a remediation command was run against the event's cluster,
 // so the panel can show "already applied" on reload. type=CommandExecution, resolver NBLLM (attributed
 // to the acting user via resolver_id); type_reference_id is the command so the UI can match it to an action.
+// RecordRemediationVerification merges a verify result into the execute attempt it checked, under
+// data.verify. It updates the newest matching attempt rather than inserting a row: a verify is a
+// fact about an attempt, not an attempt of its own, and filing it separately counted one remediation
+// three times and listed a rollback as though it had resolved the event.
+//
+// jsonb_set on the existing data keeps every key the execute run wrote (command, exit_code,
+// success, exit_code_reported) — this is additive, so no migration.
+func (r *EventAnalysisRepository) RecordRemediationVerification(ctx *security.RequestContext, eventId, executeCommand string, verify map[string]any) error {
+	verifyJSON, err := json.Marshal(verify)
+	if err != nil {
+		return fmt.Errorf("RecordRemediationVerification: marshal: %w", err)
+	}
+	// type_reference_id holds the execute command, which is how an attempt is identified. Scoped to
+	// CommandExecution so a same-named reference on another resolution type cannot be hit.
+	res, err := r.dbManager.Db.Exec(
+		`UPDATE event_resolution
+		    SET data = jsonb_set(COALESCE(data, '{}'::jsonb), '{verify}', $3::jsonb, true),
+		        updated_at = NOW()
+		  WHERE id = (
+		        SELECT id FROM event_resolution
+		         WHERE event_id = $1 AND type = 'CommandExecution' AND type_reference_id = $2
+		         ORDER BY created_at DESC
+		         LIMIT 1
+		  )`,
+		eventId, executeCommand, string(verifyJSON))
+	if err != nil {
+		return fmt.Errorf("RecordRemediationVerification: %w", err)
+	}
+	// No matching attempt is not an error: the execute may have failed before it was recorded, or a
+	// verify may have been run on its own. Nothing to annotate, nothing to report.
+	if affected, err := res.RowsAffected(); err == nil && affected == 0 {
+		ctx.GetLogger().Info("remediation: no execute attempt to attach verification to",
+			"event_id", eventId, "execute_command", executeCommand)
+	}
+	return nil
+}
+
 func (r *EventAnalysisRepository) InsertRemediationExecution(ctx *security.RequestContext, eventId, userId, command string, dataJSON string, statusMessage string, success bool) error {
 	status := "Success"
 	if !success {
