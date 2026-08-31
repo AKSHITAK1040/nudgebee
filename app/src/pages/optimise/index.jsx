@@ -42,6 +42,14 @@ export async function getServerSideProps() {
   };
 }
 
+// Filter state OptimizeNewPage syncs to the URL (updateUrl). The Cost and
+// Configuration tabs are the same component reading these params at mount, so
+// a search applied on one tab would otherwise carry into the other — e.g.
+// ?category=Configuration&search=… written by the Configuration tab turns the
+// Cost tab into a second Configuration list. Dropped from tab links so every
+// tab switch starts from that tab's own defaults.
+const TAB_SCOPED_FILTER_PARAMS = ['category', 'search', 'severity', 'account', 'safety', 'rules', 'status', 'savings', 'seen'];
+
 const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
   const router = useRouter();
   const { selectedCluster } = useData();
@@ -246,6 +254,7 @@ const Optimise = ({ enableLlmGateway, llmGatewayUrl }) => {
         manageRoute={true}
         disableHoverSubmenu
         filterOptions={filterOptions}
+        tabScopedQueryParams={TAB_SCOPED_FILTER_PARAMS}
         onChangeFilter={(val, subVal) => {
           setActiveTab(val);
           setSubTab(subVal || 0);

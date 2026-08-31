@@ -39,6 +39,12 @@ const AnchorComponent = ({
   // few tabs that declare tabOptions, making the strip behave inconsistently
   // tab-to-tab. Opt-in so pages relying on the popover keep it.
   disableHoverSubmenu = false,
+  // Query params owned by one tab's content (e.g. filter state a tab syncs to
+  // the URL). Dropped when building the other tabs' links, same as the
+  // hardcoded `integration`/`dashboard` below, so filters applied on one tab
+  // don't leak into the next. Declared by the page because the param names are
+  // page-specific.
+  tabScopedQueryParams = /** @type {string[]} */ ([]),
 }) => {
   const router = useRouter();
   const [currentOpt, setCurrentOpt] = useState([]);
@@ -167,6 +173,9 @@ const AnchorComponent = ({
     // Same for `dashboard` — it names the open custom dashboard on the K8s
     // Dashboards tab, and leaving it set would reopen that one on return.
     searchParams.delete('dashboard');
+    for (const param of tabScopedQueryParams) {
+      searchParams.delete(param);
+    }
 
     return { path, searchParams };
   };
@@ -717,6 +726,7 @@ AnchorComponent.propTypes = {
   groupedTabs: PropTypes.bool,
   showGroupedTabs: PropTypes.bool,
   disableHoverSubmenu: PropTypes.bool,
+  tabScopedQueryParams: PropTypes.arrayOf(PropTypes.string),
   tooltip: PropTypes.string,
   hideParentTabs: PropTypes.bool,
 };
