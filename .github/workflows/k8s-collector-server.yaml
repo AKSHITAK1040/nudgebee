@@ -70,3 +70,7 @@ jobs:
           poetry run black --check .
           poetry run flake8 .
           poetry run mypy *.py
+
+      - name: Run tests
+        working-directory: ./collector-server/k8s-collector/app
+        run: poetry run pytest -q

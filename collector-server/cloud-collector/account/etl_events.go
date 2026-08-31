@@ -857,14 +857,14 @@ func StoreEventRules(ctx *security.RequestContext, accountId string) (providers.
 	currentTime := time.Now().UTC().Format(time.RFC3339)
 	args := []map[string]any{}
 
-	// Use a map to deduplicate rules by (account_id, tenant_id, alert) to avoid
+	// Use a map to deduplicate rules by (account_id, tenant_id, source, alert) to avoid
 	// "ON CONFLICT DO UPDATE command cannot affect row a second time" error
 	tenantId := ctx.GetSecurityContext().GetTenantId()
 	seenRules := make(map[string]bool)
 
 	for _, rule := range rules.Items {
 		// Create a unique key for deduplication based on the conflict clause
-		ruleKey := fmt.Sprintf("%s:%s:%s", accountId, tenantId, rule.Name)
+		ruleKey := fmt.Sprintf("%s:%s:%s:%s", accountId, tenantId, rule.Source, rule.Name)
 		if seenRules[ruleKey] {
 			ctx.GetLogger().Warn("skipping duplicate rule in batch", "accountId", accountId, "tenantId", tenantId, "alert", rule.Name)
 			continue
@@ -914,7 +914,10 @@ func StoreEventRules(ctx *security.RequestContext, accountId string) (providers.
 
 	result, err := dbms.NamedExec(`insert into event_rules (id, created_at, updated_at, tenant_id, account_id, alert, annotations, expr, duration, labels, source, category, severity, enabled)
 		values (:id, :created_at, :updated_at, :tenant_id, :account_id, :alert, :annotations, :expr, :duration, :labels, :source, :category, :severity, :enabled)
-		on conflict (account_id, tenant_id, alert)
+		-- Must name exactly the columns of event_rules_account_tenant_source_alert_key
+		-- (migration V873). Postgres infers the arbiter index by exact column match, so a
+		-- stale target raises 42P10 at plan time and fails the whole batch.
+		on conflict (account_id, tenant_id, source, alert)
 		do update set updated_at = excluded.updated_at, alert = excluded.alert, annotations = excluded.annotations, expr = excluded.expr, duration = excluded.duration, labels = excluded.labels, source = excluded.source, category = excluded.category, severity = excluded.severity`,
 		args,
 	)
