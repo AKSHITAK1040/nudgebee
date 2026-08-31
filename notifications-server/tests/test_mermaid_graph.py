@@ -534,6 +534,30 @@ class TestParseFlowchart:
         parsed = _parse_flowchart('graph TD\n    %% a comment\n    A["a"] --> B["b"]\n')
         assert parsed is not None
 
+    def test_trailing_semicolon_statement_terminators_are_stripped(self):
+        # Real Mermaid accepts a trailing ";" on every line; the
+        # VisualizationAgent emits diagrams in this style. Each line must
+        # still parse rather than failing the whole diagram to the raw
+        # code-block fallback.
+        code = (
+            "graph LR;\n"
+            '    subgraph "Namespace: demo-vanshika"\n'
+            "        direction LR;\n"
+            '        subgraph "Workloads"\n'
+            "            direction LR;\n"
+            '            ad["Service: ad"] --> flagd_evaluation_v2_service["flagd.evaluation.v2.Service"];\n'
+            "        end;\n"
+            "    end;\n"
+        )
+        parsed = _parse_flowchart(code)
+        assert parsed is not None
+        assert [(e.source, e.target) for e in parsed[4]] == [("ad", "flagd_evaluation_v2_service")]
+
+    def test_semicolon_inside_a_quoted_label_is_preserved(self):
+        parsed = _parse_flowchart('graph TD\n    A["a; still a"] --> B["b"];\n')
+        assert parsed is not None
+        assert parsed[2]["A"] == "a; still a"
+
     @pytest.mark.parametrize(
         "code",
         [

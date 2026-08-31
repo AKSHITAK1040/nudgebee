@@ -77,8 +77,8 @@ SUPPORTED_GRAPH_TYPES = {"graph", "flowchart"}
 # Safety caps so a pathological/adversarial diagram can't produce a huge
 # image or take a long time to lay out - same spirit as mermaid_chart.py's
 # _SLACK_MAX_* caps, but bounding render cost rather than Slack's limits.
-_MAX_NODES = 150
-_MAX_EDGES = 250
+_MAX_NODES = 200
+_MAX_EDGES = 400
 
 _DIRECTIONS = {"TD": "TB", "TB": "TB", "BT": "BT", "RL": "RL", "LR": "LR"}
 
@@ -545,7 +545,9 @@ def _parse_flowchart(
     """Strictly parse Mermaid flowchart/graph syntax into a render-ready
     shape, or None if any line isn't recognized - see the module docstring
     for why this fails closed instead of best-effort."""
-    lines = [_strip_comment(line).strip() for line in code.splitlines()]
+    # Strip Mermaid's optional trailing ";" (`graph LR;`, `end;`) - the
+    # per-line handlers match bare syntax and one stray ";" fails the parse.
+    lines = [_strip_comment(line).strip().rstrip(";").strip() for line in code.splitlines()]
     lines = [line for line in lines if line]
     if not lines:
         return None
