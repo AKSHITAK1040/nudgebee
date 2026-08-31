@@ -33,6 +33,10 @@ import {
   dependentCountNoun,
   nodeTypeLabel,
   impactSignalSources,
+  getChangeClass,
+  changeClassLabel,
+  changeClassTone,
+  CHANGE_CLASS_HELP,
   coverageTone,
   coverageSubtitle,
   coverageExplainer,
@@ -102,8 +106,8 @@ const BLAST_RADIUS_HELP =
 const SAFETY_BAND_HELP: Record<string, string> = {
   safe: 'No dependents were found and the graph is well-observed. Generally safe to apply.',
   review:
-    'Either dependents exist but none look production, or none were found but graph coverage is limited. Safe to apply after a quick human check.',
-  risky: 'Production dependents would be affected, or the blast radius is very large. Review carefully before applying.',
+    'Dependents exist but none look production, the change only adds capacity, or nothing was found but graph coverage is limited. Safe to apply after a quick human check.',
+  risky: 'Production dependents would be affected, the blast radius is very large, or the change is irreversible. Review carefully before applying.',
   unknown: "This resource isn't in the dependency graph, so its impact can't be measured — don't assume it's safe.",
 };
 
@@ -212,6 +216,7 @@ const DependentRow = ({ dep, direction }: { dep: DependentRef; direction: 'upstr
 const BlastRadiusSection = ({ rec }: { rec: any }) => {
   const band = rec?.safety_band as string | undefined;
   const impact = getImpactSummary(rec);
+  const changeClass = getChangeClass(rec);
   const [showAllDeps, setShowAllDeps] = useState(false);
   const [showAllDownstream, setShowAllDownstream] = useState(false);
   const downstream = impact?.downstream_dependencies || [];
@@ -267,6 +272,15 @@ const BlastRadiusSection = ({ rec }: { rec: any }) => {
             title={verdict.title}
             message={impact?.safety_reason || 'Blast radius assessed from the dependency graph.'}
           />
+        )}
+        {changeClass && (
+          <SafetyRow label='Change severity'>
+            <ChipTip title={CHANGE_CLASS_HELP[changeClass]}>
+              <Label size='sm' tone={changeClassTone(changeClass)}>
+                {changeClassLabel(changeClass)}
+              </Label>
+            </ChipTip>
+          </SafetyRow>
         )}
         {impact?.dependent_count != null && (
           <SafetyRow label={dependentCountNoun(impact.dependents)}>

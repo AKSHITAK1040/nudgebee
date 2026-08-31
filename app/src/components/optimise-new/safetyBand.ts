@@ -64,6 +64,36 @@ export const getImpactSummary = (rec: any): ImpactSummary | null => {
   return (breakdown && breakdown.impact_summary) || null;
 };
 
+// Change class stamped by the backend classifier (recommendation/change_class.go):
+// what the recommendation does to the resource, the first axis of the verdict.
+// Absent on unclassified rules and pre-change-aware summaries.
+export type ChangeClass = 'additive' | 'reductive' | 'destructive';
+
+export const getChangeClass = (rec: any): ChangeClass | null => {
+  if (!rec) return null;
+  let breakdown = rec.finops_score_breakdown;
+  if (typeof breakdown === 'string') breakdown = safeJSONParse(breakdown);
+  const cls = breakdown && breakdown.change_class;
+  return cls === 'additive' || cls === 'reductive' || cls === 'destructive' ? cls : null;
+};
+
+const CHANGE_CLASS_PRESENTATION: Record<ChangeClass, { label: string; tone: LabelTone }> = {
+  additive: { label: 'Additive', tone: 'success' },
+  reductive: { label: 'Reductive', tone: 'warning' },
+  destructive: { label: 'Destructive', tone: 'critical' },
+};
+
+export const changeClassLabel = (cls?: ChangeClass | null): string | null => (cls ? CHANGE_CLASS_PRESENTATION[cls].label : null);
+export const changeClassTone = (cls?: ChangeClass | null): LabelTone => (cls ? CHANGE_CLASS_PRESENTATION[cls].tone : 'neutral');
+
+export const CHANGE_CLASS_HELP: Record<ChangeClass, string> = {
+  additive:
+    'This change only adds capacity or commitments — dependents cannot be starved by it, so production callers cap the verdict at Review instead of Risky. The remaining risk is apply mechanics (e.g. a rolling restart).',
+  reductive: 'This change shrinks or reshapes something callers rely on. Production dependents make it Risky.',
+  destructive:
+    'This change removes the resource and cannot be undone. The verdict floors at Risky; a well-observed, dependent-free neighbourhood earns Review — never Safe.',
+};
+
 // Relationship → short role chip, from the row's point of view. Upstream rows
 // rely on the resource (the blast radius); downstream rows are what the
 // resource itself uses. Mirrors backend RelationshipType strings.

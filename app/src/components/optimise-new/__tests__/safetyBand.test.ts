@@ -11,6 +11,9 @@ import {
   dependentCountNoun,
   nodeTypeLabel,
   impactSignalSources,
+  getChangeClass,
+  changeClassLabel,
+  changeClassTone,
 } from '../safetyBand';
 
 describe('safetyBand dependent categorization helpers', () => {
@@ -124,6 +127,32 @@ describe('nodeTypeLabel', () => {
     expect(nodeTypeLabel('ExternalService')).toBe('External (unresolved)');
     expect(nodeTypeLabel('Workload')).toBe('Workload');
     expect(nodeTypeLabel(undefined)).toBeNull();
+  });
+});
+
+describe('getChangeClass', () => {
+  const rec = (cls: any) => ({ finops_score_breakdown: JSON.stringify({ change_class: cls }) });
+
+  it('reads a valid class from the breakdown, string or object', () => {
+    expect(getChangeClass(rec('additive'))).toBe('additive');
+    expect(getChangeClass({ finops_score_breakdown: { change_class: 'destructive' } })).toBe('destructive');
+  });
+
+  it('rejects absent or unrecognized values', () => {
+    expect(getChangeClass(rec(undefined))).toBeNull();
+    expect(getChangeClass(rec('explosive'))).toBeNull();
+    expect(getChangeClass(null)).toBeNull();
+  });
+});
+
+describe('changeClass presentation', () => {
+  it('maps class to label and tone', () => {
+    expect(changeClassLabel('additive')).toBe('Additive');
+    expect(changeClassTone('additive')).toBe('success');
+    expect(changeClassTone('reductive')).toBe('warning');
+    expect(changeClassTone('destructive')).toBe('critical');
+    expect(changeClassLabel(null)).toBeNull();
+    expect(changeClassTone(null)).toBe('neutral');
   });
 });
 
