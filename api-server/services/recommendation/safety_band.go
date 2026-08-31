@@ -31,6 +31,16 @@ const (
 // "review"/"unknown" rather than manufacturing false confidence. Only upstream
 // dependents feed the band — DownstreamDependencies are operator context, not
 // risk to callers.
+//
+// Deliberate consequence of account-derived environments: on an account marked
+// prod (cloud_accounts.account_env) every dependent resolves to production, so
+// any recommendation there with at least one dependent grades "risky" and the
+// "dependents, none production" review case is unreachable by design — changes
+// inside a declared production account with real callers always get the red
+// gate (and the @finops agent's review-and-apply hand-off). "review" still does
+// its job on non-prod accounts and for coverage caveats. If band granularity
+// inside prod accounts is ever needed, split label-derived vs account-derived
+// prod counts in the impact summary rather than re-thresholding here.
 func DeriveSafetyBand(impact *core.ImpactSummary) (SafetyBand, string) {
 	if impact == nil || impact.CoverageConfidence == core.CoverageNone {
 		return SafetyBandUnknown, "resource not found in the dependency graph; impact unknown"

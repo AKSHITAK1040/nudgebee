@@ -76,6 +76,13 @@ type ImpactSummary struct {
 	Dependents           []ImpactedService  `json:"dependents"`
 	CoverageConfidence   CoverageConfidence `json:"coverage_confidence"`
 	Truncated            bool               `json:"truncated"`
+	// EnvironmentResolved marks that per-dependent environments were resolved
+	// against the tenant's account tiers (cloud_accounts.account_env), so
+	// ProductionDependents == 0 is a real "nothing production" claim. False on
+	// summaries persisted before environment resolution existed, and when the
+	// account lookup failed — consumers must render those as "environment
+	// unknown", not as a verified zero.
+	EnvironmentResolved bool `json:"environment_resolved"`
 	// DownstreamDependencies is the reverse direction: what the seed itself
 	// calls, publishes to, or subscribes to (one hop). Operator context —
 	// deliberately excluded from DependentCount and the safety band, which
@@ -322,6 +329,17 @@ func (s *Service) GetImpactedServices(tenantID, nodeID string, relationshipTypes
 		relTypes = defaultImpactRelationshipStrings(seed.NodeType)
 	}
 
+	// Per-account environment tiers, the fallback for dependents whose node
+	// carries no environment attribute of its own. Fail open: environment is an
+	// enrichment, so a lookup failure degrades to "environment unknown"
+	// (EnvironmentResolved stays false) rather than killing the traversal.
+	accountEnv, err := s.loadAccountEnvs(tenantID)
+	if err != nil {
+		s.logger.Warn("account environment lookup failed; blast radius proceeds without environment resolution",
+			"tenant_id", tenantID, "error", err)
+		accountEnv = map[string]string{}
+	}
+
 	discoveredIDs, _, nodeMinDepth, err := s.discoverBFS([]string{nodeID}, traverseOptions{
 		Direction:         TraverseDirectionUpstream,
 		Levels:            maxDepth,
@@ -351,11 +369,12 @@ func (s *Service) GetImpactedServices(tenantID, nodeID string, relationshipTypes
 		return nil, fmt.Errorf("fetch impact edges: %w", err)
 	}
 
-	summary := summarizeImpact(nodeID, seed.NodeType, nodes, edges, nodeMinDepth)
+	summary := summarizeImpact(nodeID, seed.NodeType, nodes, edges, nodeMinDepth, accountEnv)
 	summary.Truncated = truncated
+	summary.EnvironmentResolved = len(accountEnv) > 0
 
 	if downRels := downstreamRelationshipStrings(seed.NodeType); len(downRels) > 0 {
-		downstream, err := s.traverseDownstreamDependencies(tenantID, nodeID, downRels, maxDepth)
+		downstream, err := s.traverseDownstreamDependencies(tenantID, nodeID, downRels, maxDepth, accountEnv)
 		if err != nil {
 			return nil, err
 		}
@@ -492,7 +511,7 @@ func (s *Service) accountHasFlowObservedEdges(tenantID, accountID string) (bool,
 // transitive dependency (frontend → product-catalog → postgres) breaks the
 // seed, and a depth-1 list hid exactly those roots from the incident cause
 // lane while the depth-2 dependents walk showed the seed from the root's side.
-func (s *Service) traverseDownstreamDependencies(tenantID, nodeID string, relTypes []string, maxDepth int) ([]ImpactedService, error) {
+func (s *Service) traverseDownstreamDependencies(tenantID, nodeID string, relTypes []string, maxDepth int, accountEnv map[string]string) ([]ImpactedService, error) {
 	discoveredIDs, _, nodeMinDepth, err := s.discoverBFS([]string{nodeID}, traverseOptions{
 		Direction:         TraverseDirectionDownstream,
 		Levels:            maxDepth,
@@ -513,14 +532,16 @@ func (s *Service) traverseDownstreamDependencies(tenantID, nodeID string, relTyp
 	if err != nil {
 		return nil, fmt.Errorf("fetch downstream edges: %w", err)
 	}
-	return summarizeDownstream(nodeID, nodes, edges, nodeMinDepth), nil
+	return summarizeDownstream(nodeID, nodes, edges, nodeMinDepth, accountEnv), nil
 }
 
 // summarizeImpact is the pure (DB-free) aggregation behind GetImpactedServices:
 // given the traversed nodes/edges it rolls up the application-level dependents,
 // production exposure, and a coverage-confidence signal. Kept separate so the
-// logic is unit-testable without a live graph.
-func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []*DbEdge, nodeMinDepth map[string]int) ImpactSummary {
+// logic is unit-testable without a live graph. accountEnv is required (pass an
+// empty map for no fallback) so no caller can silently opt out of environment
+// resolution — the always-zero prod count this replaces came from exactly that.
+func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []*DbEdge, nodeMinDepth map[string]int, accountEnv map[string]string) ImpactSummary {
 	summary := ImpactSummary{
 		SeedNodeID:       seedID,
 		SeedNodeType:     seedType,
@@ -542,14 +563,14 @@ func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []
 				ResourceID:   impactNodeAttr(n, "resource_id"),
 				NodeType:     n.NodeType,
 				Namespace:    impactNodeAttr(n, "namespace"),
-				Environment:  impactNodeAttr(n, "environment"),
+				Environment:  resolveNodeEnvironment(n, accountEnv),
 				HopsAway:     nodeMinDepth[n.ID],
 				Relationship: att.relationship,
 				Sources:      att.sources,
 			})
 			continue
 		}
-		env := impactNodeAttr(n, "environment")
+		env := resolveNodeEnvironment(n, accountEnv)
 		att := attribution[n.ID]
 		summary.Dependents = append(summary.Dependents, ImpactedService{
 			NodeID:       n.ID,
@@ -577,8 +598,9 @@ func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []
 
 // summarizeDownstream is the pure aggregation for the downstream pass: the
 // one-hop nodes the seed depends on, with edge attribution. No coverage or
-// production rollup — downstream is context only.
-func summarizeDownstream(seedID string, nodes []*DbNode, edges []*DbEdge, nodeMinDepth map[string]int) []ImpactedService {
+// production rollup — downstream is context only. accountEnv follows the same
+// required-argument contract as summarizeImpact.
+func summarizeDownstream(seedID string, nodes []*DbNode, edges []*DbEdge, nodeMinDepth map[string]int, accountEnv map[string]string) []ImpactedService {
 	attribution := attributeConnectingEdges(edges, nodeMinDepth, TraverseDirectionDownstream)
 	deps := []ImpactedService{}
 	for _, n := range nodes {
@@ -592,7 +614,7 @@ func summarizeDownstream(seedID string, nodes []*DbNode, edges []*DbEdge, nodeMi
 			ResourceID:   impactNodeAttr(n, "resource_id"),
 			NodeType:     n.NodeType,
 			Namespace:    impactNodeAttr(n, "namespace"),
-			Environment:  impactNodeAttr(n, "environment"),
+			Environment:  resolveNodeEnvironment(n, accountEnv),
 			HopsAway:     nodeMinDepth[n.ID],
 			Relationship: att.relationship,
 			Sources:      att.sources,
@@ -602,10 +624,17 @@ func summarizeDownstream(seedID string, nodes []*DbNode, edges []*DbEdge, nodeMi
 	return deps
 }
 
-// sortImpactedServices orders closest-first, then by name, so bounded
-// consumers keep the most relevant slice.
+// sortImpactedServices orders internal dependents before unresolved external
+// callers (ExternalService nodes are bare IPs nobody can act on), then
+// closest-first, then by name — so bounded consumers keep the most relevant
+// slice and the UI leads with named services.
 func sortImpactedServices(deps []ImpactedService) {
 	sort.Slice(deps, func(i, j int) bool {
+		iExternal := deps[i].NodeType == NodeTypeExternalService
+		jExternal := deps[j].NodeType == NodeTypeExternalService
+		if iExternal != jExternal {
+			return !iExternal
+		}
 		if deps[i].HopsAway != deps[j].HopsAway {
 			return deps[i].HopsAway < deps[j].HopsAway
 		}
@@ -728,6 +757,54 @@ func isProdEnv(env string) bool {
 	default:
 		return false
 	}
+}
+
+// resolveNodeEnvironment returns a node's environment: its own environment
+// attribute when set (the specific claim — a workload label — wins), otherwise
+// the environment tier of the cloud account it belongs to. ExternalService is
+// excluded from the account fallback: those nodes are unresolved callers whose
+// CloudAccountID records the account that *observed* them, not where they run,
+// so stamping them with the observer's tier would let a dev batch job's IP
+// count as a production dependent of a prod database.
+func resolveNodeEnvironment(n *DbNode, accountEnv map[string]string) string {
+	if env := impactNodeAttr(n, "environment"); env != "" {
+		return env
+	}
+	if n.NodeType == NodeTypeExternalService {
+		return ""
+	}
+	return accountEnv[n.CloudAccountID]
+}
+
+// loadAccountEnvs returns the tenant's per-account environment tiers
+// (cloud_accounts.account_env — 'prod'/'non_prod', NOT NULL with a 'non_prod'
+// default) keyed by account id. Deliberately uncached: the tenant's account
+// list is tiny, the finops recompute already memoizes per resource, and the
+// triage panel issues one call per render. (triage/scoring.go keeps its own
+// cached single-account variant; the query is not worth sharing across that
+// package boundary.)
+func (s *Service) loadAccountEnvs(tenantID string) (map[string]string, error) {
+	rows, err := s.dbManager.Query(`SELECT id, account_env FROM cloud_accounts WHERE tenant = $1`, tenantID)
+	if err != nil {
+		return nil, fmt.Errorf("query account environments: %w", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			s.logger.Warn("failed to close account environment rows", "error", closeErr)
+		}
+	}()
+	envs := map[string]string{}
+	for rows.Next() {
+		var id, env string
+		if err := rows.Scan(&id, &env); err != nil {
+			return nil, fmt.Errorf("scan account environment: %w", err)
+		}
+		envs[id] = env
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate account environments: %w", err)
+	}
+	return envs, nil
 }
 
 // filterNodesByTenant drops any node not belonging to tenantID — a defensive

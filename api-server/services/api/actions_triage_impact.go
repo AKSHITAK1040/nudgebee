@@ -480,6 +480,7 @@ func handleEventGetImpact(h *ActionRequest, c *gin.Context, ctx *security.Reques
 		"depends_on":            dependsOn,       // what the subject depends on = possible cause
 		"dependent_count":       impact.DependentCount,
 		"production_dependents": impact.ProductionDependents,
+		"environment_resolved":  impact.EnvironmentResolved,
 		// Dependents that were traversed but are not application-level types.
 		// Reported separately because "not a service that breaks" assumes a
 		// Kubernetes-shaped split between infrastructure and workloads: on a VM

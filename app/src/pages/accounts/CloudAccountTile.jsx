@@ -26,7 +26,8 @@ import apiUser from '@api1/user';
 import MarkDowns from '@shared/viewers/MarkDowns';
 import CfUpdateModal from './CfUpdateModal';
 import EnableGcpWebhookModal from './EnableGcpWebhookModal';
-import AccountEnvToggle, { ACCOUNT_ENV_PROD, DEFAULT_ACCOUNT_ENV } from '@shared/forms/AccountEnvToggle';
+import AccountEnvToggle, { DEFAULT_ACCOUNT_ENV } from '@shared/forms/AccountEnvToggle';
+import AccountEnvText from '@shared/format/AccountEnvText';
 
 const EVENTGRID_INSTRUCTIONS = `### Enable Real-Time Resource Events
   ### Step 1. Copy the values below
@@ -342,7 +343,7 @@ const CloudAccountTile = ({ cloudProvider, title, AddAccountModalComponent, addA
         { component: <Text value={item?.created_by_name || '-'} /> },
         { component: <Text value={item.account_number || '-'} /> },
         { component: <Label text={item.status || '-'} /> },
-        { component: <Text value={item.account_env === ACCOUNT_ENV_PROD ? 'Production' : 'Non-production'} /> },
+        { component: <AccountEnvText accountName={item.account_name} accountEnv={item.account_env} /> },
         { component: realtimeEventAccountIds.has(item.id) ? <Label text='active' /> : <Text value='-' /> },
         { component: <ThreeDotsMenu sx={{ ...action.primary }} menuItems={getMenuItems(item)} data={item} onMenuClick={onMenuClick} /> },
       ]),

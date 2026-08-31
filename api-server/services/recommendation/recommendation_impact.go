@@ -145,8 +145,14 @@ func buildRecommendationImpact(impact *core.ImpactSummary) recommendationImpact 
 		Band:   band,
 		Reason: reason,
 		Summary: map[string]any{
-			"dependent_count":         impact.DependentCount,
-			"production_dependents":   impact.ProductionDependents,
+			"dependent_count":       impact.DependentCount,
+			"production_dependents": impact.ProductionDependents,
+			// Regime marker: summaries persisted before environment resolution
+			// existed lack this key, which is how the UI tells "verified zero
+			// production dependents" apart from "environment never resolved" —
+			// non-Open recommendations are excluded from the recompute cron, so
+			// pre-fix summaries survive indefinitely on resolved recs.
+			"environment_resolved":    impact.EnvironmentResolved,
 			"coverage_confidence":     string(impact.CoverageConfidence),
 			"truncated":               impact.Truncated,
 			"safety_reason":           reason,

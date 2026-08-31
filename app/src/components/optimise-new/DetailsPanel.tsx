@@ -28,10 +28,17 @@ import {
   proximityLabel,
   provenanceLabel,
   isProdEnvironment,
+  formatEnvironment,
+  prodChipState,
+  dependentCountNoun,
+  nodeTypeLabel,
+  impactSignalSources,
   coverageTone,
   coverageSubtitle,
   coverageExplainer,
   COVERAGE_HELP,
+  PROD_CHIP_HELP,
+  ENV_UNKNOWN_HELP,
   type DependentRef,
 } from './safetyBand';
 import { Banner } from '@ui/Banner';
@@ -163,9 +170,9 @@ const DependentRow = ({ dep, direction }: { dep: DependentRef; direction: 'upstr
         </Box>
       </Typography>
       <Box sx={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: ds.space[1] }}>
-        {dep.node_type && (
+        {nodeTypeLabel(dep.node_type) && (
           <Label size='sm' tone='neutral'>
-            {dep.node_type}
+            {nodeTypeLabel(dep.node_type)}
           </Label>
         )}
         {proximity && (
@@ -191,7 +198,7 @@ const DependentRow = ({ dep, direction }: { dep: DependentRef; direction: 'upstr
         )}
         {dep.environment && (
           <Label size='sm' tone={isProdEnvironment(dep.environment) ? 'critical' : 'neutral'}>
-            {dep.environment}
+            {formatEnvironment(dep.environment)}
           </Label>
         )}
       </Box>
@@ -209,6 +216,7 @@ const BlastRadiusSection = ({ rec }: { rec: any }) => {
   const [showAllDownstream, setShowAllDownstream] = useState(false);
   const downstream = impact?.downstream_dependencies || [];
   const explainer = coverageExplainer(impact?.coverage_confidence, impact?.dependent_count);
+  const signalSources = impactSignalSources(impact);
   const hasImpactData = !!(
     impact &&
     (impact.dependent_count != null || impact.production_dependents != null || impact.coverage_confidence || impact.safety_reason)
@@ -261,16 +269,32 @@ const BlastRadiusSection = ({ rec }: { rec: any }) => {
           />
         )}
         {impact?.dependent_count != null && (
-          <SafetyRow label='Dependent services'>
+          <SafetyRow label={dependentCountNoun(impact.dependents)}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2] }}>
               <Typography sx={{ fontSize: ds.text.small, color: ds.gray[700], fontWeight: ds.weight.semibold }}>
                 {impact.dependent_count}
                 {impact.truncated ? '+' : ''}
               </Typography>
-              {impact.production_dependents != null && (
-                <Label size='sm' tone={impact.production_dependents > 0 ? 'critical' : 'success'}>
-                  {`${impact.production_dependents} Prod`}
-                </Label>
+              {prodChipState(impact) === 'prod' && (
+                <ChipTip title={PROD_CHIP_HELP}>
+                  <Label size='sm' tone='critical'>
+                    {`${impact.production_dependents} Prod`}
+                  </Label>
+                </ChipTip>
+              )}
+              {prodChipState(impact) === 'verified-zero' && (
+                <ChipTip title={PROD_CHIP_HELP}>
+                  <Label size='sm' tone='success'>
+                    0 Prod
+                  </Label>
+                </ChipTip>
+              )}
+              {prodChipState(impact) === 'unknown' && (
+                <ChipTip title={ENV_UNKNOWN_HELP}>
+                  <Label size='sm' tone='neutral'>
+                    Env unknown
+                  </Label>
+                </ChipTip>
               )}
             </Box>
           </SafetyRow>
@@ -285,11 +309,28 @@ const BlastRadiusSection = ({ rec }: { rec: any }) => {
                   </Label>
                 </Box>
               </DsTooltip>
-              {coverageSubtitle(impact.coverage_confidence) && (
-                <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], whiteSpace: 'nowrap' }}>
-                  {coverageSubtitle(impact.coverage_confidence)}
-                </Typography>
-              )}
+              {coverageSubtitle(impact.coverage_confidence) &&
+                (signalSources.length > 0 ? (
+                  // Typography forwards refs, so it can take the Tooltip directly.
+                  <DsTooltip variant='explainer' title='Corroborating signals' desc={signalSources.join(' · ')}>
+                    <Typography
+                      sx={{
+                        fontSize: ds.text.small,
+                        color: ds.gray[500],
+                        whiteSpace: 'nowrap',
+                        cursor: 'help',
+                        textDecoration: 'underline dotted',
+                        textUnderlineOffset: '3px',
+                      }}
+                    >
+                      {coverageSubtitle(impact.coverage_confidence)}
+                    </Typography>
+                  </DsTooltip>
+                ) : (
+                  <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], whiteSpace: 'nowrap' }}>
+                    {coverageSubtitle(impact.coverage_confidence)}
+                  </Typography>
+                ))}
             </Box>
           </SafetyRow>
         )}
