@@ -459,7 +459,7 @@ func handleEventGetImpact(h *ActionRequest, c *gin.Context, ctx *security.Reques
 	}
 	seed["node_id"] = nodeID
 
-	impact, err := kg.GetImpactedServices(tenantID, nodeID, nil, 2)
+	impact, err := kg.GetImpactedServices(tenantID, nodeID, nil, 0)
 	if err != nil || impact == nil {
 		ctx.GetLogger().Error("Failed to compute blast radius", "error", err, "event_id", eventID, "node_id", nodeID)
 		c.JSON(400, common.ErrorActionBadRequest("failed to compute blast radius"))
@@ -605,9 +605,15 @@ func handleEventGetImpact(h *ActionRequest, c *gin.Context, ctx *security.Reques
 		// event's namespace discards every one of them.
 		"infrastructure_impacted": infrastructure,
 		"infrastructure_count":    impact.InfrastructureCount,
-		"coverage_confidence":     string(impact.CoverageConfidence),
-		"truncated":               impact.Truncated,
-		"assembly":                assembly, // four-tier incident story (#34658)
+		// Live pod-placement rollup for instance/node seeds: the workloads
+		// scheduled on the machine, with per-workload pod counts. Reported
+		// separately from impacted for the same reason the KG keeps them out
+		// of DependentCount — hosted workloads reschedule rather than break.
+		"hosted_workloads":      impact.HostedWorkloads,
+		"hosted_workload_count": impact.HostedWorkloadCount,
+		"coverage_confidence":   string(impact.CoverageConfidence),
+		"truncated":             impact.Truncated,
+		"assembly":              assembly, // four-tier incident story (#34658)
 	})
 }
 

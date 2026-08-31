@@ -205,7 +205,56 @@ const DependentRow = ({ dep, direction }: { dep: DependentRef; direction: 'upstr
             {formatEnvironment(dep.environment)}
           </Label>
         )}
+        {(dep.pod_count ?? 0) > 0 && (
+          <Label size='sm' tone='neutral'>
+            {`${dep.pod_count} pod${dep.pod_count === 1 ? '' : 's'} here`}
+          </Label>
+        )}
       </Box>
+    </Box>
+  );
+};
+
+// DependentGroup — a titled, collapsible list of DependentRows for the
+// non-caller neighbourhoods (hosted workloads, attached infrastructure). The
+// two original lists (impacted workloads, depends-on) keep their bespoke
+// rendering; this component exists so each additional group doesn't re-clone it.
+const DependentGroup = ({
+  title,
+  tooltip,
+  deps,
+  direction,
+}: {
+  title: string;
+  tooltip: string;
+  deps: DependentRef[];
+  direction: 'upstream' | 'downstream';
+}) => {
+  const [showAll, setShowAll] = useState(false);
+  if (deps.length === 0) return null;
+  return (
+    <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], mt: ds.space[1] }}>
+      <DsTooltip title={tooltip} placement='bottom'>
+        <Typography sx={{ fontSize: ds.text.small, color: ds.gray[500], fontWeight: ds.weight.medium, alignSelf: 'flex-start' }}>{title}</Typography>
+      </DsTooltip>
+      {(showAll ? deps : deps.slice(0, DEP_COLLAPSE_LIMIT)).map((dep, i) => (
+        <DependentRow key={`${dep.namespace || ''}/${dep.name}-${i}`} dep={dep} direction={direction} />
+      ))}
+      {deps.length > DEP_COLLAPSE_LIMIT && (
+        <Typography
+          onClick={() => setShowAll((v) => !v)}
+          sx={{
+            fontSize: ds.text.small,
+            color: ds.blue[600],
+            fontWeight: ds.weight.medium,
+            cursor: 'pointer',
+            mt: ds.space[1],
+            '&:hover': { textDecoration: 'underline' },
+          }}
+        >
+          {showAll ? 'Show less' : `Show more (${deps.length - DEP_COLLAPSE_LIMIT})`}
+        </Typography>
+      )}
     </Box>
   );
 };
@@ -220,6 +269,8 @@ const BlastRadiusSection = ({ rec }: { rec: any }) => {
   const [showAllDeps, setShowAllDeps] = useState(false);
   const [showAllDownstream, setShowAllDownstream] = useState(false);
   const downstream = impact?.downstream_dependencies || [];
+  const hostedWorkloads = impact?.hosted_workloads || [];
+  const attachedInfrastructure = impact?.infrastructure_dependents || [];
   const explainer = coverageExplainer(impact?.coverage_confidence, impact?.dependent_count);
   const signalSources = impactSignalSources(impact);
   const hasImpactData = !!(
@@ -406,6 +457,18 @@ const BlastRadiusSection = ({ rec }: { rec: any }) => {
             )}
           </Box>
         )}
+        <DependentGroup
+          title='Runs on this machine'
+          tooltip='Workloads currently scheduled on this instance, rolled up from live pod placement. They reschedule if the machine changes — reported separately because they are not callers that break, but an irreversible change stays Risky while anything is still running here.'
+          deps={hostedWorkloads}
+          direction='upstream'
+        />
+        <DependentGroup
+          title='Attached infrastructure'
+          tooltip='Infrastructure directly attached to this resource (e.g. the instance a volume backs). Not counted as dependent services, but an irreversible change stays Risky while anything is still attached.'
+          deps={attachedInfrastructure}
+          direction='upstream'
+        />
         {explainer && (
           <Box sx={{ mt: ds.space[1] }}>
             <Banner

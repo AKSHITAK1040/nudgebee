@@ -40,15 +40,13 @@ func resolveK8sWorkloadNodeID(kg *core.Service, tenantID, accountID string, ref 
 	return res.Nodes[0].ID, true
 }
 
-// blastRadiusCloudNodeTypes are the cloud resource node types whose knowledge-graph
-// dependency edges point at genuine application-level dependents ("who CALLS / RUNS_ON
-// me"), so an upstream traversal yields a meaningful blast radius: a compute instance
-// carries the k8s node (and its pods) it hosts; a database, cache or queue carries the
-// services observed calling it. LoadBalancer and Storage are deliberately excluded — a
-// load balancer's edges point downstream (at what it fronts, not what depends on it),
-// and a directly-attached volume's edge points at its instance the wrong way, so a
-// traversal returns empty and would understate risk rather than reveal it. Those are a
-// separate follow-up.
+// blastRadiusCloudNodeTypes are the cloud resource node types a recommendation
+// can resolve to for impact scoring. Databases/caches/queues carry the services
+// observed calling them; a compute instance carries its callers plus a hosted-
+// workload rollup; a volume resolves its mounting workloads (k8s PV chain,
+// upstream) and its attached instance (targeted HOSTED_ON hop); a load balancer
+// reports what it fronts through the downstream context pass — all handled
+// per-type inside core.GetImpactedServices.
 var blastRadiusCloudNodeTypes = []core.NodeType{
 	core.NodeTypeComputeInstance,
 	core.NodeTypeDatabase,
@@ -56,6 +54,8 @@ var blastRadiusCloudNodeTypes = []core.NodeType{
 	core.NodeTypeMessageQueue,
 	core.NodeTypeQueue,
 	core.NodeTypeTopic,
+	core.NodeTypeStorage,
+	core.NodeTypeLoadBalancer,
 }
 
 // resolveCloudResourceNodeID finds the knowledge-graph node for a cloud recommendation
@@ -105,6 +105,9 @@ type dependentRef struct {
 	HopsAway     int      `json:"hops_away"`
 	Relationship string   `json:"relationship,omitempty"`
 	Sources      []string `json:"sources,omitempty"`
+	// PodCount carries the hosted-workload rollup annotation ("Deployment ·
+	// 12 pods here"); zero everywhere else and omitted from the JSON.
+	PodCount int `json:"pod_count,omitempty"`
 }
 
 // compactDependents projects a knowledge-graph blast radius into the bounded list
@@ -128,6 +131,7 @@ func compactDependents(deps []core.ImpactedService) []dependentRef {
 			HopsAway:     d.HopsAway,
 			Relationship: string(d.Relationship),
 			Sources:      d.Sources,
+			PodCount:     d.PodCount,
 		}
 	}
 	return out
@@ -139,7 +143,7 @@ func compactDependents(deps []core.ImpactedService) []dependentRef {
 // node, then share this. reason is band-derived and therefore per-recommendation
 // even when the impact itself is shared via the cache.
 func buildImpactSummary(impact *core.ImpactSummary, reason string) map[string]any {
-	return map[string]any{
+	summary := map[string]any{
 		"dependent_count":       impact.DependentCount,
 		"production_dependents": impact.ProductionDependents,
 		// Regime marker: summaries persisted before environment resolution
@@ -155,6 +159,19 @@ func buildImpactSummary(impact *core.ImpactSummary, reason string) map[string]an
 		"downstream_count":        impact.DownstreamCount,
 		"downstream_dependencies": compactDependents(impact.DownstreamDependencies),
 	}
+	// The non-caller neighbourhoods are persisted only when present, so the
+	// dominant k8s-workload summaries don't grow: attached infrastructure (a
+	// volume's instance) and hosted workloads (a node's rollup) explain the
+	// destructive-change floor to the UI and the @finops agent.
+	if impact.InfrastructureCount > 0 {
+		summary["infrastructure_count"] = impact.InfrastructureCount
+		summary["infrastructure_dependents"] = compactDependents(impact.InfrastructureDependents)
+	}
+	if impact.HostedWorkloadCount > 0 {
+		summary["hosted_workload_count"] = impact.HostedWorkloadCount
+		summary["hosted_workloads"] = compactDependents(impact.HostedWorkloads)
+	}
+	return summary
 }
 
 // resolveK8sRecommendationImpact resolves a k8s recommendation to its workload
@@ -165,7 +182,7 @@ func resolveK8sRecommendationImpact(kg *core.Service, tenantID, accountID string
 	if !ok {
 		return nil, false
 	}
-	impact, err := kg.GetImpactedServices(tenantID, nodeID, nil, 2)
+	impact, err := kg.GetImpactedServices(tenantID, nodeID, nil, 0)
 	// Fail closed: guard the nil impact the callers would deref, even though
 	// GetImpactedServices only ever returns it paired with an error.
 	if err != nil || impact == nil {
@@ -184,7 +201,7 @@ func resolveCloudRecommendationImpact(kg *core.Service, tenantID, accountID, res
 	if !ok {
 		return nil, false
 	}
-	impact, err := kg.GetImpactedServices(tenantID, nodeID, nil, 2)
+	impact, err := kg.GetImpactedServices(tenantID, nodeID, nil, 0)
 	// Fail closed: guard the nil impact the callers would deref, even though
 	// GetImpactedServices only ever returns it paired with an error.
 	if err != nil || impact == nil {

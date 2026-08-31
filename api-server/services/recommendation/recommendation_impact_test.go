@@ -97,6 +97,33 @@ func TestAnnotateBreakdownDerivesBandPerChangeClass(t *testing.T) {
 	}
 }
 
+// The non-caller neighbourhoods are persisted only when present, and the
+// hosted-workload pod counts survive compaction.
+func TestBuildImpactSummaryNeighbourhoods(t *testing.T) {
+	bare := buildImpactSummary(&core.ImpactSummary{CoverageConfidence: core.CoverageHigh}, "r")
+	if _, ok := bare["infrastructure_dependents"]; ok {
+		t.Error("empty infrastructure must not be persisted")
+	}
+	if _, ok := bare["hosted_workloads"]; ok {
+		t.Error("empty hosted workloads must not be persisted")
+	}
+
+	full := buildImpactSummary(&core.ImpactSummary{
+		CoverageConfidence:       core.CoverageHigh,
+		InfrastructureCount:      1,
+		InfrastructureDependents: []core.ImpactedService{{Name: "i-0abc", NodeType: core.NodeTypeComputeInstance, HopsAway: 1}},
+		HostedWorkloadCount:      1,
+		HostedWorkloads:          []core.ImpactedService{{Name: "k8s-collector-worker", NodeType: core.NodeTypeWorkload, Namespace: "nudgebee", PodCount: 12, HopsAway: 2}},
+	}, "r")
+	if full["infrastructure_count"] != 1 || full["hosted_workload_count"] != 1 {
+		t.Errorf("counts not persisted: %v / %v", full["infrastructure_count"], full["hosted_workload_count"])
+	}
+	hosted, _ := full["hosted_workloads"].([]dependentRef)
+	if len(hosted) != 1 || hosted[0].PodCount != 12 {
+		t.Errorf("hosted workload pod count must survive compaction, got %+v", hosted)
+	}
+}
+
 // compactDependents must project the graph's dependents into the persisted shape:
 // preserve order, convert NodeType to string, and carry the identity/risk fields
 // the safety UI and agent need.

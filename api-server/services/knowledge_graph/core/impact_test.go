@@ -139,6 +139,32 @@ func TestSortImpactedServices_InternalBeforeExternal(t *testing.T) {
 	}
 }
 
+// A K8sService fronted by a load balancer must be nameable in the downstream
+// context list — it is the most common AWS-LB → EKS landing type, and dropping
+// it left an ALB reporting nothing at all.
+func TestSummarizeDownstream_NamesK8sService(t *testing.T) {
+	seedID := "lb-1"
+	nodes := []*DbNode{
+		newImpactTestNode(seedID, NodeTypeLoadBalancer, "web-alb", "", ""),
+		newImpactTestNode("svc-1", NodeTypeK8sService, "frontend", "", "shop"),
+	}
+	got := summarizeDownstream(seedID, nodes, nil, map[string]int{seedID: 0, "svc-1": 1}, map[string]string{})
+	if len(got) != 1 || got[0].NodeType != NodeTypeK8sService {
+		t.Errorf("K8sService must be named downstream, got %+v", got)
+	}
+}
+
+// The seed-aware depth default gives Storage seeds the three levels the
+// Storage←PV←PVC←Workload chain spans; everything else keeps 2.
+func TestImpactDepthDefaults(t *testing.T) {
+	if impactDepthDefaults[NodeTypeStorage] != 3 {
+		t.Errorf("Storage depth default = %d, want 3", impactDepthDefaults[NodeTypeStorage])
+	}
+	if _, ok := impactDepthDefaults[NodeTypeDatabase]; ok {
+		t.Error("Database must keep the default depth")
+	}
+}
+
 func TestSummarizeDownstream_ResolvesEnvironmentFromAccountTiers(t *testing.T) {
 	seedID := "wl-1"
 	nodes := []*DbNode{

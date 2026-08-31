@@ -115,6 +115,30 @@ func TestDeriveSafetyBand(t *testing.T) {
 			want:   SafetyBandReview,
 		},
 		{
+			name:   "destructive stays risky while infrastructure is attached (a volume's instance)",
+			impact: &core.ImpactSummary{CoverageConfidence: core.CoverageHigh, DependentCount: 0, InfrastructureCount: 1},
+			class:  ChangeClassDestructive,
+			want:   SafetyBandRisky,
+		},
+		{
+			name:   "destructive stays risky while workloads are hosted (a node's rollup)",
+			impact: &core.ImpactSummary{CoverageConfidence: core.CoverageHigh, DependentCount: 0, HostedWorkloadCount: 5},
+			class:  ChangeClassDestructive,
+			want:   SafetyBandRisky,
+		},
+		{
+			name:   "destructive stays risky while the resource still fronts targets (an LB's backends)",
+			impact: &core.ImpactSummary{CoverageConfidence: core.CoverageHigh, DependentCount: 0, DownstreamCount: 3},
+			class:  ChangeClassDestructive,
+			want:   SafetyBandRisky,
+		},
+		{
+			name:   "reductive is unaffected by hosted workloads — callers only",
+			impact: &core.ImpactSummary{CoverageConfidence: core.CoverageHigh, DependentCount: 0, HostedWorkloadCount: 12},
+			class:  ChangeClassReductive,
+			want:   SafetyBandSafe,
+		},
+		{
 			name:   "destructive with zero dependents under an active signal earns review",
 			impact: &core.ImpactSummary{CoverageConfidence: core.CoverageObserved, DependentCount: 0},
 			class:  ChangeClassDestructive,

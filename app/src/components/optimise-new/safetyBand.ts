@@ -20,6 +20,8 @@ export interface DependentRef {
   hops_away?: number;
   relationship?: string;
   sources?: string[];
+  // Hosted-workload rollup annotation: pods of this workload on the seed node.
+  pod_count?: number;
 }
 
 export interface ImpactSummary {
@@ -39,6 +41,14 @@ export interface ImpactSummary {
   // the safety band.
   downstream_count?: number;
   downstream_dependencies?: DependentRef[];
+  // Non-caller neighbourhoods (persisted only when present): infrastructure
+  // attached to the resource (a volume's instance) and workloads hosted on it
+  // (a node's pod-placement rollup). Kept out of dependent_count; a destructive
+  // change refuses to soften while either is non-empty.
+  infrastructure_count?: number;
+  infrastructure_dependents?: DependentRef[];
+  hosted_workload_count?: number;
+  hosted_workloads?: DependentRef[];
 }
 
 const BAND_TONE: Record<SafetyBand, LabelTone> = {
@@ -109,6 +119,7 @@ const UPSTREAM_ROLE: Record<string, string> = {
   IS_BOUND_TO: 'Bound to it',
   EXPOSES: 'Exposes it',
   ROUTES_TO_SERVICE: 'Routes to it',
+  HOSTED_ON: 'Attached',
 };
 
 const DOWNSTREAM_ROLE: Record<string, string> = {

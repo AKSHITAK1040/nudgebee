@@ -64,6 +64,9 @@ type ImpactedService struct {
 	// behind the dependency claim.
 	Relationship RelationshipType `json:"relationship,omitempty"`
 	Sources      []string         `json:"sources,omitempty"`
+	// PodCount is set only on HostedWorkloads entries: how many of the
+	// workload's pods are scheduled on the seed instance/node right now.
+	PodCount int `json:"pod_count,omitempty"`
 }
 
 // ImpactSummary is the blast-radius rollup for a single resource node.
@@ -101,6 +104,16 @@ type ImpactSummary struct {
 	// change FinOps recommendation scoring for every tenant.
 	InfrastructureDependents []ImpactedService `json:"infrastructure_dependents,omitempty"`
 	InfrastructureCount      int               `json:"infrastructure_count,omitempty"`
+	// HostedWorkloads are the workloads scheduled on a ComputeInstance/Node
+	// seed, rolled up from live pod placement (k8s_pods) with per-workload pod
+	// counts. Deliberately a separate list: a hosted workload reschedules when
+	// its node changes — it is not a caller that breaks — so folding it into
+	// DependentCount would grade every node rec on a prod account risky and
+	// repeal the callers-only contract above. The safety band consults the
+	// count only for destructive changes (removal strands what is scheduled
+	// here); see recommendation/safety_band.go and docs/architecture-decisions.md.
+	HostedWorkloads     []ImpactedService `json:"hosted_workloads,omitempty"`
+	HostedWorkloadCount int               `json:"hosted_workload_count,omitempty"`
 }
 
 // impactRelationshipDefaults maps a resource node type to the relationship types
@@ -109,13 +122,24 @@ type ImpactSummary struct {
 // the calling Service; for a ComputeInstance (Node/Pod RUNS_ON Instance) it is
 // the hosted workloads, etc. Callers may override.
 var impactRelationshipDefaults = map[NodeType][]RelationshipType{
-	NodeTypeDatabase:        {RelationshipCalls},
-	NodeTypeCache:           {RelationshipCalls},
-	NodeTypeStorage:         {RelationshipCalls, RelationshipProvidesStorage},
-	NodeTypeMessageQueue:    {RelationshipCalls, RelationshipPublishesTo, RelationshipSubscribesTo},
-	NodeTypeQueue:           {RelationshipCalls, RelationshipPublishesTo, RelationshipSubscribesTo},
-	NodeTypeTopic:           {RelationshipCalls, RelationshipPublishesTo, RelationshipSubscribesTo},
-	NodeTypeComputeInstance: {RelationshipRunsOn, RelationshipManages, RelationshipOwns},
+	NodeTypeDatabase: {RelationshipCalls},
+	NodeTypeCache:    {RelationshipCalls},
+	// Storage lists the whole k8s consumption chain, not just the first hop:
+	// the relationship filter re-applies at every BFS level, so reaching the
+	// mounting workload (Storage ← PROVIDES_STORAGE ← PV ← IS_BOUND_TO ← PVC
+	// ← MOUNTS ← Workload) needs all three k8s edge types listed here — and
+	// impactDepthDefaults gives Storage seeds the three levels the chain spans.
+	NodeTypeStorage:      {RelationshipCalls, RelationshipProvidesStorage, RelationshipIsBoundTo, RelationshipMounts},
+	NodeTypeMessageQueue: {RelationshipCalls, RelationshipPublishesTo, RelationshipSubscribesTo},
+	NodeTypeQueue:        {RelationshipCalls, RelationshipPublishesTo, RelationshipSubscribesTo},
+	NodeTypeTopic:        {RelationshipCalls, RelationshipPublishesTo, RelationshipSubscribesTo},
+	// CALLS on an instance is the VM-as-application case: on a VM stack the
+	// meaningful dependency is whoever talks to the machine (VPC flow logs /
+	// eBPF), not a workload layer that doesn't exist. App-typed callers count
+	// as dependents; instance-typed callers (sibling VMs, k8s node ENI noise)
+	// are not app types and therefore surface in InfrastructureDependents
+	// with hop distance, never in the band.
+	NodeTypeComputeInstance: {RelationshipRunsOn, RelationshipManages, RelationshipOwns, RelationshipCalls},
 	NodeTypeNode:            {RelationshipRunsOn, RelationshipManages, RelationshipOwns},
 	NodeTypePV:              {RelationshipProvidesStorage, RelationshipIsBoundTo, RelationshipMounts},
 	NodeTypePVC:             {RelationshipMounts, RelationshipIsBoundTo},
@@ -146,6 +170,13 @@ var notImpactableTypes = map[NodeType]bool{
 }
 
 func canBeImpacted(t NodeType) bool { return !notImpactableTypes[t] }
+
+// impactDepthDefaults overrides the default traversal depth (2) per seed type,
+// used when the caller passes maxDepth <= 0. Storage needs three levels to
+// cross PV and PVC before reaching the mounting workload.
+var impactDepthDefaults = map[NodeType]int{
+	NodeTypeStorage: 3,
+}
 
 // ImpactSeedNodeTypes returns the node types that have a defined blast-radius
 // traversal, sorted for deterministic iteration.
@@ -233,10 +264,17 @@ var downstreamDependencyTypes = func() map[NodeType]bool {
 		// and omitting it leaves an ALB alarm reporting nothing it depends on.
 		// Safe to widen here because this set gates only what gets *named* as a
 		// downstream dependency — DownstreamDependencies never feeds
-		// DependentCount or the FinOps safety band (see safety_band.go), and the
-		// upstream/dependent side that does feed them uses appDependentTypes,
-		// which is deliberately left alone.
+		// DependentCount or ProductionDependents (the upstream/dependent side
+		// that does uses appDependentTypes, deliberately left alone). The one
+		// band interaction is deliberate and count-only: a DESTRUCTIVE change
+		// refuses to soften while DownstreamCount > 0 (see safety_band.go and
+		// docs/architecture-decisions.md).
 		NodeTypeComputeInstance: true,
+		// K8sService is the most common landing type for an AWS-LB → EKS
+		// routing edge (aws_lb_k8s_enricher and both cross-account LB rules
+		// target it); without it an ALB fronting a cluster names nothing at
+		// all. Same band-safety argument as ComputeInstance above.
+		NodeTypeK8sService: true,
 	}
 	for t := range appDependentTypes {
 		m[t] = true
@@ -311,9 +349,8 @@ func (s *Service) GetImpactedServices(tenantID, nodeID string, relationshipTypes
 	if tenantID == "" || nodeID == "" {
 		return nil, fmt.Errorf("tenantID and nodeID are required")
 	}
-	if maxDepth <= 0 {
-		maxDepth = 2
-	}
+	// Depth defaulting is seed-aware (impactDepthDefaults), so it waits for the
+	// seed fetch below; the clamp applies to caller-supplied values right away.
 	if maxDepth > 3 {
 		maxDepth = 3
 	}
@@ -344,6 +381,13 @@ func (s *Service) GetImpactedServices(tenantID, nodeID string, relationshipTypes
 			Dependents:         []ImpactedService{},
 			CoverageConfidence: CoverageNone,
 		}, nil
+	}
+
+	if maxDepth <= 0 {
+		maxDepth = 2
+		if d, ok := impactDepthDefaults[seed.NodeType]; ok {
+			maxDepth = d
+		}
 	}
 
 	relTypes := relationshipTypes
@@ -402,6 +446,40 @@ func (s *Service) GetImpactedServices(tenantID, nodeID string, relationshipTypes
 		}
 		summary.DownstreamDependencies = downstream
 		summary.DownstreamCount = len(downstream)
+	}
+
+	// A volume's dependent instance sits on an OUTGOING edge (Storage
+	// --HOSTED_ON--> ComputeInstance is how both EBS and GCP-PD model
+	// attachment), invisible to the upstream walk. Resolve it with a targeted
+	// one-hop fetch into InfrastructureDependents — reported, never counted in
+	// the band's DependentCount (an instance is not an app caller), but the
+	// destructive-change floor in the recommendation layer refuses to soften
+	// while anything at all is attached. Depth is deliberately 1: HOSTED_ON is
+	// a non-selective legacy type (instances are HOSTED_ON subnets/VPCs too),
+	// so one more hop would drag networking plumbing into the report.
+	if seed.NodeType == NodeTypeStorage {
+		attached, err := s.attachedInstanceDependents(tenantID, nodeID, accountEnv)
+		if err != nil {
+			return nil, err
+		}
+		if len(attached) > 0 {
+			summary.InfrastructureDependents = append(summary.InfrastructureDependents, attached...)
+			sortImpactedServices(summary.InfrastructureDependents)
+			summary.InfrastructureCount = len(summary.InfrastructureDependents)
+		}
+	}
+
+	// Instance/Node seeds get a hosted-workload rollup from live pod placement:
+	// workloads (with pod counts), not raw replicas. A separate list by design —
+	// a hosted workload reschedules rather than breaks, so it must not inflate
+	// DependentCount (see the HostedWorkloads field comment).
+	if seed.NodeType == NodeTypeComputeInstance || seed.NodeType == NodeTypeNode {
+		hosted, err := s.hostedWorkloadDependents(seed, nodes, nodeMinDepth, accountEnv)
+		if err != nil {
+			return nil, err
+		}
+		summary.HostedWorkloads = hosted
+		summary.HostedWorkloadCount = len(hosted)
 	}
 
 	// Upgrade low → observed when an active traffic signal demonstrably watches
@@ -523,6 +601,149 @@ func (s *Service) accountHasFlowObservedEdges(tenantID, accountID string) (bool,
 		return false, fmt.Errorf("scan flow-observation probe for account %s: %w", accountID, err)
 	}
 	return exists, nil
+}
+
+// attachedInstanceDependents resolves the compute instance(s) a volume seed is
+// attached to — one hop over the seed's outgoing HOSTED_ON edges — as
+// InfrastructureDependents entries. Attribution is set directly (the edges are
+// fetched here, not through the BFS attribution layer) and these edges are
+// deliberately kept out of coverage grading: attachment is static metadata and
+// must not mint "well-observed".
+func (s *Service) attachedInstanceDependents(tenantID, seedID string, accountEnv map[string]string) ([]ImpactedService, error) {
+	relTypes := []string{string(RelationshipHostedOn)}
+	discoveredIDs, _, depths, err := s.discoverBFS([]string{seedID}, traverseOptions{
+		Direction:         TraverseDirectionDownstream,
+		Levels:            1,
+		RelationshipTypes: relTypes,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("attachment traversal for %s: %w", seedID, err)
+	}
+	nodes, err := s.fetchNodesByIDs(discoveredIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fetch attached nodes: %w", err)
+	}
+	nodes = filterNodesByTenant(nodes, tenantID)
+	edges, err := s.fetchEdgesBetweenNodesFiltered(nodeIDsOf(nodes), relTypes)
+	if err != nil {
+		return nil, fmt.Errorf("fetch attachment edges: %w", err)
+	}
+	attribution := attributeConnectingEdges(edges, depths, TraverseDirectionDownstream)
+
+	var out []ImpactedService
+	for _, n := range nodes {
+		if n == nil || n.ID == seedID || n.NodeType != NodeTypeComputeInstance {
+			continue
+		}
+		att := attribution[n.ID]
+		out = append(out, ImpactedService{
+			NodeID:       n.ID,
+			Name:         impactNodeName(n),
+			ResourceID:   impactNodeAttr(n, "resource_id"),
+			NodeType:     n.NodeType,
+			Environment:  resolveNodeEnvironment(n, accountEnv),
+			HopsAway:     1,
+			Relationship: att.relationship,
+			Sources:      att.sources,
+		})
+	}
+	return out, nil
+}
+
+// hostedWorkloadDependents rolls live pod placement (k8s_pods) up to workloads
+// for an instance/node seed: for the seed itself when it is a k8s Node, or for
+// every k8s Node discovered by the upstream traversal when the seed is a cloud
+// instance. Two batched queries total (one placement GROUP BY, one workload
+// entity lookup) regardless of node count. Workload groups whose entity is not
+// in the graph (unsupported owner kinds) still surface by identity; standalone
+// pods (no owning workload) are not rolled up — they remain visible through
+// the regular traversal wherever they exist as graph nodes.
+func (s *Service) hostedWorkloadDependents(seed *DbNode, traversed []*DbNode, nodeMinDepth map[string]int, accountEnv map[string]string) ([]ImpactedService, error) {
+	if s.podSynth == nil {
+		return nil, nil
+	}
+	// Collect the k8s Node entities to roll up, with their hop distance from
+	// the seed (a workload sits one hop past its node).
+	type nodeRef struct {
+		node *DbNode
+		hops int
+	}
+	var nodeRefs []nodeRef
+	if seed.NodeType == NodeTypeNode {
+		nodeRefs = append(nodeRefs, nodeRef{node: seed, hops: 0})
+	}
+	for _, n := range traversed {
+		if n != nil && n.ID != seed.ID && n.NodeType == NodeTypeNode {
+			nodeRefs = append(nodeRefs, nodeRef{node: n, hops: nodeMinDepth[n.ID]})
+		}
+	}
+	if len(nodeRefs) == 0 {
+		return nil, nil
+	}
+
+	// k8s Nodes live in per-cluster accounts; group per (tenant, account) so
+	// the placement query stays correctly scoped (a cloud-instance seed's own
+	// account differs from its cluster's).
+	type scopeKey struct{ tenantID, accountID string }
+	byScope := map[scopeKey][]nodeRef{}
+	for _, ref := range nodeRefs {
+		if ref.node.TenantID == "" || ref.node.CloudAccountID == "" {
+			continue
+		}
+		k := scopeKey{ref.node.TenantID, ref.node.CloudAccountID}
+		byScope[k] = append(byScope[k], ref)
+	}
+
+	var out []ImpactedService
+	for scope, refs := range byScope {
+		names := make([]string, 0, len(refs))
+		hopsByNodeName := map[string]int{}
+		for _, ref := range refs {
+			name, _ := ref.node.Properties["name"].(string)
+			if name == "" {
+				continue
+			}
+			names = append(names, name)
+			if prev, ok := hopsByNodeName[name]; !ok || ref.hops < prev {
+				hopsByNodeName[name] = ref.hops
+			}
+		}
+		if len(names) == 0 {
+			continue
+		}
+		rollups, err := s.podSynth.WorkloadRollupForNodes(scope.tenantID, scope.accountID, names)
+		if err != nil {
+			return nil, fmt.Errorf("hosted workload rollup: %w", err)
+		}
+		if len(rollups) == 0 {
+			continue
+		}
+		entities, err := s.podSynth.WorkloadEntitiesByIdentity(scope.tenantID, scope.accountID, rollups)
+		if err != nil {
+			return nil, fmt.Errorf("hosted workload entity lookup: %w", err)
+		}
+		for _, r := range rollups {
+			entry := ImpactedService{
+				Name:         r.WorkloadName,
+				NodeType:     NodeTypeWorkload,
+				Namespace:    r.Namespace,
+				HopsAway:     hopsByNodeName[r.NodeName] + 1,
+				Relationship: RelationshipRunsOn,
+				Sources:      []string{"k8s"},
+				PodCount:     r.PodCount,
+				Environment:  accountEnv[scope.accountID],
+			}
+			if wl := entities[r.identityKey()]; wl != nil {
+				entry.NodeID = wl.ID
+				entry.Name = impactNodeName(wl)
+				entry.ResourceID = impactNodeAttr(wl, "resource_id")
+				entry.Environment = resolveNodeEnvironment(wl, accountEnv)
+			}
+			out = append(out, entry)
+		}
+	}
+	sortImpactedServices(out)
+	return out, nil
 }
 
 // traverseDownstreamDependencies walks in the opposite direction — edges whose

@@ -97,13 +97,23 @@ func deriveAdditiveBand(impact *core.ImpactSummary) (SafetyBand, string) {
 	}
 }
 
-// deriveDestructiveBand floors at risky: removal is irreversible, so only a
-// well-observed neighbourhood with zero dependents softens the verdict — and
-// then only to review, never safe.
+// deriveDestructiveBand floors at risky: removal is irreversible, so the
+// verdict softens — and then only to review, never safe — solely when the
+// ENTIRE well-observed neighbourhood is empty: no application callers, no
+// attached infrastructure (a volume's instance), nothing hosted (a node's
+// workloads), and nothing the resource fronts or serves (an LB's backends,
+// reported downstream). Those extra lists deliberately do not feed
+// DependentCount — they are not callers — but an irreversible action on a
+// resource that still has anything hanging off it in any direction must stay
+// red. Decision logged in docs/architecture-decisions.md.
 func deriveDestructiveBand(impact *core.ImpactSummary) (SafetyBand, string) {
 	wellObserved := impact.CoverageConfidence == core.CoverageHigh || impact.CoverageConfidence == core.CoverageObserved
-	if impact.DependentCount == 0 && !impact.Truncated && wellObserved {
-		return SafetyBandReview, "no observed dependents, but the change is irreversible — verify before removing"
+	neighborhoodEmpty := impact.DependentCount == 0 &&
+		impact.InfrastructureCount == 0 &&
+		impact.HostedWorkloadCount == 0 &&
+		impact.DownstreamCount == 0
+	if neighborhoodEmpty && !impact.Truncated && wellObserved {
+		return SafetyBandReview, "nothing attached, hosted, or depending on this resource — but the change is irreversible; verify before removing"
 	}
 	switch {
 	case impact.ProductionDependents > 0:
@@ -112,6 +122,12 @@ func deriveDestructiveBand(impact *core.ImpactSummary) (SafetyBand, string) {
 		return SafetyBandRisky, "irreversible change with a very large blast radius"
 	case impact.DependentCount > 0:
 		return SafetyBandRisky, fmt.Sprintf("irreversible change with %d dependent(s)", impact.DependentCount)
+	case impact.HostedWorkloadCount > 0:
+		return SafetyBandRisky, fmt.Sprintf("irreversible change on a node hosting %d workload(s)", impact.HostedWorkloadCount)
+	case impact.InfrastructureCount > 0:
+		return SafetyBandRisky, fmt.Sprintf("irreversible change with %d attached infrastructure resource(s)", impact.InfrastructureCount)
+	case impact.DownstreamCount > 0:
+		return SafetyBandRisky, fmt.Sprintf("irreversible change on a resource still fronting or serving %d target(s)", impact.DownstreamCount)
 	default:
 		return SafetyBandRisky, "irreversible change and graph coverage is too limited to confirm nothing depends on it"
 	}
