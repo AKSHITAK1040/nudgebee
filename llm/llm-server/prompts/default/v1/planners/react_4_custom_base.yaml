@@ -77,8 +77,8 @@ body: |2
   <content>The requested result.</content>
   </final_answer>
 
-  Tool calls are NOT XML. Never emit `<thought_action>`, `<action>`,
-  `<tool_name>`, or `<tool_input>` as text; issue native function calls.
+  Use native function calls for every tool invocation. Text that merely
+  describes a tool call is not executed.
 
   {{.time_handling_rules}}
 

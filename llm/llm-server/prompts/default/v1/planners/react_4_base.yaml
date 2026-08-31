@@ -83,7 +83,7 @@ body: |2
 
   - `<thought>` is your reasoning and is NOT shown to the user. Keep the user-facing answer in `<content>`; never address the user from inside `<thought>`.
   - Emit this block ONLY on a turn where you make no tool call. Never emit it in the same turn as a tool call.
-  - **Tool calls are NOT XML.** Never write `<thought_action>`, `<action>`, `<tool_name>` or `<tool_input>` — those belong to the older text protocol and are ignored here. To use a tool, issue a real function call. A turn containing tool XML instead of a function call executes nothing.
+  - Use native function calls for every tool invocation. Text that merely describes a tool call is not executed.
 
   {{if .is_top_level}}
   {{.context_management_rules}}

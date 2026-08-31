@@ -35,6 +35,7 @@ func TestBuildResumeAgentRequestRestoresClientToolRuntimeFields(t *testing.T) {
 	assert.Equal(t, capabilities, got.Capabilities)
 	assert.Equal(t, queryConfig, got.QueryConfig)
 }
+
 // TestIsResumableAgentStatus locks in the contract for which agent statuses
 // V2's idempotency guard treats as eligible for resume vs already-progressed.
 //

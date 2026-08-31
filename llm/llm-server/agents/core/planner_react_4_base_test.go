@@ -93,6 +93,10 @@ func TestReAct4CustomBaseIsCompactAndGeneric(t *testing.T) {
 	assert.Contains(t, out, "every result is clearly labeled")
 	assert.Contains(t, out, "update_notebook")
 	assert.Contains(t, out, "<final_answer>")
+	assert.Contains(t, out, "Use native function calls for every tool invocation.")
+	assert.NotContains(t, out, "<thought_action>")
+	assert.NotContains(t, out, "<tool_name>")
+	assert.NotContains(t, out, "<tool_input>")
 
 	assert.NotContains(t, out, "HYPOTHESIS DISCIPLINE")
 	assert.NotContains(t, out, "DELEGATION:")
@@ -115,7 +119,8 @@ func TestReAct4CustomBaseInvestigationGating(t *testing.T) {
 // answer keeps react_3's <final_answer> envelope so thought and user-facing
 // content stay separable (the model emits that shape unprompted anyway, and
 // bare text conflated the two — answers began "The user is asking for…").
-// The XML action grammar must stay gone, and appear only as a prohibition.
+// The legacy action grammar must stay absent. Naming forbidden syntax in a
+// negative example can prime the model to reproduce it.
 func TestReAct4Base_ActionsNativeAnswerStructured(t *testing.T) {
 	out := renderReact4BaseWithRoles(t, true, true, true, false)
 
@@ -127,13 +132,10 @@ func TestReAct4Base_ActionsNativeAnswerStructured(t *testing.T) {
 	assert.Contains(t, out, "<final_answer>")
 	assert.Contains(t, out, "<content>")
 
-	// The action grammar appears ONLY inside the prohibition, never as an
-	// instruction to use it. If this sentence is ever dropped, the guard in
-	// parseCompletion (containsActionGrammar) becomes the only thing standing
-	// between a text-protocol turn and a silently skipped tool.
-	assert.Contains(t, out, "Tool calls are NOT XML.")
-	assert.NotContains(t, out, "<thought_action>\n",
-		"tool XML must never be shown as a usable example block")
+	assert.Contains(t, out, "Use native function calls for every tool invocation.")
+	assert.NotContains(t, out, "<thought_action>")
+	assert.NotContains(t, out, "<tool_name>")
+	assert.NotContains(t, out, "<tool_input>")
 }
 
 func TestReAct4Base_NotebookGating(t *testing.T) {
