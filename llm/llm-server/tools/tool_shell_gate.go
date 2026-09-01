@@ -752,6 +752,14 @@ func reQuoteShellToken(tok string) string {
 	if tok == "" {
 		return `""`
 	}
+	if strings.ContainsAny(tok, "${}`") {
+		// shlex removes the caller's quote style. Restore a non-expanding quote
+		// for JSONPath and similar arguments before handing the command to a
+		// downstream classifier; double quotes would make a literal JSONPath `$`
+		// look like executable shell expansion, while leaving braces bare makes
+		// them look like a shell group.
+		return "'" + strings.ReplaceAll(tok, "'", `'"'"'`) + "'"
+	}
 	if !strings.ContainsAny(tok, " \t\n'\"\\") {
 		return tok
 	}

@@ -31,6 +31,7 @@ func TestExtractLeadingShellCommand(t *testing.T) {
 		{"quoted env var with spaces (shlex handles this — strings.Fields would misclassify)", `KUBECONFIG="/etc/kube config/config" kubectl get pods`, "kubectl", "kubectl get pods"},
 		{"argument with spaces re-quoted for downstream classifier", `kubectl get pods -l "app in (foo, bar)"`, "kubectl", `kubectl get pods -l "app in (foo, bar)"`},
 		{"argument with embedded double quote escaped", `kubectl annotate pod x note="hello \"world\""`, "kubectl", `kubectl annotate pod x "note=hello \"world\""`},
+		{"jsonpath keeps non-expanding quotes", `kubectl get pods -o jsonpath='{.items[*].metadata.name}'`, "kubectl", `kubectl get pods -o 'jsonpath={.items[*].metadata.name}'`},
 		{"single-quoted env var with spaces", `KUBECONFIG='/etc/kube config/config' kubectl get pods`, "kubectl", "kubectl get pods"},
 		{"malformed quoting → bailout", `KUBECONFIG="/etc/kube config kubectl get pods`, "", ""},
 		{"pipeline — leading command wins", "kubectl get pods | grep foo | jq .", "kubectl", "kubectl get pods | grep foo | jq ."},
@@ -296,6 +297,18 @@ func TestShellTool_InferToolRequestType_ReadOnlyRedirectionsAreNotGated(t *testi
 func TestShellTool_InferToolRequestType_ProductionReadOnlyCompoundsAreNotGated(t *testing.T) {
 	tool := ShellTool{AccountId: "test-account"}
 	inputs := []string{
+		`echo "=== PODS IN NUDGEBEE, REDIS, RABBIT ==="
+kubectl get pods -n nudgebee -o wide
+echo ""
+kubectl get pods -n redis -o wide
+echo ""
+kubectl get pods -n rabbit -o wide
+echo ""
+echo "=== POD RESTARTS ACROSS ALL NAMESPACES ==="
+kubectl get pods -A --sort-by='.status.containerStatuses[0].restartCount' | grep -v ' 0 ' | tail -n 30
+echo ""
+echo "=== TERMINATED / OOMKILLED CONTAINERS ==="
+kubectl get pods -A -o jsonpath='{range .items[*]}{range .status.containerStatuses[*]}{if .lastState.terminated.reason}{.name}{" in pod "}{$.metadata.name}{"."}{$.metadata.namespace}{": terminated reason="}{.lastState.terminated.reason}{" exitCode="}{.lastState.terminated.exitCode}{" finishedAt="}{.lastState.terminated.finishedAt}{"\n"}{end}{end}{end}'`,
 		"kubectl logs deployment/product-catalog -n demo > product.log && kubectl logs deployment/checkout -n demo > checkout.log && head -n 20 product.log checkout.log",
 		"kubectl get pod product-catalog -n demo -o yaml; kubectl logs pod/product-catalog -n demo --previous",
 		"kubectl get pods -A | grep -i chaos; kubectl get events -A | grep -i chaos",
@@ -306,6 +319,22 @@ func TestShellTool_InferToolRequestType_ProductionReadOnlyCompoundsAreNotGated(t
 		"gh api /repos/org/repo/actions/jobs/123 || true; echo check; gh api /repos/org/repo/check-runs/123 || true",
 		"gh api /repos/org/repo/actions/jobs/123 && gh run view 456 -R org/repo --log",
 		"gh api repos/org/repo/actions/runs/456/jobs && ls -la",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.Equal(t, core.ToolRequestTypeRead, got)
+		})
+	}
+}
+
+func TestShellTool_InferToolRequestType_KubectlJSONPathReadsAreNotGated(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		`kubectl get pod temporal-history -n nudgebee -o jsonpath='{.status.podIP}'`,
+		`kubectl get pods -A -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}'`,
+		`kubectl get configmaps --all-namespaces -o jsonpath='{range .items[*]}{.metadata.namespace}{"\n"}{end}' | sort | uniq -c`,
 	}
 	for _, input := range inputs {
 		t.Run(input, func(t *testing.T) {
