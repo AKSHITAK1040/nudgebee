@@ -3393,12 +3393,13 @@ func (e *plannerExecutor) Unmarshal(previousState []byte) error {
 			}
 
 			action := NBAgentPlannerToolAction{
-				ToolID:     toString(getVal(actionData, "ToolID")),
-				Tool:       toString(getVal(actionData, "Tool")),
-				ToolInput:  toString(getVal(actionData, "ToolInput")),
-				Log:        logValue,
-				Dependency: dependencies,
-				Condition:  actionCondition,
+				ToolID:          toString(getVal(actionData, "ToolID")),
+				Tool:            toString(getVal(actionData, "Tool")),
+				ToolInput:       toString(getVal(actionData, "ToolInput")),
+				NativeToolInput: toString(getVal(actionData, "native_tool_input")),
+				Log:             logValue,
+				Dependency:      dependencies,
+				Condition:       actionCondition,
 				// Restored explicitly: this reconstruction is field-by-field, so any
 				// field omitted here is silently dropped on every resume. A resume is
 				// not an edge case — it is the write-approval path.
@@ -3423,6 +3424,7 @@ func (e *plannerExecutor) Unmarshal(previousState []byte) error {
 						"toolId", action.ToolID, "error", decErr)
 				}
 			}
+			action.MemoryRefs = restoreMemoryRefs(getVal(actionData, "memory_refs"))
 
 			status := ToolStatusSuccess // default
 			if statusVal, ok := getVal(stepMap, "Status").(string); ok {
@@ -3520,14 +3522,15 @@ func (e *plannerExecutor) Unmarshal(previousState []byte) error {
 			}
 
 			action := NBAgentPlannerToolAction{
-				ToolID:     toString(getVal(actionMap, "ToolID")),
-				Tool:       toString(getVal(actionMap, "Tool")),
-				ToolInput:  toString(getVal(actionMap, "ToolInput")),
-				Log:        logValue,
-				Dependency: dependencies,
-				Condition:  actionCondition,
-				DisplayID:  toString(getVal(actionMap, "display_id")),
-				TurnID:     toString(getVal(actionMap, "turn_id")),
+				ToolID:          toString(getVal(actionMap, "ToolID")),
+				Tool:            toString(getVal(actionMap, "Tool")),
+				ToolInput:       toString(getVal(actionMap, "ToolInput")),
+				NativeToolInput: toString(getVal(actionMap, "native_tool_input")),
+				Log:             logValue,
+				Dependency:      dependencies,
+				Condition:       actionCondition,
+				DisplayID:       toString(getVal(actionMap, "display_id")),
+				TurnID:          toString(getVal(actionMap, "turn_id")),
 			}
 			// currentAction is the source of truth for a WAITING tool when resume
 			// drops its placeholder step. Preserve the provider signature here just
@@ -3541,6 +3544,7 @@ func (e *plannerExecutor) Unmarshal(previousState []byte) error {
 						"toolId", action.ToolID, "error", decErr)
 				}
 			}
+			action.MemoryRefs = restoreMemoryRefs(getVal(actionMap, "memory_refs"))
 			e.currentAction = append(e.currentAction, action)
 		}
 	}
@@ -3607,6 +3611,21 @@ func (e *plannerExecutor) Unmarshal(previousState []byte) error {
 	}
 
 	return nil
+}
+
+func restoreMemoryRefs(value any) []NBAgentPlannerToolActionMemoryRef {
+	if value == nil {
+		return nil
+	}
+	encoded, err := common.MarshalJson(value)
+	if err != nil {
+		return nil
+	}
+	var refs []NBAgentPlannerToolActionMemoryRef
+	if err := common.UnmarshalJson(encoded, &refs); err != nil {
+		return nil
+	}
+	return refs
 }
 
 func parseIntFromMap(m map[string]any, key string) (int, bool) {

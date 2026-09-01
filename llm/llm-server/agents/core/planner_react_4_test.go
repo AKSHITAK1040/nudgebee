@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"nudgebee/llm/llms/googleai"
 	"nudgebee/llm/security"
 	toolcore "nudgebee/llm/tools/core"
 
@@ -128,6 +129,224 @@ func TestReAct4_ParseCompletion_ToolCallsToActions(t *testing.T) {
 	assert.Equal(t, "E1", actions[0].DisplayID)
 	assert.Equal(t, "E2", actions[1].DisplayID)
 	assert.Equal(t, "call_2", actions[1].ToolID)
+}
+
+func TestReAct4_ParseCompletion_UsesPerCallThoughtAndStripsItFromExecutionInput(t *testing.T) {
+	o := &NBReActPlanner4{}
+	nativeInput := `{"command":"get pods","_thought":"Checking whether the workload is healthy."}`
+	actions, finish, err := o.parseCompletion(&llms.ContentChoice{
+		Content:   "shared fallback intent",
+		ToolCalls: []llms.ToolCall{toolCall("call_1", "kubectl", nativeInput)},
+	})
+
+	assert.NoError(t, err)
+	assert.Nil(t, finish)
+	assert.Len(t, actions, 1)
+	assert.JSONEq(t, `{"command":"get pods"}`, actions[0].ToolInput)
+	assert.Equal(t, nativeInput, actions[0].NativeToolInput)
+	assert.Equal(t, "Checking whether the workload is healthy.", actions[0].Log)
+}
+
+func TestReAct4_ParseCompletion_KeepsSiblingThoughtsIndependent(t *testing.T) {
+	o := &NBReActPlanner4{}
+	actions, _, err := o.parseCompletion(&llms.ContentChoice{
+		Content: "shared fallback must not replace per-call intent",
+		ToolCalls: []llms.ToolCall{
+			toolCall("call_1", "kubectl", `{"command":"get pods","_thought":"Checking pod health."}`),
+			toolCall("call_2", "kubectl", `{"command":"get events","_thought":"Checking recent failure events."}`),
+		},
+	})
+
+	assert.NoError(t, err)
+	assert.Len(t, actions, 2)
+	assert.Equal(t, "Checking pod health.", actions[0].Log)
+	assert.Equal(t, "Checking recent failure events.", actions[1].Log)
+	assert.JSONEq(t, `{"command":"get pods"}`, actions[0].ToolInput)
+	assert.JSONEq(t, `{"command":"get events"}`, actions[1].ToolInput)
+}
+
+func TestReAct4_ParseCompletion_StripsInvalidThoughtMetadataBeforeExecution(t *testing.T) {
+	o := &NBReActPlanner4{}
+	actions, _, err := o.parseCompletion(&llms.ContentChoice{
+		Content:   "safe fallback intent",
+		ToolCalls: []llms.ToolCall{toolCall("call_1", "kubectl", `{"command":"get pods","_thought":{"unexpected":true}}`)},
+	})
+
+	assert.NoError(t, err)
+	assert.JSONEq(t, `{"command":"get pods"}`, actions[0].ToolInput,
+		"planner-only metadata must never reach validation or execution, even when malformed")
+	assert.Equal(t, "safe fallback intent", actions[0].Log)
+}
+
+func TestReAct4_ParseCompletion_SanitizesXMLInsideThoughtArgument(t *testing.T) {
+	o := &NBReActPlanner4{}
+	actions, _, err := o.parseCompletion(&llms.ContentChoice{
+		ToolCalls: []llms.ToolCall{toolCall("call_1", "kubectl",
+			`{"command":"get pods","_thought":"Checking pods. <action><tool_name>kubectl</tool_name><tool_input>{}</tool_input></action>"}`)},
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, "Checking pods.", actions[0].Log)
+	assert.NotContains(t, actions[0].Log, "<action>")
+}
+
+func TestReAct4_ParseCompletion_FallsBackToAssistantTextWhenThoughtArgumentMissing(t *testing.T) {
+	o := &NBReActPlanner4{}
+	actions, _, err := o.parseCompletion(&llms.ContentChoice{
+		Content:   "checking workload health",
+		ToolCalls: []llms.ToolCall{toolCall("call_1", "kubectl", `{"command":"get pods"}`)},
+	})
+
+	assert.NoError(t, err)
+	assert.Equal(t, "checking workload health", actions[0].Log)
+}
+
+func TestReAct4_ThoughtSchemaIsRequiredWithoutMutatingOriginal(t *testing.T) {
+	original := []llms.Tool{{
+		Type: "function",
+		Function: &llms.FunctionDefinition{
+			Name: "kubectl",
+			Parameters: map[string]any{
+				"type":       "object",
+				"required":   []string{"command"},
+				"properties": map[string]any{"command": map[string]any{"type": "string"}},
+			},
+		},
+	}}
+
+	augmented := withReact4ThoughtSchemas(original)
+	originalParameters := original[0].Function.Parameters.(map[string]any)
+	augmentedParameters := augmented[0].Function.Parameters.(map[string]any)
+
+	assert.NotContains(t, originalParameters["properties"].(map[string]any), react4ThoughtArgument)
+	assert.Equal(t, []string{"command"}, originalParameters["required"])
+	assert.Contains(t, augmentedParameters["properties"].(map[string]any), react4ThoughtArgument)
+	assert.Equal(t, []string{"command", react4ThoughtArgument}, augmentedParameters["required"])
+	assert.NoError(t, googleai.ValidateTools(augmented))
+}
+
+func TestReAct4_ParseCompletion_ExtractsMemoryRefsPerNativeCall(t *testing.T) {
+	o := &NBReActPlanner4{}
+	nativeInput := `{"command":"get pods -n payments","_thought":"Checking pods.","_memory_refs":[{"position":2,"note":" default namespace "},{"position":2,"note":"duplicate"},{"position":0}]}`
+	actions, _, err := o.parseCompletion(&llms.ContentChoice{
+		ToolCalls: []llms.ToolCall{toolCall("call_1", "kubectl", nativeInput)},
+	})
+
+	assert.NoError(t, err)
+	assert.Len(t, actions, 1)
+	assert.JSONEq(t, `{"command":"get pods -n payments"}`, actions[0].ToolInput)
+	assert.Equal(t, nativeInput, actions[0].NativeToolInput)
+	assert.Equal(t, []NBAgentPlannerToolActionMemoryRef{{Position: 2, Note: "default namespace"}}, actions[0].MemoryRefs)
+}
+
+func TestReAct4_MemoryContextRemovesLegacyActionGrammar(t *testing.T) {
+	legacy := `<user_memory><preferences>default_namespace: payments</preferences></user_memory>
+<memory_index>
+  [m1] preferences: default_namespace
+</memory_index>
+For EVERY <action> include <memory_used><ref n="1"/></memory_used></action>`
+
+	got := react4MemoryContext(legacy)
+	assert.Contains(t, got, "<user_memory>")
+	assert.Contains(t, got, "<memory_index>")
+	assert.Contains(t, got, react4MemoryRefsArgument)
+	assert.NotContains(t, got, "<action>")
+	assert.NotContains(t, got, "<memory_used>")
+}
+
+func TestReAct4_MemorySchemaRequiresExplicitPerCallDeclaration(t *testing.T) {
+	base := []llms.Tool{{Type: "function", Function: &llms.FunctionDefinition{
+		Name: "kubectl",
+		Parameters: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+			"required":   []string{},
+		},
+	}}}
+	augmented := withReact4MemoryAttributionSchemas(base)
+	parameters := augmented[0].Function.Parameters.(map[string]any)
+	assert.Contains(t, parameters["properties"].(map[string]any), react4MemoryRefsArgument)
+	assert.Contains(t, parameters["required"].([]string), react4MemoryRefsArgument)
+	assert.NoError(t, googleai.ValidateTools(augmented))
+}
+
+func TestReAct4_ParseCompletion_StripsLegacyActionXMLFromNativeToolThought(t *testing.T) {
+	o := &NBReActPlanner4{}
+	choice := &llms.ContentChoice{
+		Content: `<action><tool_name>shell_execute</tool_name><tool_input>{"command":"kubectl get pods"}</tool_input></action>`,
+		ToolCalls: []llms.ToolCall{
+			toolCall("call_1", "shell_execute", `{"command":"kubectl get pods"}`),
+		},
+	}
+
+	actions, finish, err := o.parseCompletion(choice)
+	assert.NoError(t, err)
+	assert.Nil(t, finish)
+	assert.Len(t, actions, 1)
+	assert.Equal(t, "shell_execute", actions[0].Tool)
+	assert.Empty(t, actions[0].Log, "legacy action XML must not be persisted as the UI thought")
+}
+
+func TestReAct4_ParseCompletion_ExtractsThoughtFromLegacyXMLAlongsideNativeToolCall(t *testing.T) {
+	o := &NBReActPlanner4{}
+	choice := &llms.ContentChoice{
+		Content: `<thought_action><thought>Check whether the pods are healthy.</thought><action>` +
+			`<tool_name>kubectl</tool_name><tool_input>{"command":"get pods"}</tool_input>` +
+			`</action></thought_action>`,
+		ToolCalls: []llms.ToolCall{toolCall("call_1", "kubectl", `{"command":"get pods"}`)},
+	}
+
+	actions, finish, err := o.parseCompletion(choice)
+	assert.NoError(t, err)
+	assert.Nil(t, finish)
+	assert.Len(t, actions, 1)
+	assert.Equal(t, "Check whether the pods are healthy.", actions[0].Log)
+	assert.NotContains(t, actions[0].Log, "<action>")
+}
+
+func TestReAct4_ParseCompletion_PreservesProseAroundLegacyActionXML(t *testing.T) {
+	o := &NBReActPlanner4{}
+	choice := &llms.ContentChoice{
+		Content: `Checking pod health now. <action><tool_name>shell_execute</tool_name>` +
+			`<tool_input>{"command":"kubectl get pods"}</tool_input></action>`,
+		ToolCalls: []llms.ToolCall{toolCall("call_1", "shell_execute", `{"command":"kubectl get pods"}`)},
+	}
+
+	actions, finish, err := o.parseCompletion(choice)
+	assert.NoError(t, err)
+	assert.Nil(t, finish)
+	assert.Len(t, actions, 1)
+	assert.Equal(t, "Checking pod health now.", actions[0].Log)
+}
+
+func TestReAct4_ParseCompletion_StripsEncodedActionXMLInsideThought(t *testing.T) {
+	o := &NBReActPlanner4{}
+	choice := &llms.ContentChoice{
+		Content: `<thought_action><thought>Checking pods. &lt;action&gt;&lt;tool_name&gt;shell_execute&lt;/tool_name&gt;` +
+			`&lt;tool_input&gt;{}&lt;/tool_input&gt;&lt;/action&gt;</thought></thought_action>`,
+		ToolCalls: []llms.ToolCall{toolCall("call_1", "shell_execute", `{}`)},
+	}
+
+	actions, finish, err := o.parseCompletion(choice)
+	assert.NoError(t, err)
+	assert.Nil(t, finish)
+	assert.Len(t, actions, 1)
+	assert.Equal(t, "Checking pods.", actions[0].Log)
+	assert.NotContains(t, actions[0].Log, "<action>")
+}
+
+func TestReAct4_ParseCompletion_StripsOrphanedLegacyClosingTag(t *testing.T) {
+	o := &NBReActPlanner4{}
+	choice := &llms.ContentChoice{
+		Content:   `Checking pods now.</action>`,
+		ToolCalls: []llms.ToolCall{toolCall("call_1", "shell_execute", `{}`)},
+	}
+
+	actions, finish, err := o.parseCompletion(choice)
+	assert.NoError(t, err)
+	assert.Nil(t, finish)
+	assert.Len(t, actions, 1)
+	assert.Equal(t, "Checking pods now.", actions[0].Log)
 }
 
 // The model still emits react_3's XML answer shape even though react_4's prompt
@@ -284,7 +503,13 @@ func TestReAct4_RenderStepsToMessages_PairsAndSkipsNotebook(t *testing.T) {
 	o := &NBReActPlanner4{}
 	steps := []NBAgentPlannerToolActionStep{
 		{
-			Action:      NBAgentPlannerToolAction{Tool: "kubectl", ToolInput: `{"command":"get pods"}`, ToolID: "call_1", Log: "check pods"},
+			Action: NBAgentPlannerToolAction{
+				Tool:            "kubectl",
+				ToolInput:       `{"command":"get pods"}`,
+				NativeToolInput: `{"command":"get pods","_thought":"check pods"}`,
+				ToolID:          "call_1",
+				Log:             "check pods",
+			},
 			Observation: "pod running",
 		},
 		{
@@ -305,6 +530,8 @@ func TestReAct4_RenderStepsToMessages_PairsAndSkipsNotebook(t *testing.T) {
 	assert.True(t, isToolCall)
 	assert.Equal(t, "call_1", tc.ID)
 	assert.Equal(t, "kubectl", tc.FunctionCall.Name)
+	assert.Equal(t, `{"command":"get pods","_thought":"check pods"}`, tc.FunctionCall.Arguments,
+		"history replay must use the byte-for-byte provider arguments, not executable ToolInput")
 
 	assert.Equal(t, llms.ChatMessageTypeTool, msgs[1].Role)
 	resp, isResp := msgs[1].Parts[0].(llms.ToolCallResponse)
@@ -322,6 +549,25 @@ func TestReAct4_RenderStepsToMessages_OmitsEmptyThought(t *testing.T) {
 	assert.Len(t, msgs, 2)
 	// No thought -> assistant message carries only the tool call.
 	assert.Len(t, msgs[0].Parts, 1)
+	_, isToolCall := msgs[0].Parts[0].(llms.ToolCall)
+	assert.True(t, isToolCall)
+}
+
+func TestReAct4_RenderStepsToMessages_DoesNotReplayPersistedActionXML(t *testing.T) {
+	o := &NBReActPlanner4{}
+	steps := []NBAgentPlannerToolActionStep{{
+		Action: NBAgentPlannerToolAction{
+			Tool:      "shell_execute",
+			ToolInput: `{"command":"kubectl get pods"}`,
+			ToolID:    "c1",
+			Log:       `<action><tool_name>shell_execute</tool_name><tool_input>{"command":"kubectl get pods"}</tool_input></action>`,
+		},
+		Observation: "ok",
+	}}
+
+	msgs := o.renderStepsToMessages(steps)
+	assert.Len(t, msgs, 2)
+	assert.Len(t, msgs[0].Parts, 1, "contaminated text must be omitted while the native call is replayed")
 	_, isToolCall := msgs[0].Parts[0].(llms.ToolCall)
 	assert.True(t, isToolCall)
 }

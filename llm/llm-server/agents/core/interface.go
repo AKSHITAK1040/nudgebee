@@ -206,8 +206,13 @@ type NBAgentPlannerToolActionCondition struct {
 type NBAgentPlannerToolAction struct {
 	Tool      string `json:"tool"`
 	ToolInput string `json:"tool_input"`
-	Log       string `json:"log"`
-	ToolID    string `json:"tool_id"`
+	// NativeToolInput preserves the provider's original function arguments for
+	// exact ReAct4 history replay. ToolInput is the execution-safe form with
+	// planner metadata such as _thought removed. Empty for ReAct3 and for
+	// steps persisted before native per-call attribution existed.
+	NativeToolInput string `json:"native_tool_input,omitempty"`
+	Log             string `json:"log"`
+	ToolID          string `json:"tool_id"`
 	// DisplayID is a human-readable sequential identifier (e.g. "E1", "E2", "E3")
 	// assigned by the ReAct3 planner as steps are generated, for use in citations
 	// and the response formatter. Empty for planner types that do not run react_3
@@ -252,8 +257,9 @@ type NBAgentPlannerToolAction struct {
 	// providers that do not use native tool calling.
 	ThoughtSignature []byte `json:"thought_signature,omitempty"`
 	// MemoryRefs is the LLM's self-attribution: which injected memory
-	// item(s) shaped THIS action. Populated when the model emits
+	// item(s) shaped THIS action. ReAct3 populates it when the model emits
 	//   <action>...<memory_used><ref n="N" note="..."/></memory_used></action>
+	// ReAct4 populates it from the reserved native `_memory_refs` argument.
 	// The N is the 1-based [mN] position from the memory block's
 	// <memory_index> footer. Persisted verbatim on the tool_calls row
 	// (llm_conversation_tool_calls.memory_refs jsonb) so a query-time

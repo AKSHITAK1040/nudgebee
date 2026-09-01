@@ -1458,7 +1458,8 @@ func init() {
 	// used to flip this on at boot; baking it in preserves that behavior.
 	viper.SetDefault("llm_server_react_critique_enabled", true)
 	viper.SetDefault("llm_server_sdg_grounding_contract_enabled", false)
-	viper.SetDefault("llm_server_react4_enabled", false)
+	// ReAct4 is the default planner; an explicit false override remains the rollback path.
+	viper.SetDefault("llm_server_react4_enabled", true)
 	viper.SetDefault("llm_server_react3_orchestrator_mode_enabled", true)
 	viper.SetDefault("llm_server_react3_query_lean_prompt_enabled", true)
 	viper.SetDefault("llm_server_react3_query_model_downshift_enabled", false)

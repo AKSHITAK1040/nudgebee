@@ -3,9 +3,11 @@ package core
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,6 +22,9 @@ import (
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/prompts"
 )
+
+const react4ThoughtArgument = "_thought"
+const react4MemoryRefsArgument = "_memory_refs"
 
 // NBReActPlanner4 is the provider-native tool-calling planner (ReAct4). It
 // implements the same NBAgentPlanner contract as NBReActPlanner3 — the executor
@@ -126,8 +131,11 @@ type refinementRecord struct {
 // call. See docs/planner_react_4.md.
 func NewReActAgent4(ctx *security.RequestContext, request NBAgentRequest, nbAgent NBAgent, systemMessage string, extraMessages []prompts.MessageFormatter, initialNotebook string) (*NBReActPlanner4, error) {
 	tools, agentAdditionalPrompt := resolveReact4Tools(ctx, request, nbAgent, systemMessage)
-
 	isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
+	llmTools := withReact4ThoughtSchemas(nbToolsToLlmTools(tools))
+	if isTopLevel && hasMemoryIndex(request.MemoryContext) {
+		llmTools = withReact4MemoryAttributionSchemas(llmTools)
+	}
 
 	// First-name greeting personalisation, top-level turns only (sub-agents don't
 	// greet) — same gate reActCreatePrompt3 applies.
@@ -150,7 +158,7 @@ func NewReActAgent4(ctx *security.RequestContext, request NBAgentRequest, nbAgen
 		request:               request,
 		nbAgent:               nbAgent,
 		tools:                 tools,
-		llmTools:              nbToolsToLlmTools(tools),
+		llmTools:              llmTools,
 		systemMessage:         composeReact4SystemMessage(ctx, request, nbAgent, systemMessage, agentAdditionalPrompt, tools),
 		history:               messageFormatterToString(extraMessages),
 		Notebook:              initialNotebook,
@@ -591,8 +599,8 @@ func (o *NBReActPlanner4) refinementMessages(answer, feedback string) []llms.Mes
 // text-protocol attempt apart from a genuine prose answer that merely mentions
 // these tags (hence the opening-tag match rather than a substring search).
 func containsActionGrammar(text string) bool {
-	for _, tag := range []string{"<thought_action>", "<tool_name>", "<tool_input>", "<actions>"} {
-		if strings.Contains(text, tag) {
+	for _, tag := range []string{"thought_action", "action", "tool_name", "tool_input", "actions"} {
+		if strings.Contains(text, "<"+tag+">") || strings.Contains(text, "</"+tag+">") {
 			return true
 		}
 	}
@@ -620,6 +628,226 @@ func containsToolNameGrammar(text string, tools []toolcore.NBTool) bool {
 		}
 	}
 	return false
+}
+
+// normalizeNativeToolThought keeps only user-displayable intent from the text
+// accompanying a provider-native tool call. Models can emit a valid native call
+// and also repeat react_3's XML action protocol in Content when XML examples
+// remain in prior history or model training. The native call is authoritative;
+// persisting or replaying the duplicate XML leaks implementation syntax into the
+// UI and teaches the model to repeat it on every subsequent turn.
+func normalizeNativeToolThought(text string) string {
+	text = strings.TrimSpace(text)
+	if !containsActionGrammar(text) {
+		return text
+	}
+	if thought := strings.TrimSpace(common.XmlExtractTagContent(text, "thought")); thought != "" {
+		return stripLegacyActionGrammar(thought)
+	}
+	return stripLegacyActionGrammar(text)
+}
+
+// withReact4ThoughtSchemas adds planner-only display intent to every native
+// function schema. Native tool APIs do not require assistant prose alongside a
+// function call, so prompt wording alone cannot guarantee Action.Log is filled.
+// The reserved argument is removed before validation/execution by
+// extractReact4Thought; the provider-original JSON is retained for replay.
+func withReact4ThoughtSchemas(tools []llms.Tool) []llms.Tool {
+	out := make([]llms.Tool, len(tools))
+	for i, tool := range tools {
+		out[i] = tool
+		if tool.Function == nil {
+			continue
+		}
+
+		definition := *tool.Function
+		parameters, ok := definition.Parameters.(map[string]any)
+		if !ok {
+			out[i].Function = &definition
+			continue
+		}
+		parametersCopy := make(map[string]any, len(parameters))
+		for key, value := range parameters {
+			parametersCopy[key] = value
+		}
+		properties, _ := parameters["properties"].(map[string]any)
+		propertiesCopy := make(map[string]any, len(properties)+1)
+		for key, value := range properties {
+			propertiesCopy[key] = value
+		}
+		propertiesCopy[react4ThoughtArgument] = map[string]any{
+			"type":        "string",
+			"description": "One short user-displayable sentence explaining why this tool call is needed. Do not include hidden chain-of-thought or XML.",
+		}
+		parametersCopy["properties"] = propertiesCopy
+
+		required, _ := parameters["required"].([]string)
+		requiredCopy := append([]string(nil), required...)
+		if !slices.Contains(requiredCopy, react4ThoughtArgument) {
+			requiredCopy = append(requiredCopy, react4ThoughtArgument)
+		}
+		parametersCopy["required"] = requiredCopy
+		definition.Parameters = parametersCopy
+		out[i].Function = &definition
+	}
+	return out
+}
+
+// extractReact4Thought separates planner metadata from executable tool input.
+// Malformed/non-string metadata is still removed so an implementation tool
+// never receives an argument that is absent from its own input schema.
+func extractReact4Thought(input string) (string, string) {
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(input), &args); err != nil {
+		return input, ""
+	}
+	rawThought, ok := args[react4ThoughtArgument]
+	if !ok {
+		return input, ""
+	}
+	delete(args, react4ThoughtArgument)
+	clean, err := json.Marshal(args)
+	if err != nil {
+		return input, ""
+	}
+	var thought string
+	if err := json.Unmarshal(rawThought, &thought); err == nil {
+		thought = normalizeNativeToolThought(thought)
+	}
+	return string(clean), thought
+}
+
+func withReact4MemoryAttributionSchemas(tools []llms.Tool) []llms.Tool {
+	out := make([]llms.Tool, len(tools))
+	for i, tool := range tools {
+		out[i] = tool
+		if tool.Function == nil {
+			continue
+		}
+		definition := *tool.Function
+		parameters, ok := definition.Parameters.(map[string]any)
+		if !ok {
+			out[i].Function = &definition
+			continue
+		}
+		parametersCopy := make(map[string]any, len(parameters))
+		for key, value := range parameters {
+			parametersCopy[key] = value
+		}
+		properties, _ := parameters["properties"].(map[string]any)
+		propertiesCopy := make(map[string]any, len(properties)+1)
+		for key, value := range properties {
+			propertiesCopy[key] = value
+		}
+		propertiesCopy[react4MemoryRefsArgument] = map[string]any{
+			"type":        "array",
+			"description": "Memory items from <memory_index> actually applied to this call. Use [] when none were applied.",
+			"items": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"position": map[string]any{"type": "integer", "description": "The integer N from [mN]."},
+					"note":     map[string]any{"type": "string", "description": "Short reason the memory changed this call."},
+				},
+				"required": []string{"position"},
+			},
+		}
+		parametersCopy["properties"] = propertiesCopy
+		required, _ := parameters["required"].([]string)
+		requiredCopy := append([]string(nil), required...)
+		if !slices.Contains(requiredCopy, react4MemoryRefsArgument) {
+			requiredCopy = append(requiredCopy, react4MemoryRefsArgument)
+		}
+		parametersCopy["required"] = requiredCopy
+		definition.Parameters = parametersCopy
+		out[i].Function = &definition
+	}
+	return out
+}
+
+func extractReact4MemoryAttribution(input string) (string, []NBAgentPlannerToolActionMemoryRef) {
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(input), &args); err != nil {
+		return input, nil
+	}
+	rawRefs, ok := args[react4MemoryRefsArgument]
+	if !ok {
+		return input, nil
+	}
+	delete(args, react4MemoryRefsArgument)
+	clean, err := json.Marshal(args)
+	if err != nil {
+		return input, nil
+	}
+	var candidates []NBAgentPlannerToolActionMemoryRef
+	if err := json.Unmarshal(rawRefs, &candidates); err != nil {
+		return string(clean), nil
+	}
+	refs := make([]NBAgentPlannerToolActionMemoryRef, 0, len(candidates))
+	seen := make(map[int]struct{}, len(candidates))
+	for _, ref := range candidates {
+		if ref.Position <= 0 {
+			continue
+		}
+		if _, duplicate := seen[ref.Position]; duplicate {
+			continue
+		}
+		seen[ref.Position] = struct{}{}
+		ref.Note = strings.TrimSpace(ref.Note)
+		refs = append(refs, ref)
+	}
+	return string(clean), refs
+}
+
+func hasMemoryIndex(memoryContext string) bool {
+	return strings.Contains(memoryContext, "<memory_index>") && strings.Contains(memoryContext, "</memory_index>")
+}
+
+// react4MemoryContext retains the memory slab/index but replaces ReAct3's XML
+// action examples with native per-call argument instructions.
+func react4MemoryContext(memoryContext string) string {
+	const endTag = "</memory_index>"
+	end := strings.Index(memoryContext, endTag)
+	if end < 0 {
+		return memoryContext
+	}
+	base := strings.TrimSpace(memoryContext[:end+len(endTag)])
+	return base + `
+
+For every native function call, set the required _memory_refs argument to the
+memory items from <memory_index> that were actually applied to that call. Use
+an empty array when none were applied. Each item has the shape
+{"position": N, "note": "short reason"}, where N is the integer from [mN].
+Applied means the memory value changed the selected function or its executable
+arguments. Do not cite memory that was only considered or was overridden by the
+current <question>. Attribution is per sibling function call.`
+}
+
+func stripLegacyActionGrammar(text string) string {
+	for _, tag := range []string{"thought_action", "actions", "action"} {
+		text = stripXMLBlocks(text, tag)
+		text = strings.ReplaceAll(text, "</"+tag+">", "")
+	}
+	text = strings.TrimSpace(text)
+	if containsActionGrammar(text) {
+		return ""
+	}
+	return text
+}
+
+func stripXMLBlocks(text, tag string) string {
+	open, close := "<"+tag+">", "</"+tag+">"
+	for {
+		start := strings.Index(text, open)
+		if start < 0 {
+			return text
+		}
+		relEnd := strings.Index(text[start+len(open):], close)
+		if relEnd < 0 {
+			return text[:start]
+		}
+		end := start + len(open) + relEnd + len(close)
+		text = text[:start] + text[end:]
+	}
 }
 
 // extractXMLFinalAnswer unwraps a react_3-style <final_answer> block, mirroring
@@ -706,6 +934,16 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 			// answer) so the executor retries / summarizes, matching react_3.
 			return nil, nil, fmt.Errorf("react4: empty completion with no tool calls (stop_reason=%q): %w", choice.StopReason, ErrParseFailure)
 		}
+		// Defensive XML unwrap. react_4's prompt carries no XML answer grammar, but
+		// the model still emits react_3's <final_answer><thought>…</thought>
+		// <content>…</content></final_answer> shape in practice — residual pattern
+		// from training, prior-turn history, or account/memory-injected examples.
+		// react_3 always parsed it (processFinalAnswer: <content> -> Data,
+		// <thought> -> Log), so users never saw the wrapper. Taking choice.Content
+		// raw leaked the tags AND the internal monologue into the answer, which
+		// surfaced in the UI as replies opening with "The user is asking for…".
+		// Parsing it here restores react_3's behavior; plain-text answers (the
+		// expected react_4 shape) fall through untouched.
 		// Action grammar with no native tool call means the model tried to invoke a
 		// tool via react_3's TEXT protocol. Nothing was dispatched, so returning this
 		// as the final answer would ship raw XML to the user AND silently skip the
@@ -722,13 +960,8 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 		// Defensive XML unwrap. react_4's prompt carries no XML answer grammar, but
 		// the model still emits react_3's <final_answer><thought>…</thought>
 		// <content>…</content></final_answer> shape in practice — residual pattern
-		// from training, prior-turn history, or account/memory-injected examples.
-		// react_3 always parsed it (processFinalAnswer: <content> -> Data,
-		// <thought> -> Log), so users never saw the wrapper. Taking choice.Content
-		// raw leaked the tags AND the internal monologue into the answer, which
-		// surfaced in the UI as replies opening with "The user is asking for…".
-		// Parsing it here restores react_3's behavior; plain-text answers (the
-		// expected react_4 shape) fall through untouched.
+		// from prior turns or fine-tuning. If present, unwrap so the user receives
+		// clean content and the thought remains hidden, matching react_3.
 		if finish := extractXMLFinalAnswer(choice.Content); finish != nil {
 			return nil, finish, nil
 		}
@@ -738,6 +971,8 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 			IsTerminal: true,
 		}, nil
 	}
+
+	thought = normalizeNativeToolThought(choice.Content)
 
 	// Positionally aligned with choice.ToolCalls (the provider has no id to key
 	// on at that point), so it must be indexed by the RANGE index, not by the
@@ -771,7 +1006,12 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 			continue
 		}
 		name := tc.FunctionCall.Name
-		args := tc.FunctionCall.Arguments
+		nativeArgs := tc.FunctionCall.Arguments
+		args, actionThought := extractReact4Thought(nativeArgs)
+		args, memoryRefs := extractReact4MemoryAttribution(args)
+		if actionThought == "" {
+			actionThought = thought
+		}
 		id := tc.ID
 		o.stepCount++
 		if id == "" {
@@ -808,11 +1048,13 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 		actions = append(actions, NBAgentPlannerToolAction{
 			Tool:             name,
 			ToolInput:        args,
+			NativeToolInput:  nativeArgs,
 			ToolID:           id,
-			Log:              thought,
+			Log:              actionThought,
 			DisplayID:        fmt.Sprintf("E%d", o.stepCount),
 			TurnID:           turnID,
 			ThoughtSignature: signature,
+			MemoryRefs:       memoryRefs,
 		})
 	}
 
@@ -938,7 +1180,7 @@ func (o *NBReActPlanner4) humanText(input string) string {
 	isTopLevel := o.isTopLevel()
 	var memoryContextBlock, channelContextBlock string
 	if isTopLevel {
-		memoryContextBlock = strings.TrimSpace(renderMemoryContextBlock(o.request.MemoryContext))
+		memoryContextBlock = strings.TrimSpace(renderMemoryContextBlock(react4MemoryContext(o.request.MemoryContext)))
 		channelContextBlock = strings.TrimSpace(renderChannelContextBlock(o.request.ChannelContext))
 	}
 
@@ -1053,16 +1295,20 @@ func (o *NBReActPlanner4) renderTurn(steps []NBAgentPlannerToolActionStep, group
 		// The thought is shared by the whole batch (parseCompletion copies the
 		// same Log onto every sibling), so emit it once, ahead of the calls.
 		if len(assistantParts) == 0 {
-			if thought := strings.TrimSpace(step.Action.Log); thought != "" {
-				assistantParts = append(assistantParts, llms.TextContent{Text: step.Action.Log})
+			if thought := normalizeNativeToolThought(step.Action.Log); thought != "" {
+				assistantParts = append(assistantParts, llms.TextContent{Text: thought})
 			}
+		}
+		replayInput := step.Action.NativeToolInput
+		if replayInput == "" {
+			replayInput = step.Action.ToolInput
 		}
 		assistantParts = append(assistantParts, llms.ToolCall{
 			ID:   step.Action.ToolID,
 			Type: "function",
 			FunctionCall: &llms.FunctionCall{
 				Name:      step.Action.Tool,
-				Arguments: step.Action.ToolInput,
+				Arguments: replayInput,
 			},
 		})
 		results = append(results, llms.MessageContent{

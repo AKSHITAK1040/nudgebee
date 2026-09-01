@@ -138,6 +138,14 @@ func TestReAct4Base_ActionsNativeAnswerStructured(t *testing.T) {
 	assert.NotContains(t, out, "<tool_input>")
 }
 
+func TestReAct4MemoryRules_DoNotTeachLegacyActionGrammar(t *testing.T) {
+	out, err := nbprompts.GetPromptStrict(context.Background(), nbprompts.PromptMemoryConsumptionRules, "")
+	assert.NoError(t, err)
+	assert.NotContains(t, out, "<action>")
+	assert.NotContains(t, out, "<tool_name>")
+	assert.NotContains(t, out, "<tool_input>")
+}
+
 func TestReAct4Base_NotebookGating(t *testing.T) {
 	withNotebook := renderReact4BaseWithRoles(t, true, false, false, false)
 	assert.Contains(t, withNotebook, "update_notebook")
