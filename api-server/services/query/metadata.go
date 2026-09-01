@@ -3308,6 +3308,10 @@ var table_metadata = map[string]TableDefinition{
 		TenantIdColumnName:  "tenant_id",
 		AccountIdColumnName: "cloud_account_id",
 		Columns: map[string]ColumnDefinition{
+			"id": {
+				Type: ColumnDefinitionTypeString,
+				Def:  "id",
+			},
 			"tenant_id": {
 				Type: ColumnDefinitionTypeString,
 				Def:  "tenant_id",
