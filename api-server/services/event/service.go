@@ -392,12 +392,39 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 
 	revert, okRevert := queryData["revert"].(bool)
 	raisePR, okRaisePR := queryData["raisePR"].(bool)
+	// Undoing a previous attempt is not a card action — it re-applies what that attempt replaced,
+	// whatever the card was. It is handled once here rather than per card, so an action becomes
+	// undoable by recording a before-state, not by adding another branch below.
+	undoResolutionID, _ := queryData["undo_resolution_id"].(string)
 	// AggregationKey is a nullable column and is dereferenced throughout the
 	// branches below; fail fast instead of panicking on a nil pointer.
 	if r.AggregationKey == nil {
 		return EventRecommendationApplyResponse{}, fmt.Errorf("recommendation: event has no aggregation key")
 	}
-	if *r.AggregationKey == "KubePersistentVolumeFillingUp" || *r.AggregationKey == "KubernetesVolumeOutOfDiskSpace" {
+	if undoResolutionID != "" {
+		undoRequest, action, err := buildUndoRequest(ctx, undoResolutionID)
+		if err != nil {
+			return EventRecommendationApplyResponse{}, err
+		}
+		recommendationRequest = adapter.ApplyRecommendationRequest{
+			Data: query.Data.(map[string]any),
+			Recommendation: models.Recommendation{
+				Category:       "EventResolution",
+				RuleName:       *r.AggregationKey,
+				Id:             r.Id,
+				CloudAccountId: *r.CloudAccountId,
+				TenantId:       *r.Tenant,
+				Recommendation: models.NewJsonObject(map[string]any{
+					"account_id":    *r.CloudAccountId,
+					"action_name":   action,
+					"action_params": undoRequest,
+				}),
+				AccountObjectId: &query.EventId,
+			},
+			Resource:       cr,
+			ProviderConfig: query.ProviderConfig,
+		}
+	} else if *r.AggregationKey == "KubePersistentVolumeFillingUp" || *r.AggregationKey == "KubernetesVolumeOutOfDiskSpace" {
 		if queryData["size"] == "" || queryData["size"] == nil {
 			return EventRecommendationApplyResponse{}, fmt.Errorf("recommendation: to increase persistent volume size is required")
 		}
@@ -787,7 +814,10 @@ func ApplyEventResolution(ctx *security.RequestContext, query EventRecommendatio
 		}
 	} else if okRevert {
 		if revert {
-			request, err := getRevertRecommendationRequest(cr, r)
+			// Undo re-applies what the change introduced. It is the same operation in the other
+			// direction, so it goes through the same builder, dispatch, audit and record.
+			undo, _ := queryData["undo"].(bool)
+			request, err := getRevertRecommendationRequest(cr, r, undo)
 			if err != nil {
 				return EventRecommendationApplyResponse{}, err
 			}
@@ -1226,6 +1256,134 @@ func stringValue(v any) string {
 	return ""
 }
 
+// buildUndoRequest reconstructs the action that puts back what a previous attempt replaced.
+//
+// It re-dispatches the SAME action the attempt used, with the recorded before-state substituted for
+// the values that attempt wrote. That keeps undo uniform: an action becomes undoable by recording a
+// before-state, never by adding a bespoke undo branch that can drift from the apply it reverses.
+//
+// The coordinates (name, namespace, kind) are taken from the original task's params rather than
+// recomputed from the event, so an undo targets exactly what was changed even if the event's view of
+// the workload has since moved on.
+func buildUndoRequest(ctx *security.RequestContext, resolutionID string) (map[string]any, string, error) {
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return nil, "", err
+	}
+	var dataJSON, taskID string
+	if err := dbms.Db.QueryRow(
+		`SELECT COALESCE(data::text, '{}'), COALESCE(type_reference_id, '') FROM event_resolution WHERE id = $1`,
+		resolutionID).Scan(&dataJSON, &taskID); err != nil {
+		// Only a genuinely missing row is the caller's fault. A dropped connection or a timeout is
+		// ours, and reporting it as 400 would tell the operator their undo was invalid when the
+		// database was simply unreachable.
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, "", common.ErrorBadRequest("undo: the attempt to undo could not be found")
+		}
+		return nil, "", err
+	}
+	var data map[string]any
+	if err := common.UnmarshalJson([]byte(dataJSON), &data); err != nil {
+		return nil, "", common.ErrorBadRequest("undo: the attempt's record could not be read")
+	}
+	before, _ := data["before"].(map[string]any)
+	if len(before) == 0 {
+		// Either the action predates before-state capture, or it is one that cannot be undone —
+		// a restart has already happened, a PVC cannot shrink. Say so rather than dispatching
+		// something that would not restore anything.
+		return nil, "", common.ErrorBadRequest("undo: this action did not record what it replaced, so it cannot be undone")
+	}
+	if taskID == "" {
+		return nil, "", common.ErrorBadRequest("undo: the attempt has no task to reconstruct from")
+	}
+
+	var action, payloadJSON string
+	if err := dbms.Db.QueryRow(
+		`SELECT action, COALESCE(payload::text, '{}') FROM agent_task WHERE id = $1`, taskID).Scan(&action, &payloadJSON); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, "", common.ErrorBadRequest("undo: the original task could not be found")
+		}
+		return nil, "", err
+	}
+	var payload map[string]any
+	if err := common.UnmarshalJson([]byte(payloadJSON), &payload); err != nil {
+		return nil, "", common.ErrorBadRequest("undo: the original task's payload could not be read")
+	}
+	originalParams, _ := payload["action_params"].(map[string]any)
+
+	params := map[string]any{}
+	for _, key := range []string{"name", "namespace", "kind"} {
+		if v, ok := originalParams[key]; ok {
+			params[key] = v
+		}
+	}
+	// Each recorded shape maps to the param the apply path reads. Only shapes we can actually
+	// re-apply are recorded, so an unknown one means the record is from a newer writer than this
+	// code — refuse rather than dispatch a half-formed action.
+	switch {
+	case before["containers"] != nil:
+		params["containers"] = before["containers"]
+	case before["replicas"] != nil:
+		// replica_rightsizing reads replica_count, and accepts it as a number or a numeric string.
+		params["replica_count"] = before["replicas"]
+	default:
+		return nil, "", common.ErrorBadRequest("undo: the recorded before-state is not one this version can re-apply")
+	}
+	return params, action, nil
+}
+
+// storeUndoStateFromTask copies the pre-change state the agent reported into the resolution, under
+// data.before. Undo then means "apply data.before" for every action that has one, the same way a
+// revert's undo means "apply the other side of the diff".
+//
+// Kept on the resolution rather than in a side table: it describes one attempt, and event_resolution
+// .data is jsonb, so this is additive with no migration.
+//
+// Best-effort throughout. The action has already been applied successfully; failing to record how to
+// undo it must not turn a successful apply into a failed one.
+func storeUndoStateFromTask(ctx *security.RequestContext, dbms *database.DatabaseManager, resolution models.EventResolution) {
+	if resolution.TypeReferenceId == "" {
+		return
+	}
+	var response *string
+	if err := dbms.Db.QueryRow("SELECT response::text FROM agent_task WHERE id = $1", resolution.TypeReferenceId).Scan(&response); err != nil {
+		ctx.GetLogger().Warn("undo state: could not read agent task response", "error", err, "resolution_id", resolution.Id)
+		return
+	}
+	if response == nil || *response == "" {
+		return
+	}
+	var parsed map[string]any
+	if err := common.UnmarshalJson([]byte(*response), &parsed); err != nil {
+		return
+	}
+	// Only the shapes an undo can actually re-apply. An action whose agent reports nothing reusable
+	// records no before-state, and the UI offers no Undo for it — which is the honest outcome.
+	// An explicit null in the response is not a before-state. Storing it would leave data.before
+	// non-empty, which is what the UI tests to decide whether to offer Undo — so the button would
+	// appear and then fail, because a nil value re-applies nothing.
+	before := map[string]any{}
+	if containers, ok := parsed["previous_containers"]; ok && containers != nil {
+		before["containers"] = containers
+	}
+	if replicas, ok := parsed["previous_replicas"]; ok && replicas != nil {
+		before["replicas"] = replicas
+	}
+	if len(before) == 0 {
+		return
+	}
+	beforeJSON, err := common.MarshalJson(before)
+	if err != nil {
+		return
+	}
+	if _, err := dbms.Db.Exec(
+		`UPDATE event_resolution
+		    SET data = jsonb_set(COALESCE(data, '{}'::jsonb), '{before}', $2::jsonb, true)
+		  WHERE id = $1`, resolution.Id, string(beforeJSON)); err != nil {
+		ctx.GetLogger().Warn("undo state: could not record before-state", "error", err, "resolution_id", resolution.Id)
+	}
+}
+
 // auditEventResolutionApply records who applied a resolution to an event, and whether the dispatch
 // succeeded. Best-effort: an audit failure must never fail the apply that already happened.
 func auditEventResolutionApply(ctx *security.RequestContext, r models.Event, request adapter.ApplyRecommendationRequest, applyErr error) {
@@ -1299,7 +1457,7 @@ func auditEventResolutionApply(ctx *security.RequestContext, r models.Event, req
 // which consumes exactly this shape via Hikaru and ignores unknown params. The
 // Go agent prefers revert_paths whenever they are present. Drop the manifest
 // once the Python agent is retired.
-func getRevertRecommendationRequest(cr models.Resource, r models.Event) (map[string]any, error) {
+func getRevertRecommendationRequest(cr models.Resource, r models.Event, undo bool) (map[string]any, error) {
 	if cr.ResourceId == nil {
 		return map[string]any{}, common.ErrorBadRequest("event resolution: cannot revert, event is not linked to a cloud resource")
 	}
@@ -1313,7 +1471,7 @@ func getRevertRecommendationRequest(cr models.Resource, r models.Event) (map[str
 		"namespace": r.SubjectNamespace,
 		"kind":      kind,
 	}
-	revertPaths := extractRevertPaths(r)
+	revertPaths := extractRevertPaths(r, undo)
 	if len(revertPaths) > 0 {
 		request["revert_paths"] = revertPaths
 	}
@@ -1360,7 +1518,10 @@ func extractDiffOldManifest(r models.Event) string {
 // `old` is passed through untouched, including a null — the agent reads a null
 // (or absent) old value as "the change added this field", which reverts to
 // removing it rather than writing a null.
-func extractRevertPaths(r models.Event) []any {
+// undo reverses the revert: it re-applies the values the change introduced. Undoing a revert is a
+// revert with old and new swapped, so one builder serves both directions and there is no separate
+// undo path that could drift from the one that is exercised daily.
+func extractRevertPaths(r models.Event, undo bool) []any {
 	if r.Evidences == nil || !r.Evidences.IsArray() {
 		return nil
 	}
@@ -1392,7 +1553,12 @@ func extractRevertPaths(r models.Event) []any {
 			if path == "" {
 				continue
 			}
-			paths = append(paths, map[string]any{"path": path, "old": change["old"]})
+			// "old" is always the value to write; which side of the diff that is depends on direction.
+			target := change["old"]
+			if undo {
+				target = change["new"]
+			}
+			paths = append(paths, map[string]any{"path": path, "old": target})
 		}
 	}
 	return paths
@@ -1556,6 +1722,10 @@ func UpdateResolutionStatus(ctx *security.RequestContext) error {
 		}
 
 		if status == models.RecommendationResolutionStatusSuccess {
+			// The agent reports what it replaced; without capturing it here the applied value is
+			// recorded and the value it replaced is lost, so the action cannot be undone.
+			storeUndoStateFromTask(ctx, dbms, resolution)
+
 			_, err = dbms.Db.Exec("UPDATE events SET status = $3, updated_at = $2 WHERE id = $1", event.Id, time.Now().UTC().Format(time.RFC3339), "RESOLVED")
 			if err != nil {
 				ctx.GetLogger().Error("error closing recommendation", "error", err, "event_id", event.Id, "status", status)

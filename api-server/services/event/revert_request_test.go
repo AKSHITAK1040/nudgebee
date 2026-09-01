@@ -49,7 +49,7 @@ func TestGetRevertRecommendationRequest_SendsPathsNotManifest(t *testing.T) {
 	req, err := getRevertRecommendationRequest(deploymentResource, revertEvent([]any{
 		map[string]any{"path": "spec.template.metadata.annotations.rollme", "old": "zde7X", "new": "c4cjS"},
 		map[string]any{"path": "spec.template.spec.containers[0].image", "old": "registry/app:old", "new": "registry/app:new"},
-	}))
+	}), false)
 	require.NoError(t, err)
 
 	assert.Equal(t, "services-server", req["name"])
@@ -71,7 +71,7 @@ func TestGetRevertRecommendationRequest_SendsPathsNotManifest(t *testing.T) {
 func TestGetRevertRecommendationRequest_KeepsLegacyManifestForPythonAgent(t *testing.T) {
 	req, err := getRevertRecommendationRequest(deploymentResource, revertEvent([]any{
 		map[string]any{"path": "spec.replicas", "old": float64(2)},
-	}))
+	}), false)
 	require.NoError(t, err)
 	require.Contains(t, req, "deployment", "per-kind manifest missing: %#v", req)
 
@@ -93,7 +93,7 @@ func TestGetRevertRecommendationRequest_KeepsLegacyManifestForPythonAgent(t *tes
 // Without updated_values the paths can't be built, but the manifest alone still
 // lets a Python-agent tenant revert, so the request must not be refused.
 func TestGetRevertRecommendationRequest_ManifestOnly(t *testing.T) {
-	req, err := getRevertRecommendationRequest(deploymentResource, revertEvent(nil))
+	req, err := getRevertRecommendationRequest(deploymentResource, revertEvent(nil), false)
 	require.NoError(t, err)
 	assert.NotContains(t, req, "revert_paths")
 	assert.Contains(t, req, "deployment")
@@ -104,7 +104,7 @@ func TestGetRevertRecommendationRequest_ManifestOnly(t *testing.T) {
 func TestGetRevertRecommendationRequest_KeepsNullOld(t *testing.T) {
 	req, err := getRevertRecommendationRequest(deploymentResource, revertEvent([]any{
 		map[string]any{"path": "spec.template.metadata.annotations.rollme", "old": nil, "new": "c4cjS"},
-	}))
+	}), false)
 	require.NoError(t, err)
 	assert.Equal(t, []any{map[string]any{"path": "spec.template.metadata.annotations.rollme", "old": nil}}, req["revert_paths"])
 }
@@ -117,27 +117,27 @@ func TestGetRevertRecommendationRequest_NoDiffEvidence(t *testing.T) {
 		Id:               "evt-1",
 		SubjectNamespace: strPtr("shop"),
 		Evidences:        &empty,
-	})
+	}, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no recorded configuration change")
 }
 
 func TestGetRevertRecommendationRequest_Rejects(t *testing.T) {
 	t.Run("no cloud resource", func(t *testing.T) {
-		_, err := getRevertRecommendationRequest(models.Resource{}, revertEvent(nil))
+		_, err := getRevertRecommendationRequest(models.Resource{}, revertEvent(nil), false)
 		require.Error(t, err)
 	})
 	t.Run("malformed resource id", func(t *testing.T) {
-		_, err := getRevertRecommendationRequest(models.Resource{ResourceId: strPtr("services-server")}, revertEvent(nil))
+		_, err := getRevertRecommendationRequest(models.Resource{ResourceId: strPtr("services-server")}, revertEvent(nil), false)
 		require.Error(t, err)
 	})
 	t.Run("nil evidences", func(t *testing.T) {
-		_, err := getRevertRecommendationRequest(deploymentResource, models.Event{Id: "evt-1"})
+		_, err := getRevertRecommendationRequest(deploymentResource, models.Event{Id: "evt-1"}, false)
 		require.Error(t, err)
 	})
 	t.Run("diff evidence with neither paths nor manifest", func(t *testing.T) {
 		bare := models.NewJsonArray([]any{map[string]any{"type": "diff", "data": map[string]any{}}})
-		_, err := getRevertRecommendationRequest(deploymentResource, models.Event{Id: "evt-1", Evidences: &bare})
+		_, err := getRevertRecommendationRequest(deploymentResource, models.Event{Id: "evt-1", Evidences: &bare}, false)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "no recorded configuration change")
 	})
@@ -148,6 +148,39 @@ func TestExtractRevertPaths_SkipsMalformedEntries(t *testing.T) {
 		map[string]any{"path": "spec.replicas", "old": float64(2)},
 		map[string]any{"old": "orphan"}, // no path
 		"not-an-object",
-	}))
+	}), false)
 	assert.Equal(t, []any{map[string]any{"path": "spec.replicas", "old": float64(2)}}, paths)
+}
+
+// Undoing a revert is the same operation with the diff read the other way round. One builder serves
+// both directions, so the undo path cannot drift from the revert path that runs every day.
+func TestGetRevertRecommendationRequest_UndoReappliesTheChange(t *testing.T) {
+	event := revertEvent([]any{
+		map[string]any{"path": "spec.template.spec.containers[0].image", "old": "app:v1", "new": "app:v2"},
+	})
+
+	revert, err := getRevertRecommendationRequest(deploymentResource, event, false)
+	require.NoError(t, err)
+	assert.Equal(t,
+		[]any{map[string]any{"path": "spec.template.spec.containers[0].image", "old": "app:v1"}},
+		revert["revert_paths"], "revert writes the value from before the change")
+
+	undo, err := getRevertRecommendationRequest(deploymentResource, event, true)
+	require.NoError(t, err)
+	assert.Equal(t,
+		[]any{map[string]any{"path": "spec.template.spec.containers[0].image", "old": "app:v2"}},
+		undo["revert_paths"], "undo writes the value the change introduced")
+}
+
+// A field the change ADDED has old=null, so reverting deletes it. Undoing that must put it back
+// rather than delete it again — the asymmetry that makes a naive "re-run it" undo wrong.
+func TestGetRevertRecommendationRequest_UndoRestoresAnAddedField(t *testing.T) {
+	event := revertEvent([]any{
+		map[string]any{"path": "spec.template.metadata.annotations.rollme", "old": nil, "new": "c4cjS"},
+	})
+	undo, err := getRevertRecommendationRequest(deploymentResource, event, true)
+	require.NoError(t, err)
+	assert.Equal(t,
+		[]any{map[string]any{"path": "spec.template.metadata.annotations.rollme", "old": "c4cjS"}},
+		undo["revert_paths"])
 }
