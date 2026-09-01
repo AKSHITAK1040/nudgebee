@@ -262,6 +262,14 @@ const agentEventSourceName = "prometheus"
 
 // normalizeEventSource resolves the canonical source for a metric rule from the
 // available provider signals on the request. Order of precedence:
+//  0. Webhook-ingested source (`*_webhook`) — keep as-is. A webhook rule describes an
+//     alert that already exists in the external system, so its source must never be
+//     reverse-mapped onto the provider's own source: that would route it into the
+//     external-create branch in CreateEventRule and try to create a *second* rule there
+//     (elasticsearch_webhook + metric_provider ES resolved to source `elasticsearch`,
+//     and every ES-webhook alert died on a Watcher PUT instead of landing in the rule
+//     table), and it would also defeat the `_webhook` guards on the upsert and on
+//     playbook creation.
 //  1. Explicit external provider (`source` already names a known external system) — keep as-is.
 //  2. Explicit `metric_provider` — reverse-map to its source.
 //  3. Default / ambiguous (`source` is "" or "nudgebee") for a metric rule with no
@@ -273,6 +281,9 @@ const agentEventSourceName = "prometheus"
 // upsertEventRule — otherwise a request with no AlertType lands in the DB as
 // alert_type=metric but skips this normalization.
 func normalizeEventSource(req *EventConfig) {
+	if isWebhookSource(req.Source) {
+		return
+	}
 	if isExternalProviderSource(req.Source) {
 		return
 	}
