@@ -225,6 +225,26 @@ func TestReAct4_ThoughtSchemaIsRequiredWithoutMutatingOriginal(t *testing.T) {
 	assert.NoError(t, googleai.ValidateTools(augmented))
 }
 
+func TestReAct4_MetadataSchemasPreserveJSONDecodedRequiredFields(t *testing.T) {
+	original := []llms.Tool{{
+		Type: "function",
+		Function: &llms.FunctionDefinition{
+			Name: "kubectl",
+			Parameters: map[string]any{
+				"type":       "object",
+				"required":   []any{"command", "namespace"},
+				"properties": map[string]any{},
+			},
+		},
+	}}
+
+	augmented := withReact4MemoryAttributionSchemas(withReact4ThoughtSchemas(original))
+	parameters := augmented[0].Function.Parameters.(map[string]any)
+
+	assert.Equal(t, []any{"command", "namespace"}, original[0].Function.Parameters.(map[string]any)["required"])
+	assert.Equal(t, []string{"command", "namespace", react4ThoughtArgument, react4MemoryRefsArgument}, parameters["required"])
+}
+
 func TestReAct4_ParseCompletion_ExtractsMemoryRefsPerNativeCall(t *testing.T) {
 	o := &NBReActPlanner4{}
 	nativeInput := `{"command":"get pods -n payments","_thought":"Checking pods.","_memory_refs":[{"position":2,"note":" default namespace "},{"position":2,"note":"duplicate"},{"position":0}]}`

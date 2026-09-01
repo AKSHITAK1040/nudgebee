@@ -681,8 +681,7 @@ func withReact4ThoughtSchemas(tools []llms.Tool) []llms.Tool {
 		}
 		parametersCopy["properties"] = propertiesCopy
 
-		required, _ := parameters["required"].([]string)
-		requiredCopy := append([]string(nil), required...)
+		requiredCopy := react4SchemaRequiredFields(parameters["required"])
 		if !slices.Contains(requiredCopy, react4ThoughtArgument) {
 			requiredCopy = append(requiredCopy, react4ThoughtArgument)
 		}
@@ -691,6 +690,27 @@ func withReact4ThoughtSchemas(tools []llms.Tool) []llms.Tool {
 		out[i].Function = &definition
 	}
 	return out
+}
+
+// react4SchemaRequiredFields normalizes both programmatically constructed
+// schemas ([]string) and JSON-decoded schemas ([]any). Keeping this conversion
+// at the decorator boundary prevents reserved planner fields from accidentally
+// replacing a tool's original required arguments if the schema source changes.
+func react4SchemaRequiredFields(value any) []string {
+	switch fields := value.(type) {
+	case []string:
+		return slices.Clone(fields)
+	case []any:
+		required := make([]string, 0, len(fields))
+		for _, field := range fields {
+			if name, ok := field.(string); ok {
+				required = append(required, name)
+			}
+		}
+		return required
+	default:
+		return nil
+	}
 }
 
 // extractReact4Thought separates planner metadata from executable tool input.
@@ -752,8 +772,7 @@ func withReact4MemoryAttributionSchemas(tools []llms.Tool) []llms.Tool {
 			},
 		}
 		parametersCopy["properties"] = propertiesCopy
-		required, _ := parameters["required"].([]string)
-		requiredCopy := append([]string(nil), required...)
+		requiredCopy := react4SchemaRequiredFields(parameters["required"])
 		if !slices.Contains(requiredCopy, react4MemoryRefsArgument) {
 			requiredCopy = append(requiredCopy, react4MemoryRefsArgument)
 		}
