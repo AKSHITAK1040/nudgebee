@@ -52,6 +52,32 @@ const NODE_TYPE_LABELS = {
   ServerlessFunction: 'FN',
 };
 
+// Readable form of a node's specific_type, shown under the name. The badge above
+// carries the ontological type (WKL, K8S) and cannot separate a Deployment from a
+// StatefulSet, nor say what a K8sService actually is — which matters because a
+// workload and the service in front of it share a name and a namespace, so on a
+// dependency graph they are otherwise two identical-looking nodes.
+const SPECIFIC_TYPE_LABELS = {
+  KubernetesDeployment: 'Deployment',
+  KubernetesStatefulSet: 'StatefulSet',
+  KubernetesDaemonSet: 'DaemonSet',
+  KubernetesJob: 'Job',
+  KubernetesCronJob: 'CronJob',
+  KubernetesService: 'Service',
+};
+
+// specificTypeLabel returns what to print under the node name, or '' when there is
+// nothing to add. Types whose specific_type merely repeats node_type (Service,
+// Storage, ExternalService, Database, MessageQueue) contribute no information and
+// are skipped; a cloud type with no mapping falls back to its raw specific_type,
+// which is already short and self-describing (EC2Instance, S3Bucket, RDSInstance).
+export function specificTypeLabel(specificType, nodeType) {
+  if (!specificType || specificType === nodeType) {
+    return '';
+  }
+  return SPECIFIC_TYPE_LABELS[specificType] || specificType;
+}
+
 // Cached promise of the dynamically-loaded ELK instance. The constructor spawns
 // a worker, so keeping it to one instance across re-layouts avoids repeated
 // worker spawn cost. Reset to null on import failure so a transient network
@@ -65,12 +91,18 @@ const getLayoutedElements = async (nodes, edges) => {
   const graph = {
     id: 'root',
     layoutOptions: ELK_OPTIONS,
+    // ELK positions nodes from the dimensions given here, so the height has to
+    // track how many subtitle lines the node actually renders — a node carrying
+    // both a specific type and a namespace/cluster line is taller than one with
+    // neither, and understating it makes neighbours overlap. 42 is the name line
+    // plus padding; each subtitle line adds 18. Two lines therefore still measure
+    // the 60 this used to hardcode.
     children: nodes.map((node) => ({
       ...node,
       targetPosition: 'left',
       sourcePosition: 'right',
       width: 220,
-      height: 60,
+      height: 42 + [node.data?.specificType, node.data?.scope].filter(Boolean).length * 18,
     })),
     edges: edges,
   };
@@ -149,7 +181,21 @@ const KGNode = memo(({ data }) => {
         >
           {data.name}
         </Typography>
-        {data.namespace ? (
+        {data.specificType ? (
+          <Typography
+            sx={{
+              fontSize: 'var(--ds-text-caption)',
+              color: ds.gray[600],
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              maxWidth: ds.space.mul(0, 70),
+            }}
+          >
+            {data.specificType}
+          </Typography>
+        ) : null}
+        {data.scope ? (
           <Typography
             sx={{
               fontSize: 'var(--ds-text-caption)',
@@ -159,8 +205,9 @@ const KGNode = memo(({ data }) => {
               textOverflow: 'ellipsis',
               maxWidth: ds.space.mul(0, 70),
             }}
+            title={data.scope}
           >
-            {data.namespace}
+            {data.scope}
           </Typography>
         ) : null}
       </Box>
@@ -184,12 +231,17 @@ function transformKGData(kgNodes, kgEdges, targetService) {
     const color = NODE_TYPE_COLORS[nodeType] || ds.gray[500];
     const typeLabel = NODE_TYPE_LABELS[nodeType] || nodeType.substring(0, 3).toUpperCase();
     const isTarget = name === targetService;
+    const specificType = specificTypeLabel(node.specific_type, nodeType);
+    // Namespace and cluster on one line. The cluster is what separates two nodes
+    // that are otherwise identical on screen — the same workload in a dev and a
+    // prod cluster under one tenant — so it is shown whenever the graph carries it.
+    const scope = [namespace, node.properties?.cluster].filter(Boolean).join(' · ');
 
     return {
       id: node.id,
       type: 'kg-node',
       position: { x: 0, y: 0 },
-      data: { name, namespace, color, typeLabel, isTarget, nodeType },
+      data: { name, namespace, scope, specificType, color, typeLabel, isTarget, nodeType },
     };
   });
 
