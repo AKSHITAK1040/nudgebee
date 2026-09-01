@@ -157,6 +157,10 @@ const transformTableData = (
     const accountName = account?.label || account?.account_name || item.account_id;
     const cloudProvider = account?.cloud_provider || accountType;
     const namespaceLabel = cloudProvider && cloudProvider !== 'K8s' ? 'service' : 'ns';
+    // How many distinct subjects (pod replicas, cloud resources) the row's workload collapses
+    // (#37273) — shown so the grouping is visible rather than silently hiding replicas.
+    const subjectLabel = cloudProvider && cloudProvider !== 'K8s' ? 'resources' : 'pods';
+    const collapsedSubjectCount = Number(item.count_subject_name) || 0;
 
     // Common Drilldown Props
     const commonDrilldown = {
@@ -203,7 +207,7 @@ const transformTableData = (
           component: (
             <Box>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 'var(--ds-space-1)' }}>
-                <Text showAutoEllipsis value={item.subject_name} style={{ fontWeight: 'var(--ds-font-weight-medium)' }} />
+                <Text showAutoEllipsis value={item.subject_owner} style={{ fontWeight: 'var(--ds-font-weight-medium)' }} />
                 {item.is_new_issue && (
                   <Tooltip
                     title={`First seen: ${
@@ -248,6 +252,7 @@ const transformTableData = (
               </Box>
               {isTroubleshootPage && <Text value={`acc: ${accountName}`} secondaryText showAutoEllipsis />}
               {item.subject_namespace && <Text value={`${namespaceLabel}: ${item.subject_namespace}`} secondaryText showAutoEllipsis />}
+              {collapsedSubjectCount > 1 && <Text value={`${collapsedSubjectCount} ${subjectLabel} affected`} secondaryText showAutoEllipsis />}
               {hasExistingTicket && <TicketLink ticketURL={existingTicket?.url} ticketID={existingTicket?.ticket_id} />}
             </Box>
           ),
@@ -695,7 +700,9 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
 
     return [
       `Event: ${data?.aggregation_key || ''}`,
-      `Subject: ${data?.subject_name || ''}`,
+      // Fingerprint rows carry the owning workload (subject_owner); the app/event_type
+      // variants still group on subject_name.
+      `Subject: ${data?.subject_owner || data?.subject_name || ''}`,
       `Namespace: ${data?.subject_namespace || ''}`,
       `Occurrences: ${data?.fingerprint_event_count ?? data?.event_count ?? ''}`,
       firstOccurred ? `Happening Since: ${firstOccurred}` : '',
@@ -884,7 +891,8 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
       cols = [
         'max_created_at',
         'event_count',
-        'subject_name',
+        'subject_owner',
+        'count_subject_name',
         'subject_namespace',
         'aggregation_key',
         'distinct_priority',
@@ -907,7 +915,12 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
         'is_incident_child',
         'incident_group_leader_id',
       ];
-      groupCols = ['tenant_id', 'account_id', 'subject_name', 'subject_namespace', 'aggregation_key', 'fingerprint'];
+      // Grouped by the workload, not by the pod (#37273). A fingerprint resolves to the
+      // owning workload, so grouping on subject_name split one deployment's replicas into
+      // separate rows that shared a fingerprint — and therefore shared a Count and a
+      // drill-down, since both are fingerprint-scoped. subject_owner falls back to
+      // subject_name for events with no owner, so those keep a row each.
+      groupCols = ['tenant_id', 'account_id', 'subject_owner', 'subject_namespace', 'aggregation_key', 'fingerprint'];
     } else if (groupEventType === 'app') {
       cols = [
         'max_created_at',

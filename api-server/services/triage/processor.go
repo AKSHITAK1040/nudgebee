@@ -192,6 +192,17 @@ func detectAndRecordDuplicate(ctx context.Context, db sqlx.ExtContext, event *mo
 
 	// Query event_duplicates to find existing chain for this fingerprint
 	// Also fetch the first event's nb_status to check if we should start a new chain
+	//
+	// Ordered by the chain member's own start time, NOT by occurrence_number. Ordering by
+	// occurrence_number was correct while chains were immortal, since the number only ever
+	// grew — but the dedup window below resets it to 1 on every new chain, so the highest
+	// occurrence for a fingerprint is the PRE-BREAK peak, not the latest occurrence. Reading
+	// that stale row makes every subsequent event measure its gap against an event from
+	// before the break, exceed the window, and open yet another chain at occurrence 1: once
+	// a chain breaks, it can never grow past 1 again. Observed on test as 12 consecutive
+	// hourly re-fires of one deployment all stuck at occurrence_number = 1, which is also
+	// what silently disables event_triage_rules.match_occurrence_greater_than. Inside an
+	// unbroken chain both orderings pick the same row, so the normal path is unchanged.
 	chainQuery := `
 		SELECT
 			ed.first_event_id,
@@ -207,7 +218,7 @@ func detectAndRecordDuplicate(ctx context.Context, db sqlx.ExtContext, event *mo
 		WHERE ed.fingerprint = $1
 		  AND ed.cloud_account_id = $2
 		  AND ed.event_id != $3
-		ORDER BY ed.occurrence_number DESC
+		ORDER BY latest_e.starts_at DESC, ed.occurrence_number DESC
 		LIMIT 1
 	`
 
