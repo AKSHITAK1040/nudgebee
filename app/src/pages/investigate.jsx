@@ -6,7 +6,7 @@ import { ds } from 'src/utils/colors';
 import apiKubernetes from '@api1/kubernetes';
 import CollapsableCard from '@shared/widgets/CollapsableCard';
 import InvestigateSidebar from '@components/k8s/investigate/InvestigateSidebar';
-import { safeJSONParse } from 'src/utils/common';
+import { safeJSONParse, parseHttpResponseBodyMessage } from 'src/utils/common';
 import { buildEventSubjectHref } from 'src/utils/eventSubjectLink';
 import TicketCreatePopupForm from '@components/tickets/TicketCreatePopupForm';
 import TicketIcon from '@assets/TicketIcon';
@@ -21,7 +21,15 @@ import { getNubiIconUrl, useTenantBranding, DEFAULT_TITLE } from '@hooks/useTena
 import { useNubiGlobalChat } from '@context/NubiGlobalChatContext';
 import { Label } from '@ui/Label';
 import Datetime from '@shared/format/Datetime';
-import { describeResolution, describeActionKind, describeActionEffect } from '@components/k8s/investigate/resolutionStatus';
+import {
+  describeResolution,
+  describeActionKind,
+  describeActionEffect,
+  describeUndo,
+  describeActionTitle,
+  describeUndoTarget,
+} from '@components/k8s/investigate/resolutionStatus';
+import UndoConfirmDialog from '@components/k8s/investigate/UndoConfirmDialog';
 import RecurrenceSince from '@components/k8s/investigate/RecurrenceSince';
 import apiRecommendations from '@api1/recommendation';
 import apiTriage from '@api1/triage';
@@ -1744,6 +1752,44 @@ const Investigate = () => {
   // signpost at the end of the analysis, so both agree without recomputing the filter.
   const remediationActionCount = matchedOptions.filter(shouldShowResolveButton).length;
 
+  // Undo dispatches through the same apply endpoint as everything else, so it is recorded, audited
+  // and polled exactly like the action it reverses — an undo is an action, not a special case.
+  const [undoingCardId, setUndoingCardId] = useState(null);
+  const [pendingUndo, setPendingUndo] = useState(null);
+  // Mirrors the account currently on screen, so an undo that resolves after a shallow re-route can
+  // tell whether its result still belongs to what the operator is looking at.
+  const undoAccountRef = useRef(row?.cloud_account_id || router.query.accountId);
+  useEffect(() => {
+    undoAccountRef.current = row?.cloud_account_id || router.query.accountId;
+  }, [row?.cloud_account_id, router.query.accountId]);
+  const handleUndo = useCallback(
+    async (cardId, payload) => {
+      // The page re-routes shallowly (see the router.push with { shallow: true } above), so the
+      // account can change underneath an in-flight undo without this component ever unmounting.
+      // Capture the account the request was sent for and drop the result if it has moved on, rather
+      // than reporting one account's outcome while another is on screen.
+      const requestAccountId = row?.cloud_account_id || router.query.accountId;
+      setUndoingCardId(cardId);
+      try {
+        const res = await apiRecommendations.applyRecommendation(requestAccountId, row?.id, payload, 'kubernetes', {}, 'event');
+        if (undoAccountRef.current !== requestAccountId) return;
+        if (res?.errors) {
+          snackbar.error(`Undo failed: ${parseHttpResponseBodyMessage(res) || 'the request was rejected'}`);
+        } else {
+          snackbar.success('Undo started');
+          // The new attempt is InProgress, so this restarts the poll that renders its outcome.
+          refetchEventResolutions();
+        }
+      } catch (err) {
+        if (undoAccountRef.current !== requestAccountId) return;
+        snackbar.error(`Undo failed: ${err?.message || 'the request could not be sent'}`);
+      } finally {
+        setUndoingCardId(null);
+      }
+    },
+    [row?.cloud_account_id, row?.id, router.query.accountId, refetchEventResolutions]
+  );
+
   // Every resolution on this event, newest first — the fixes still offered above show only their
   // latest attempt, and an action that is no longer offered (or was started by Nubi or an
   // automation) would otherwise leave no trace on the page at all.
@@ -1771,7 +1817,15 @@ const Investigate = () => {
   }, [eventResolutions]);
 
   const previousRuns = useMemo(() => {
-    const rows = Array.isArray(eventResolutions) ? eventResolutions : [];
+    // The newest attempt per card is already rendered on its action row with its state, actor and
+    // time. Repeating it verbatim under History made one attempt look like two.
+    const shownOnActionRow = new Set(
+      matchedOptions
+        .filter(shouldShowResolveButton)
+        .map((option) => getResolutionForCard(option.id)?.id)
+        .filter(Boolean)
+    );
+    const rows = (Array.isArray(eventResolutions) ? eventResolutions : []).filter((run) => !shownOnActionRow.has(run?.id));
     const grouped = [];
     for (const run of rows) {
       // Prefer the label of the card that offered the action. Without this the same fix reads as
@@ -2553,7 +2607,10 @@ const Investigate = () => {
                                       >
                                         <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], minWidth: 0 }}>
                                           <Box sx={{ display: 'flex', alignItems: 'center', gap: ds.space[2], flexWrap: 'wrap' }}>
-                                            <Text value={resolvableOption.text} sx={{ fontSize: ds.text.bodyLg, fontWeight: ds.weight.medium }} />
+                                            <Text
+                                              value={describeActionTitle(resolvableOption.id, resolvableOption.text)}
+                                              sx={{ fontSize: ds.text.bodyLg, fontWeight: ds.weight.medium }}
+                                            />
                                             {/* Whether this removes the cause or only restores service —
                                                 the distinction the remediation panel already draws for
                                                 Nubi's actions, applied to these too. */}
@@ -2617,6 +2674,33 @@ const Investigate = () => {
                                                   View PR
                                                 </Link>
                                               )}
+                                              {/* Only shown where the attempt recorded how to put things back. An action
+                                                  that recorded nothing — a restart, a PVC resize — offers no button rather
+                                                  than one that would fail. */}
+                                              {(() => {
+                                                const undoable = describeUndo(resolution, resolvableOption.id, resolvableOption);
+                                                return undoable ? (
+                                                  <Button
+                                                    tone='secondary'
+                                                    size='sm'
+                                                    loading={undoingCardId === resolvableOption.id}
+                                                    disabled={!!undoingCardId}
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      // Opens the review step rather than mutating the workload — an undo
+                                                      // is a rollout, and one click was too few to ask for it.
+                                                      setPendingUndo({
+                                                        cardId: resolvableOption.id,
+                                                        actionTitle: describeActionTitle(resolvableOption.id, resolvableOption.text),
+                                                        target: describeUndoTarget(resolvableOption, row),
+                                                        ...undoable,
+                                                      });
+                                                    }}
+                                                  >
+                                                    {undoable.label}
+                                                  </Button>
+                                                ) : null;
+                                              })()}
                                             </>
                                           ) : (
                                             <Button
@@ -2934,6 +3018,20 @@ const Investigate = () => {
           </>
         )}
       </Box>
+      <UndoConfirmDialog
+        open={!!pendingUndo}
+        onClose={() => setPendingUndo(null)}
+        loading={!!undoingCardId}
+        label={pendingUndo?.label}
+        actionTitle={pendingUndo?.actionTitle}
+        target={pendingUndo?.target}
+        preview={pendingUndo?.preview}
+        onConfirm={() => {
+          const pending = pendingUndo;
+          setPendingUndo(null);
+          if (pending) handleUndo(pending.cardId, pending.payload);
+        }}
+      />
     </>
   );
 };

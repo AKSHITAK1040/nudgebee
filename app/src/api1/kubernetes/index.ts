@@ -696,8 +696,8 @@ query AiRemediationGet($accountId: String!, $eventId: String) {
 `;
 
 export const AI_REMEDIATION_EXECUTE = `
-mutation AiRemediationExecute($accountId: String!, $eventId: String, $command: String!, $configName: String, $slot: String) {
-  ai_remediation_execute(account_id: $accountId, event_id: $eventId, command: $command, config_name: $configName, slot: $slot) {
+mutation AiRemediationExecute($accountId: String!, $eventId: String, $command: String!, $configName: String, $slot: String, $executeCommand: String) {
+  ai_remediation_execute(account_id: $accountId, event_id: $eventId, command: $command, config_name: $configName, slot: $slot, execute_command: $executeCommand) {
     data
   }
 }
@@ -3870,7 +3870,16 @@ query k8s_event_groupings($limit:Int,$offset:Int){
     });
     return response?.data?.data?.ai_remediation_get?.data;
   },
-  async executeRemediationCommand(accountId: string, command: string, eventId?: string, configName?: string, slot?: string) {
+  async executeRemediationCommand(
+    accountId: string,
+    command: string,
+    eventId?: string,
+    configName?: string,
+    slot?: string,
+    // The action's execute command, sent on a verify run so the server can attach the result to the
+    // attempt it checked rather than filing it as an attempt of its own.
+    executeCommand?: string
+  ) {
     if (accountId === 'demo') return null;
     const response = await queryGraphQL(AI_REMEDIATION_EXECUTE, 'AiRemediationExecute', {
       accountId,
@@ -3878,6 +3887,7 @@ query k8s_event_groupings($limit:Int,$offset:Int){
       command,
       configName: configName || null,
       slot: slot || null,
+      executeCommand: executeCommand || null,
     });
     return response?.data?.data?.ai_remediation_execute?.data;
   },

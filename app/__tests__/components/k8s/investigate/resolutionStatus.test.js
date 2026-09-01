@@ -1,4 +1,14 @@
-import { describeResolution, describeActionKind, describeActionEffect, RESOLUTION_SLOW_AFTER_MS } from '@components/k8s/investigate/resolutionStatus';
+import {
+  describeResolution,
+  describeActionKind,
+  describeActionEffect,
+  describeUndo,
+  describeActionTitle,
+  describeUndoTarget,
+  describeBeforeStatePreview,
+  describeRevertUndoPreview,
+  RESOLUTION_SLOW_AFTER_MS,
+} from '@components/k8s/investigate/resolutionStatus';
 
 // The event page previously rendered the raw enum ("LAST DEPLOYMENT CHANGE: IN PROGRESS") and threw
 // away resolver and error, so an operator could not tell who acted or why it failed.
@@ -107,5 +117,194 @@ describe('describeActionEffect', () => {
   it('returns nothing for actions we have not described', () => {
     expect(describeActionEffect('AskAiCard')).toBeNull();
     expect(describeActionEffect(undefined)).toBeNull();
+  });
+});
+
+// A verify result rides on the attempt it checked (data.verify), never as its own resolution.
+// This is what makes "Done" mean "ran and was checked" rather than just "dispatched".
+describe('describeResolution with verification', () => {
+  const NOW = new Date('2026-08-31T10:00:00Z').getTime();
+  const withVerify = (verify) => ({ status: 'Success', updated_at: new Date(NOW).toISOString(), data: { verify } });
+
+  it('stays Done when the check confirmed the fix', () => {
+    const v = describeResolution(withVerify({ ran: true, passed: true }), NOW);
+    expect(v).toMatchObject({ label: 'Done', tone: 'success', verified: true });
+  });
+
+  it('is Needs checking when the check ran and failed', () => {
+    const v = describeResolution(withVerify({ ran: true, passed: false }), NOW);
+    expect(v).toMatchObject({ label: 'Needs checking', tone: 'warning' });
+    expect(v.detail).toMatch(/did not confirm/i);
+  });
+
+  // Exit 0 having observed nothing — the distinction the whole three-valued design exists for.
+  it('is Needs checking when the check proved nothing', () => {
+    const v = describeResolution(withVerify({ ran: true, passed: null }), NOW);
+    expect(v).toMatchObject({ label: 'Needs checking', tone: 'warning' });
+    expect(v.detail).toMatch(/confirmed nothing/i);
+  });
+
+  // Card fixes have no verify command yet; they must keep reading exactly as they do today.
+  it('is unchanged when no verify ran', () => {
+    expect(describeResolution({ status: 'Success' }, NOW)).toMatchObject({ label: 'Done', tone: 'success' });
+    expect(describeResolution({ status: 'Success', data: {} }, NOW)).toMatchObject({ label: 'Done' });
+  });
+
+  it('reads data whether it arrives parsed or as a string', () => {
+    const asString = { status: 'Success', data: JSON.stringify({ verify: { ran: true, passed: false } }) };
+    expect(describeResolution(asString, NOW)).toMatchObject({ label: 'Needs checking' });
+  });
+});
+
+// An action is undoable only where the attempt recorded how to put things back. Offering a button
+// that cannot work is worse than offering none.
+describe('describeUndo', () => {
+  const done = (extra = {}) => ({ id: 'res-1', status: 'Success', ...extra });
+
+  it('offers to undo a revert from the event diff', () => {
+    const u = describeUndo(done(), 'LastDeploymentCard');
+    expect(u.label).toBe('Undo revert');
+    expect(u.payload).toMatchObject({ revert: true, undo: true });
+  });
+
+  it('offers to undo any action that recorded a before-state', () => {
+    const u = describeUndo(done({ data: { before: { containers: [{ container_name: 'app' }] } } }), 'MemoryAllocationCard');
+    expect(u.label).toBe('Undo');
+    // Keyed on the attempt, so the server re-dispatches that action with what it replaced.
+    expect(u.payload).toMatchObject({ undo_resolution_id: 'res-1' });
+  });
+
+  // A restart has already happened; a PVC cannot shrink. Neither records a before-state.
+  it('offers nothing when the attempt recorded no way back', () => {
+    expect(describeUndo(done(), 'MemoryAllocationCard')).toBeNull();
+    expect(describeUndo(done({ data: {} }), 'MemoryAllocationCard')).toBeNull();
+    expect(describeUndo(done({ data: { before: {} } }), 'MemoryAllocationCard')).toBeNull();
+  });
+
+  it('offers nothing for an attempt that has not succeeded', () => {
+    expect(describeUndo({ id: 'r', status: 'InProgress' }, 'LastDeploymentCard')).toBeNull();
+    expect(describeUndo({ id: 'r', status: 'Failed' }, 'LastDeploymentCard')).toBeNull();
+    expect(describeUndo(null, 'LastDeploymentCard')).toBeNull();
+  });
+
+  it('reads the record whether it arrives parsed or as a string', () => {
+    const asString = done({ data: JSON.stringify({ before: { containers: [] } }) });
+    // An empty containers list is still a recorded before-state.
+    expect(describeUndo(asString, 'MemoryAllocationCard')).toMatchObject({ label: 'Undo' });
+  });
+});
+
+// Card ids are not uniform — LastDeploymentCard carries a positional suffix, MemoryAllocationCard
+// does not. Keying on the raw id silently skipped every numbered card, so the revert card lost its
+// Fix label, its effect line and its Undo button while the resource card kept all three.
+describe('card ids with a positional suffix', () => {
+  it('classifies a suffixed card the same as a bare one', () => {
+    expect(describeActionKind('LastDeploymentCard_0')).toMatchObject({ kind: 'fix' });
+    expect(describeActionKind('LastDeploymentCard_3')).toMatchObject({ kind: 'fix' });
+    expect(describeActionKind('LastDeploymentCard')).toMatchObject({ kind: 'fix' });
+  });
+
+  it('describes the effect of a suffixed card', () => {
+    expect(describeActionEffect('LastDeploymentCard_0')).toMatch(/rolling restart/i);
+  });
+
+  it('offers Undo on a suffixed card', () => {
+    const u = describeUndo({ id: 'r1', status: 'Success' }, 'LastDeploymentCard_0');
+    expect(u).toMatchObject({ label: 'Undo revert' });
+  });
+
+  // Only a trailing index is stripped; an unrelated card must not be coerced into a known one.
+  it('does not turn an unknown card into a known one', () => {
+    expect(describeActionKind('SomeOtherCard_0')).toBeNull();
+    expect(describeActionKind('LastDeploymentCardExtra')).toBeNull();
+  });
+});
+
+describe('describeActionTitle', () => {
+  // The card text names the finding, not the action. Attaching a state to the finding produced
+  // "Last Deployment Change · Done", which reads as the deployment change being done.
+  it('names what the action does, not what the card found', () => {
+    expect(describeActionTitle('LastDeploymentCard_0', 'Last Deployment Change')).toBe('Revert the last deployment change');
+    expect(describeActionTitle('MemoryAllocationCard', 'Check if Resource allocation is sufficient')).toBe('Adjust resource requests and limits');
+  });
+
+  it('treats a suffixed id the same as a bare one', () => {
+    expect(describeActionTitle('LastDeploymentCard_3', 'x')).toBe(describeActionTitle('LastDeploymentCard', 'x'));
+  });
+
+  it('falls back to the card text for a card it does not know', () => {
+    expect(describeActionTitle('SomeNewCard', 'Do the thing')).toBe('Do the thing');
+  });
+
+  it('never returns an empty label', () => {
+    expect(describeActionTitle('SomeNewCard', '')).toBeTruthy();
+    expect(describeActionTitle(undefined, undefined)).toBeTruthy();
+  });
+});
+
+// Undo mutates a live workload. The confirmation is only worth having if it states the real change,
+// so the preview must come from the same recorded data the server re-applies.
+describe('undo preview', () => {
+  const successfulRevert = { status: 'Success', id: 'r1' };
+
+  it('previews an undo-revert as the diff it re-applies, oriented from what is running now', () => {
+    const card = { diff: { data: { old: 'image: v1', new: 'image: v2' } } };
+    const preview = describeUndo(successfulRevert, 'LastDeploymentCard_0', card).preview;
+    expect(preview.kind).toBe('diff');
+    expect(preview.before).toBe('image: v1'); // the reverted-to state, live right now
+    expect(preview.after).toBe('image: v2'); // what undo puts back
+    expect(preview.beforeLabel).toBe('Running now');
+  });
+
+  it('does not invent a diff when the event never recorded one', () => {
+    expect(describeRevertUndoPreview({}).kind).toBe('unknown');
+    expect(describeRevertUndoPreview({ diff: { data: { old: 'same', new: 'same' } } }).kind).toBe('unknown');
+  });
+
+  it('lists the values a generic undo restores', () => {
+    const preview = describeBeforeStatePreview({
+      containers: [{ container_name: 'app', cpu_request: '100m', memory_limit: '512Mi' }],
+    });
+    expect(preview.kind).toBe('values');
+    expect(preview.groups[0].name).toBe('app');
+    expect(preview.groups[0].fields).toEqual([
+      { label: 'CPU request', value: '100m' },
+      { label: 'Memory limit', value: '512Mi' },
+    ]);
+  });
+
+  it('omits fields that were unset before the change rather than showing them as empty', () => {
+    // An absent limit means "there was no limit"; restoring it removes the field. Rendering it as
+    // an empty value would read as setting the limit to nothing.
+    const preview = describeBeforeStatePreview({ containers: [{ container_name: 'app', cpu_request: '100m', cpu_limit: '' }] });
+    expect(preview.groups[0].fields.map((f) => f.label)).toEqual(['CPU request']);
+  });
+
+  it('says so plainly when there is nothing to enumerate', () => {
+    expect(describeBeforeStatePreview({ containers: [] }).kind).toBe('unknown');
+    expect(describeBeforeStatePreview({}).summary).toBeTruthy();
+  });
+
+  it('names the workload being changed, not the pod the rollout replaces', () => {
+    const card = { diff: { data: { resource_name: 'deployment/shop/checkout.yaml' } } };
+    expect(describeUndoTarget(card, { subject_name: 'checkout-7d9f-abc' })).toBe('deployment/shop/checkout');
+  });
+
+  it('falls back to the event subject when the card carries no resource', () => {
+    expect(describeUndoTarget({}, { subject_namespace: 'shop', subject_name: 'checkout-7d9f' })).toBe('shop/checkout-7d9f');
+  });
+});
+
+describe('scale undo preview', () => {
+  it('describes a scale undo as the replica count it restores', () => {
+    const preview = describeBeforeStatePreview({ replicas: 4 });
+    expect(preview.kind).toBe('values');
+    expect(preview.groups[0].fields).toEqual([{ label: 'Replicas', value: '4' }]);
+  });
+
+  it('restores zero replicas rather than treating it as no value', () => {
+    // A workload deliberately scaled to zero must be restorable to zero; a falsy check here would
+    // silently drop it and leave the undo with nothing to apply.
+    expect(describeBeforeStatePreview({ replicas: 0 }).groups[0].fields[0].value).toBe('0');
   });
 });
