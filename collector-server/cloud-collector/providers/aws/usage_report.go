@@ -404,9 +404,26 @@ func resolveCostReportDefinition(ctx providers.CloudProviderContext, account pro
 		}
 	}
 
+	// Capture whether the account carries stored CUR config BEFORE the call
+	// below, which overwrites reportName/s3Bucket with its own return values
+	// (empty on error) and would otherwise destroy the signal.
+	hadStoredCurConfig := reportName != "" || s3Bucket != ""
+
 	// Only call DescribeReportDefinitions if CUR details were not pre-populated
 	if region == "" {
 		s3Bucket, region, pathPrefix, compression, reportVersion, reportName, timeUnit, err = getUsageBucketFromCostReport(ctx, account, reportName, s3Bucket)
+		// An account onboarded without a CUR has no stored report name or
+		// bucket, and typically no cur:DescribeReportDefinitions permission
+		// either. For that account a permission denial is the steady state we
+		// now support, not a fault — so classify it as not-configured and let
+		// the queue ACK, rather than dead-lettering one message per day and
+		// failing every manual sync with a 500.
+		//
+		// An account that DOES have stored CUR config and then loses the
+		// permission is a genuine regression and stays a hard error.
+		if err != nil && !hadStoredCurConfig && isCurAuthorizationDenied(err) {
+			err = fmt.Errorf("%w: %w", providers.ErrCostNotConfigured, err)
+		}
 		if err != nil {
 			// Not-configured is expected for accounts onboarded without a CUR
 			// and is logged at info; anything else is a genuine failure.
@@ -424,6 +441,25 @@ func resolveCostReportDefinition(ctx providers.CloudProviderContext, account pro
 	}
 
 	return s3Bucket, region, pathPrefix, compression, reportVersion, reportName, timeUnit, nil
+}
+
+// isCurAuthorizationDenied reports whether err is AWS refusing the call on
+// authorization grounds specifically — the shape produced by a role without
+// cur:DescribeReportDefinitions.
+//
+// It borrows IsAWSPermissionError's typed inspection (errors.As over
+// smithy.APIError) rather than matching strings, but deliberately narrows the
+// result to the two access-denied codes. That helper also treats
+// ExpiredTokenException, InvalidClientTokenId and AuthFailure as permission
+// errors; those are broken credentials, not an account without cost reporting,
+// and classifying them as not-configured would silently swallow a real
+// credential failure behind an empty cost page.
+func isCurAuthorizationDenied(err error) bool {
+	_, code, _, ok := IsAWSPermissionError(err)
+	if !ok {
+		return false
+	}
+	return code == "AccessDenied" || code == "AccessDeniedException"
 }
 
 // discoverAvailableBillingPeriods lists the CUR bucket prefix and returns the
