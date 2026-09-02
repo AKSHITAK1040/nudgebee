@@ -59,6 +59,16 @@ type TenantScopedIntegration interface {
 	TenantScoped() bool
 }
 
+// ConfigNormalizer is an optional capability an Integration may implement to
+// rewrite user input into the canonical form every consumer of the stored
+// config reads (e.g. a pasted page URL into the page ID). CreateIntegrationConfig
+// invokes it on decrypted values before ValidateConfig, and persists the
+// rewritten values. Implementations must be idempotent: canonical input must
+// pass through unchanged, because the hook runs once per account.
+type ConfigNormalizer interface {
+	NormalizeConfig(ctx *security.SecurityContext, values []IntegrationConfigValue) error
+}
+
 type IntegrationSchemaType string
 
 const (
@@ -101,6 +111,10 @@ type IntegrationSchemaProperty struct {
 	// multi-select. Used for integrations that bind 1:1 to an account (e.g.
 	// workflow_webhook, which is bound to one workflow per row).
 	SingleSelect bool `json:"single_select,omitempty"`
+	// Advanced moves the field into the form's collapsed "Advanced Settings"
+	// section, for options most users never touch. The field is still part of
+	// the schema and is validated and stored like any other.
+	Advanced bool `json:"advanced,omitempty"`
 }
 
 type IntegrationSchema struct {

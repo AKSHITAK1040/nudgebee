@@ -379,6 +379,13 @@ func CreateIntegrationConfig(
 					integrationConfigValues[integrationconfig].IsEncrypted = false
 				}
 			}
+			// Canonicalise user input before validation so both ValidateConfig and
+			// the save loop below see the stored form (the loop persists this slice).
+			if normalizer, ok := integration.(ConfigNormalizer); ok {
+				if err := normalizer.NormalizeConfig(ctx.GetSecurityContext(), integrationConfigValues); err != nil {
+					return IntegrationDto{}, err
+				}
+			}
 			// For LLM updates with omit-to-keep semantics: the UI omits secret
 			// fields the user didn't retype, so RequiredWhen validation would
 			// fail spuriously even when the stored value satisfies the contract.

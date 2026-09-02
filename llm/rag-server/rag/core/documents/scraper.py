@@ -139,7 +139,7 @@ def confluence_page_url(confluence, page):
     return f"{base}{webui}"
 
 
-def process_page_batch(page_queue, visited_pages, confluence, space_key, stats):
+def process_page_batch(page_queue, visited_pages, confluence, space_key, stats, tree_root=None):
     batch = []
 
     for _ in range(min(Config.embedding_batch_size, len(page_queue))):
@@ -155,6 +155,20 @@ def process_page_batch(page_queue, visited_pages, confluence, space_key, stats):
             stats["failed_pages"] += 1
             continue
 
+        # Children before body: a container page with an empty body still has
+        # a subtree beneath it, and in a page-tree scrape this walk is the only
+        # thing that finds it.
+        try:
+            child_pages = confluence.get_child_pages(page_id)
+        except Exception as e:
+            logger.warning(f"Failed to list child pages of {page_id}: {e}")
+            stats["failed_pages"] += 1
+            child_pages = []
+        for child in child_pages:
+            child_id = child.get("id")
+            if child_id and child_id not in visited_pages:
+                page_queue.append(child_id)
+
         html_content = page_body_html(page)
         if not html_content:
             continue
@@ -162,21 +176,36 @@ def process_page_batch(page_queue, visited_pages, confluence, space_key, stats):
         content, _ = extract_content(html_content)
         if content:
             page_url = confluence_page_url(confluence, page)
-            batch.append(Document(page_content=content, metadata={"page_id": page_id, "url": page_url}))
-
-        # Extract linked pages
-        try:
-            child_pages = confluence.get_child_pages(page_id)
-        except Exception as e:
-            logger.warning(f"Failed to list child pages of {page_id}: {e}")
-            stats["failed_pages"] += 1
-            continue
-        for child in child_pages:
-            child_id = child.get("id")
-            if child_id and child_id not in visited_pages:
-                page_queue.append(child_id)
+            metadata = {"page_id": page_id, "url": page_url}
+            if tree_root:
+                metadata["tree_root"] = tree_root
+            batch.append(Document(page_content=content, metadata=metadata))
 
     return batch
+
+
+def collect_confluence_tree_documents(confluence, root_id, stats):
+    """Walk one page tree — the root page and every page beneath it."""
+    if not fetch_page(confluence, root_id):
+        # A root that cannot be read is a permissions or configuration problem,
+        # not an empty tree, and must not pass as a healthy sync.
+        stats["failed_roots"] += 1
+        return []
+    visited_pages: set = set()
+    page_queue = [root_id]
+    documents: List[Document] = []
+    while page_queue:
+        documents.extend(process_page_batch(page_queue, visited_pages, confluence, None, stats, tree_root=root_id))
+    logger.info(f"Collected {len(documents)} Confluence page documents under page {root_id}")
+    return documents
+
+
+def configured_page_trees(config):
+    """Page IDs from the integration's ``page_trees`` value (comma-separated).
+
+    api-server resolves pasted URLs to IDs at save, so only IDs arrive here.
+    """
+    return [p.strip() for p in (config.get("page_trees") or "").split(",") if p.strip()]
 
 
 def collect_confluence_space_documents(confluence, space_key, stats):
@@ -238,20 +267,40 @@ def _process_integration(integration, tenant_id, embeddings, trigger_type="syste
     try:
         confluence = build_confluence_client(config)
         space_key = config.get("namespace")
-        space_keys = [space_key] if space_key else fetch_all_spaces(confluence)
+        tree_roots = configured_page_trees(config)
 
-        stats = {"failed_pages": 0, "empty_spaces": 0}
+        stats = {"failed_pages": 0, "empty_spaces": 0, "failed_roots": 0}
         documents: List[Document] = []
-        for sk in space_keys:
-            documents.extend(collect_confluence_space_documents(confluence, sk, stats))
-        if stats["failed_pages"] or stats["empty_spaces"]:
+        space_keys: List[str] = []
+        if tree_roots:
+            # Page trees replace the space walk: the space (if any) only scoped
+            # validation, and the trees are the whole of what gets indexed.
+            for root_id in tree_roots:
+                documents.extend(collect_confluence_tree_documents(confluence, root_id, stats))
+        else:
+            space_keys = [space_key] if space_key else fetch_all_spaces(confluence)
+            for sk in space_keys:
+                documents.extend(collect_confluence_space_documents(confluence, sk, stats))
+        if stats["failed_pages"] or stats["empty_spaces"] or stats["failed_roots"]:
             logger.warning(
-                "Confluence integration %s scraped with gaps: %s unreadable pages, " "%s of %s spaces returned nothing",
+                "Confluence integration %s scraped with gaps: %s unreadable pages, "
+                "%s of %s spaces returned nothing, %s of %s page trees unreadable",
                 integration_id,
                 stats["failed_pages"],
                 stats["empty_spaces"],
                 len(space_keys),
+                stats["failed_roots"],
+                len(tree_roots),
             )
+
+        if stats["failed_roots"]:
+            message = (
+                f"{stats['failed_roots']} of {len(tree_roots)} configured Confluence page trees could not be read. "
+                "Check that the pages still exist and that the account can read them."
+            )
+            logger.error(f"Confluence integration {integration_id}: {message}")
+            update_integration_kb_load_result(integration_id, "error", error_message=message)
+            return []
 
         # Spaces were discovered but not one page could be read. On-premise
         # instances restrict spaces per-account, so this is the shape a
