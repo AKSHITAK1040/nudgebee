@@ -485,6 +485,8 @@ func (ah *AgenticAnalyzeHandler) HandleAnalyze(c *gin.Context) {
 	req.AnalysisID = analysisID
 
 	go func() {
+		releaseWorkspace := workspaceGCFor(ah.config.Analysis.WorkspaceDir).Acquire(analysisID)
+		defer releaseWorkspace()
 		defer cancel()
 
 		response, err := ah.HandleAgenticAnalyze(analysisCtx, req)
@@ -650,6 +652,22 @@ func (ah *AgenticAnalyzeHandler) resolveClients(req AgenticAnalyzeRequest, logge
 				cfg.LLM.Model = m
 			}
 		}
+	}
+	// Every asynchronous analysis gets its own worktree namespace. The Git
+	// client still reuses the shared bare mirror, but the mutable checkout and
+	// its node_modules/venv/target/build outputs can never collide with another
+	// analysis of the same repository.
+	if req.AnalysisID != "" {
+		// Without an llm_config override, cfg is still the handler's shared
+		// *ah.config. Copy before mutating WorkspaceDir: mutating in place both
+		// races with concurrent analyses and re-nests the path on every request
+		// (runs/<id>/runs/<id>...), pushing exec workspaces under runs/ where GC
+		// deletes them.
+		if cfg == ah.config {
+			clone := *ah.config
+			cfg = &clone
+		}
+		cfg.Analysis.WorkspaceDir = filepath.Join(ah.config.Analysis.WorkspaceDir, "runs", req.AnalysisID)
 	}
 	client, err := llm.NewClient(cfg)
 	if err != nil {

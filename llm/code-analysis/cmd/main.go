@@ -242,6 +242,11 @@ func main() {
 	// Startup is the only point where an unconditional sweep is safe: no
 	// in-process analysis can own one of these temp workspaces yet.
 	handlers.SweepOrphanedAnalysisWorkspaces(0)
+	if reclaimed, err := handlers.CollectWorkspaceGarbage(cfg.Analysis.WorkspaceDir); err != nil {
+		log.Printf("WARN: workspace cache cleanup failed: %v", err)
+	} else if reclaimed > 0 {
+		log.Printf("INFO: workspace cache cleanup reclaimed %d bytes", reclaimed)
+	}
 
 	agenticHandler, err := handlers.NewAgenticAnalyzeHandler(cfg, gitClient, credHandler)
 	if err != nil {
@@ -262,6 +267,11 @@ func main() {
 				maxAge = 2 * time.Hour
 			}
 			handlers.SweepOrphanedAnalysisWorkspaces(maxAge)
+			if reclaimed, err := handlers.CollectWorkspaceGarbage(cfg.Analysis.WorkspaceDir); err != nil {
+				log.Printf("WARN: periodic workspace cache cleanup failed: %v", err)
+			} else if reclaimed > 0 {
+				log.Printf("INFO: periodic workspace cache cleanup reclaimed %d bytes", reclaimed)
+			}
 		}
 	}()
 

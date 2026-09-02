@@ -16,6 +16,7 @@ import (
 	"nudgebee/llm/security"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -38,7 +39,7 @@ const workspaceSpecAnnotationKey = "nudgebee.com/workspace-spec-version"
 // workspaceSpecVersion is bumped whenever an existing healthy workspace pod
 // must be recreated to pick up a pod-spec-only change. CreateWorkspace checks
 // it during recovery, while the leader sweep upgrades a bounded batch at a time.
-const workspaceSpecVersion = "security-baseline-v1"
+const workspaceSpecVersion = "workspace-storage-v2"
 
 const workspaceSpecUpgradeBatchSize = 5
 
@@ -346,6 +347,12 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 		return fmt.Errorf("workspace: accountId is required")
 	}
 
+	storageLimit, err := workspaceStorageSizeLimit()
+	if err != nil {
+		ctx.GetLogger().Error("workspace: invalid ephemeral storage limit", "error", err)
+		return fmt.Errorf("workspace: invalid ephemeral storage limit: %w", err)
+	}
+
 	logger := ctx.GetLogger()
 	if dockerMode() {
 		runtime, err := newDockerRuntime()
@@ -459,6 +466,14 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 			},
 		},
 		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{
+					Name: "workspace-storage",
+					VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{
+						SizeLimit: storageLimit,
+					}},
+				},
+			},
 			// GKE resolves metadata.google.internal to the real metadata IP
 			// (169.254.169.254) inside pods, but the NetworkPolicy blackholes
 			// that IP to prevent IMDS credential theft — silently dropping
@@ -490,6 +505,9 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 						},
 					},
 					Resources: buildWorkspaceResources(),
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "workspace-storage", MountPath: "/tmp/code-analysis"},
+					},
 					ReadinessProbe: &corev1.Probe{
 						ProbeHandler: corev1.ProbeHandler{
 							HTTPGet: &corev1.HTTPGetAction{
@@ -525,6 +543,15 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 							// need more than 30s and were getting SIGKILLed mid-flight.
 							Name:  "SERVER_WRITE_TIMEOUT",
 							Value: config.Config.LlmServerWorkspaceCommandTimeout,
+						},
+						{
+							// The pod's ephemeral-storage budget, same value as the
+							// workspace-storage emptyDir sizeLimit. code-analysis's
+							// cache GC measures the workspace tree against this;
+							// syscall.Statfs inside the pod would report the node
+							// filesystem instead and never trip its threshold.
+							Name:  "WORKSPACE_STORAGE_LIMIT_BYTES",
+							Value: strconv.FormatInt(storageLimit.Value(), 10),
 						},
 					},
 				},
@@ -681,6 +708,24 @@ func LLMSecretEnvVars(secretName string) []corev1.EnvVar {
 	}
 }
 
+// defaultWorkspaceStorageLimit caps workspace ephemeral storage when the
+// operator has not configured a value. A nil SizeLimit would leave the emptyDir
+// unbounded, letting one workspace pod fill the node disk and evict unrelated
+// pods, so we always return a concrete limit.
+const defaultWorkspaceStorageLimit = "5Gi"
+
+func workspaceStorageSizeLimit() (*resource.Quantity, error) {
+	raw := config.Config.LlmServerWorkspaceResourceLimitStorage
+	if raw == "" {
+		raw = defaultWorkspaceStorageLimit
+	}
+	limit, err := resource.ParseQuantity(raw)
+	if err != nil {
+		return nil, err
+	}
+	return &limit, nil
+}
+
 func buildWorkspaceResources() corev1.ResourceRequirements {
 	resources := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
@@ -695,10 +740,9 @@ func buildWorkspaceResources() corev1.ResourceRequirements {
 	if config.Config.LlmServerWorkspaceResourceLimitMemory != "" {
 		resources.Limits[corev1.ResourceMemory] = resource.MustParse(config.Config.LlmServerWorkspaceResourceLimitMemory)
 	}
-	if config.Config.LlmServerWorkspaceResourceLimitStorage != "" {
-		storageLimit := resource.MustParse(config.Config.LlmServerWorkspaceResourceLimitStorage)
+	if storageLimit, err := workspaceStorageSizeLimit(); err == nil && storageLimit != nil {
 		resources.Requests[corev1.ResourceEphemeralStorage] = storageLimit.DeepCopy()
-		resources.Limits[corev1.ResourceEphemeralStorage] = storageLimit
+		resources.Limits[corev1.ResourceEphemeralStorage] = *storageLimit
 	}
 	return resources
 }
