@@ -3,16 +3,12 @@ package core
 import (
 	"testing"
 
-	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 
 	"github.com/stretchr/testify/assert"
 )
 
 func TestPromptVariantForRequest(t *testing.T) {
-	orig := config.Config.LlmServerReact3QueryLeanPromptEnabled
-	defer func() { config.Config.LlmServerReact3QueryLeanPromptEnabled = orig }()
-
 	topLevelQuery := NBAgentRequest{AgentId: "a1", Query: "list pods", OriginalQuery: "list pods"}
 	topLevelInvestigation := NBAgentRequest{AgentId: "a1", Query: "why is checkout-svc failing", OriginalQuery: "why is checkout-svc failing"}
 	// Sub-agent: mechanical delegated brief, but the top-level ask was an investigation.
@@ -21,15 +17,6 @@ func TestPromptVariantForRequest(t *testing.T) {
 	origQueryEmpty := NBAgentRequest{AgentId: "a1", Query: "list pods"} // OriginalQuery empty → fall back to Query
 	bothQueriesEmpty := NBAgentRequest{AgentId: "a1"}                   // Both empty → degenerate → full prompt
 
-	// Flag OFF → a top-level query still gets the lighter promptVariantQuery (its own
-	// cache slot, drops only the RCA answer-format spec); investigations/sub-agents stay "".
-	config.Config.LlmServerReact3QueryLeanPromptEnabled = false
-	assert.Equal(t, promptVariantQuery, promptVariantForRequest(topLevelQuery), "flag off: top-level query → query variant")
-	assert.Equal(t, "", promptVariantForRequest(topLevelInvestigation), "flag off: investigation → full")
-	assert.Equal(t, "", promptVariantForRequest(subAgent), "flag off: sub-agent → full")
-
-	// Flag ON.
-	config.Config.LlmServerReact3QueryLeanPromptEnabled = true
 	assert.Equal(t, promptVariantLean, promptVariantForRequest(topLevelQuery), "top-level plain retrieval → lean")
 	assert.Equal(t, "", promptVariantForRequest(topLevelInvestigation), "top-level investigation → full")
 	assert.Equal(t, "", promptVariantForRequest(subAgent), "sub-agent classifies on OriginalQuery → full under an investigation")
@@ -39,10 +26,6 @@ func TestPromptVariantForRequest(t *testing.T) {
 }
 
 func TestApplyPromptVariant_AlwaysResets(t *testing.T) {
-	orig := config.Config.LlmServerReact3QueryLeanPromptEnabled
-	defer func() { config.Config.LlmServerReact3QueryLeanPromptEnabled = orig }()
-	config.Config.LlmServerReact3QueryLeanPromptEnabled = true
-
 	base := security.NewRequestContextForSuperAdmin()
 
 	// Top-level plain retrieval → lean, readable by the same accessor the cache key uses.

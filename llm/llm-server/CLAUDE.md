@@ -397,7 +397,7 @@ All configuration in `config/config.go` via environment variables.
 **LLM Provider:** `LLM_PROVIDER`, `LLM_MODEL_NAME`, `LLM_PROVIDER_REGION`, `LLM_PROVIDER_API_KEY`, `LLM_PROVIDER_API_ENDPOINT`
 **Database:** `LLM_SERVER_DB_URL` (PostgreSQL)
 **RabbitMQ:** `RABBIT_MQ_HOST`, `RABBIT_MQ_USERNAME`, `RABBIT_MQ_PASSWORD`, `RABBIT_MQ_TROUBLESHOOT_EXCHANGE`
-**Agent Behavior:** `LLM_SERVER_AGENT_REACT_MAX_ITERATIONS` (default 50), `LLM_SERVER_REACT_CRITIQUE_ENABLED` (default true), `LLM_SERVER_AGENT_MAX_LOGLINES`, `LLM_SERVER_PLANNER_PARALLEL_EXEC_ENABLED` (gates ReAct3 parallel action batches), `LLM_SERVER_AGENT_MAX_PARALLEL` (parallel action concurrency limit)
+**Agent Behavior:** `LLM_SERVER_AGENT_REACT_MAX_ITERATIONS` (default 50), `LLM_SERVER_ORCHESTRATOR_THINKING_LEVEL` (default medium), `LLM_SERVER_AGENT_MAX_LOGLINES`, `LLM_SERVER_PLANNER_PARALLEL_EXEC_ENABLED` (gates ReAct3 parallel action batches), `LLM_SERVER_AGENT_MAX_PARALLEL` (parallel action concurrency limit)
 **External Services:** `SERVICE_API_SERVER_URL`, `RAG_SERVER_URL`, `CLOUD_COLLECTOR_SERVER_URL`, `RELAY_SERVER_ENDPOINT`
 
 ## Key Integrations

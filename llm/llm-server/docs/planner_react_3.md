@@ -274,7 +274,7 @@ worker        0/1     1
 ```go
 isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
 critiqueAllowed := enableCritique ||
-    (LlmServerReActCritiqueEnabled && isTopLevel && IsInvestigationRequestTask())
+    (isTopLevel && IsInvestigationRequestTask())
 ```
 
 - Only top-level agents (not sub-agents like kubectl, logs)

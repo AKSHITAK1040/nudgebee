@@ -87,6 +87,9 @@ type NBReActPlanner4 struct {
 	persistedNotebook   string
 
 	stepCount int
+	// planCallCount is transient and identifies the first Plan invocation for
+	// this planner instance even when restored history already contains steps.
+	planCallCount int
 
 	// enableCritique is the per-request critique override (request.EnableCritique).
 	// maxRefinementAttempts bounds the refine loop. Both are derived at
@@ -143,7 +146,7 @@ func NewReActAgent4(ctx *security.RequestContext, request NBAgentRequest, nbAgen
 	if isTopLevel {
 		userContextBlock = renderUserContextBlock(ctx)
 	}
-	orchMode, _ := resolveReact3RoleModes(request)
+	orchMode, _ := resolveOrchestratorRoleModes(request)
 	evidenceIndex := ""
 	if isTopLevel {
 		evidenceIndex = fetchEvidenceIndex(ctx, request)
@@ -278,14 +281,14 @@ func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agen
 
 	notebookEnabled := ResolveAgentNotebookEnabled(agent)
 	hypothesisModeEnabled := resolveHypothesisModeEnabled(request, agent)
-	orchestratorMode, executorMode := resolveReact3RoleModes(request)
+	orchestratorMode, executorMode := resolveOrchestratorRoleModes(request)
 	promptVariant := promptVariantFromCtx(ctx)
 	if promptVariant == promptVariantLean {
 		notebookEnabled = false
 		hypothesisModeEnabled = false
 		orchestratorMode = false
 	}
-	isInvestigation := promptVariant != promptVariantLean && promptVariant != promptVariantQuery
+	isInvestigation := promptVariant != promptVariantLean
 
 	// Fragment lookups use an empty account ID (include-only), matching react_3.
 	// Custom agents deliberately skip built-in-only fragments rather than paying
@@ -443,6 +446,7 @@ func (o *NBReActPlanner4) Plan(
 	// no-op: len(intermediateSteps) already equals the running count.
 	o.stepCount = len(intermediateSteps)
 	o.refreshNotebookFromSteps(intermediateSteps)
+	firstPlanCallOfTurn := o.beginPlanCall()
 
 	clarificationContinuationPending := needsClarificationContinuation(intermediateSteps)
 	plannerInput := input
@@ -458,8 +462,19 @@ func (o *NBReActPlanner4) Plan(
 		// (OpenAI, Anthropic, Gemini) reject a request that carries an empty tools
 		// array with a 400, so pass WithTools only when llmTools is non-empty.
 		opts := []llms.CallOption{llms.WithTemperature(0.0)}
+		thinkingLevel := ""
+		if o.orchestratorDeepThinking(firstPlanCallOfTurn) {
+			agentName := o.agentName()
+			provider := GetLLMProvider(o.ctx, o.request.AccountId, agentName, true, o.request.ConversationId)
+			model := GetLLMModelName(o.ctx, o.request.AccountId, provider, agentName, true, o.request.ConversationId)
+			thinkingLevel = resolveOrchestratorThinkingLevel(model)
+		}
+		// Agent-level policy remains the final authority, matching ReAct3.
 		if level := ResolveAgentThinkingLevel(o.nbAgent); level != "" {
-			opts = append(opts, WithThinkingLevel(level))
+			thinkingLevel = level
+		}
+		if thinkingLevel != "" {
+			opts = append(opts, WithThinkingLevel(thinkingLevel))
 		}
 		if len(o.llmTools) > 0 {
 			opts = append(opts, llms.WithTools(o.llmTools))
@@ -509,7 +524,6 @@ func (o *NBReActPlanner4) Plan(
 				"enableCritique", o.enableCritique,
 				"isTopLevel", o.isTopLevel(),
 				"isInvestigation", IsInvestigationRequestTask(o.request.Query),
-				"autoCritiqueEnabled", config.Config.LlmServerReActCritiqueEnabled,
 				"refinementsUsed", len(o.refinementData),
 				"maxRefinements", o.maxRefinementAttempts,
 				"agent", o.agentName())
@@ -1534,12 +1548,25 @@ func (o *NBReActPlanner4) isTopLevel() bool {
 	return o.request.ParentAgentId == "" || o.request.ParentAgentId == o.request.AgentId
 }
 
+func (o *NBReActPlanner4) beginPlanCall() bool {
+	first := o.planCallCount == 0
+	o.planCallCount++
+	return first
+}
+
+// orchestratorDeepThinking scopes the shared elevate-only override to the first
+// top-level planning call and post-critique refinement passes. Tool-driven
+// mid-loop calls and executor sub-agents keep their normal model resolution.
+func (o *NBReActPlanner4) orchestratorDeepThinking(firstPlanCallOfTurn bool) bool {
+	return config.Config.LlmServerOrchestratorThinkingLevel != "" &&
+		o.isTopLevel() && (firstPlanCallOfTurn || len(o.refinementData) > 0)
+}
+
 // shouldCritique mirrors react_3's gate: allowed when explicitly enabled for the
-// request, or (config on AND top-level AND an investigation task); a
+// request, or for a top-level investigation task; a
 // CritiqueSupport agent can further veto it.
 func (o *NBReActPlanner4) shouldCritique() bool {
-	allowed := o.enableCritique ||
-		(config.Config.LlmServerReActCritiqueEnabled && o.isTopLevel() && IsInvestigationRequestTask(o.request.Query))
+	allowed := o.enableCritique || (o.isTopLevel() && IsInvestigationRequestTask(o.request.Query))
 	if agent, ok := o.nbAgent.(NBAgentReActPlannerCritiqueSupport); ok {
 		allowed = allowed && agent.CritiqueEnabled()
 	}

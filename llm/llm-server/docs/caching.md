@@ -91,7 +91,7 @@ Built in `planner_react_3.go`. Base template: `planner_react_3_base.txt`.
 
 ### Critique Message Layout (Top-Level Investigation Answers Only)
 
-Fires when `LlmServerReActCritiqueEnabled=true` (default), the agent is top-level (not a sub-agent), and the query is an investigation task. Uses `planner_react_critiquer.txt`.
+Fires when the agent is top-level (not a sub-agent) and the query is an investigation task. Uses `planner_react_critiquer.txt`.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐

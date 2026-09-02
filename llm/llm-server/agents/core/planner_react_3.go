@@ -215,11 +215,9 @@ func (o *NBReActPlanner3) isTopLevelAgent() bool {
 // orchestrator's direction-setting calls that warrants the elevated thinking
 // level: the first reasoning call of a turn (where the answer contract and
 // investigation plan are laid down) or a post-critique refinement pass.
-// Always false for executor sub-agents, when orchestrator mode is disabled,
-// or when no override level is configured.
+// Always false for executor sub-agents or when no override level is configured.
 func (o *NBReActPlanner3) orchestratorDeepThinking(firstPlanCallOfTurn bool) bool {
-	if !config.Config.LlmServerReact3OrchestratorModeEnabled ||
-		config.Config.LlmServerReact3OrchestratorThinkingLevel == "" ||
+	if config.Config.LlmServerOrchestratorThinkingLevel == "" ||
 		!o.isTopLevelAgent() {
 		return false
 	}
@@ -240,7 +238,7 @@ var thinkingLevelRank = map[string]int{"minimal": 1, "low": 2, "medium": 3, "hig
 // clamping still happens centrally in GenerateAndTrackLLMContent, and the
 // provider layer ignores ThinkingLevel on models that don't accept it.
 func resolveOrchestratorThinkingLevel(model string) string {
-	orch := strings.ToLower(config.Config.LlmServerReact3OrchestratorThinkingLevel)
+	orch := strings.ToLower(config.Config.LlmServerOrchestratorThinkingLevel)
 	orchRank, ok := thinkingLevelRank[orch]
 	if !ok {
 		return ""
@@ -538,7 +536,7 @@ func (o *NBReActPlanner3) buildScratchpad(intermediateSteps []NBAgentPlannerTool
 	// prior turns' steps, and nudging a trivial follow-up would contradict the
 	// prompt's "simple lookups skip the contract" carve-out.
 	turnSteps := totalSteps - o.turnStartStepIndex
-	if orchestratorMode, _ := resolveReact3RoleModes(o.request); orchestratorMode &&
+	if orchestratorMode, _ := resolveOrchestratorRoleModes(o.request); orchestratorMode &&
 		o.notebookSectionEnabled() && turnSteps >= answerContractNudgeMinSteps &&
 		!strings.Contains(strings.ToLower(o.Notebook), strings.ToLower(answerContractHeader)) {
 		history.WriteString("\n<system_nudge>")
@@ -1921,13 +1919,13 @@ func (o *NBReActPlanner3) Plan(
 			noToolRefusal := topLevel && len(intermediateSteps)-o.turnStartStepIndex == 0 &&
 				looksLikeCapabilityRefusal(finish.Data)
 			critiqueAllowed := o.enableCritique ||
-				(config.Config.LlmServerReActCritiqueEnabled && topLevel && (isInvestigation || noToolRefusal))
+				(topLevel && (isInvestigation || noToolRefusal))
 			if agent, ok := o.nbAgent.(NBAgentReActPlannerCritiqueSupport); ok {
 				critiqueAllowed = critiqueAllowed && agent.CritiqueEnabled()
 			}
 
 			if !critiqueAllowed {
-				logger.Info("reactagent3: skipping critique", "enableCritique", o.enableCritique, "isTopLevel", topLevel, "isInvestigation", isInvestigation, "noToolRefusal", noToolRefusal, "autoCritiqueEnabled", config.Config.LlmServerReActCritiqueEnabled)
+				logger.Info("reactagent3: skipping critique", "enableCritique", o.enableCritique, "isTopLevel", topLevel, "isInvestigation", isInvestigation, "noToolRefusal", noToolRefusal)
 				return nil, finish, nil
 			}
 
@@ -2397,19 +2395,15 @@ func resolveHypothesisModeEnabled(request NBAgentRequest, agent NBAgent) bool {
 	return ResolveAgentNotebookEnabled(agent) && isTopLevel
 }
 
-// resolveReact3RoleModes returns the role prompt-overlay gates for the react_3
-// planner. The same planner (and base prompt) serves two opposite jobs: the
+// resolveOrchestratorRoleModes returns the shared role prompt-overlay modes for
+// ReAct3 and ReAct4. The planners serve two opposite jobs: the
 // top-level orchestrator, which owns the completeness of the final answer, and
 // executor sub-agents, which run a scoped brief fast. The orchestrator overlay
 // adds the answer contract + completion self-check; the executor overlay adds
 // the stay-in-brief / surface-anomalies reporting rule. At most one of the two
-// returns true; both are false when the feature flag is off, rendering the
-// prompt byte-identical to the pre-split behavior. Role is stable for a given
-// agent instance, so the cached system prefix is not busted per request.
-func resolveReact3RoleModes(request NBAgentRequest) (orchestratorMode, executorMode bool) {
-	if !config.Config.LlmServerReact3OrchestratorModeEnabled {
-		return false, false
-	}
+// returns true. Role is stable for a given agent instance, so the cached system
+// prefix is not busted per request.
+func resolveOrchestratorRoleModes(request NBAgentRequest) (orchestratorMode, executorMode bool) {
 	isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
 	return isTopLevel, !isTopLevel
 }
@@ -2435,10 +2429,10 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	// agent role, so the cached system prefix is not busted per request.
 	notebookEnabled := ResolveAgentNotebookEnabled(agent)
 	hypothesisModeEnabled := resolveHypothesisModeEnabled(request, agent)
-	orchestratorMode, executorMode := resolveReact3RoleModes(request)
+	orchestratorMode, executorMode := resolveOrchestratorRoleModes(request)
 
 	// Lean prompt variant: on a top-level plain-retrieval turn (stamped by
-	// applyPromptVariant when the feature is enabled), drop the heavy investigation
+	// applyPromptVariant), drop the heavy investigation
 	// overlays — answer contract, notebook discipline, and hypothesis tree — via
 	// the existing {{if}} gates in planner_react_3_base.txt. Reading the same
 	// ContextKeyPromptVariant the cache key uses keeps the prompt shape and its
@@ -2460,7 +2454,7 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	// content and its cache slot never disagree. Mirrors the formatter's programmatic
 	// gate (executor_response_formatter.go), which prose-instruction alone could not
 	// reliably enforce.
-	isInvestigation := promptVariant != promptVariantLean && promptVariant != promptVariantQuery
+	isInvestigation := promptVariant != promptVariantLean
 
 	// Only declare template variables actually referenced in planner_react_3_base.txt.
 	// Dynamic vars (history, conversation_context, input, scratchpad) are in the human

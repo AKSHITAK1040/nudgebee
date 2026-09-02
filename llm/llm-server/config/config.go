@@ -751,8 +751,7 @@ type appConfig struct {
 	ConversationHistoryWindowSize           int  `mapstructure:"conversation_history_window_size"`
 	EnableLLMMetricsFiltering               bool `mapstructure:"enable_llm_metrics_filtering"`
 	// DistillationRedistillInterval defines how many conversation turns occur between redistillation of context.
-	DistillationRedistillInterval int  `mapstructure:"distillation_redistill_interval"`
-	LlmServerReActCritiqueEnabled bool `mapstructure:"llm_server_react_critique_enabled"`
+	DistillationRedistillInterval int `mapstructure:"distillation_redistill_interval"`
 	// LlmServerSDGGroundingContractEnabled gates the critiquer's Rule 8
 	// dependency-claim grounding contract. When on, the critiquer rejects
 	// inter-service relationship claims ("X calls Y", "Y depends on Z") that
@@ -762,9 +761,9 @@ type appConfig struct {
 	// monitoring `SDG_no_data_rate` on dev to confirm no over-firing.
 	LlmServerSDGGroundingContractEnabled bool `mapstructure:"llm_server_sdg_grounding_contract_enabled"`
 	// LlmServerReAct4Enabled gates the provider-native tool-calling planner
-	// (ReAct4). Default false: a ReAct/Orchestrating agent only routes to ReAct4
-	// when this is on AND its resolved provider/model supports native tools
-	// (SupportsNativeTools); otherwise it stays on ReAct3. See
+	// (ReAct4). Default true: a ReAct/Orchestrating agent routes to ReAct4 when
+	// its resolved provider/model supports native tools (SupportsNativeTools);
+	// an explicit false remains the rollback path to ReAct3. See
 	// docs/planner_react_4.md.
 	LlmServerReAct4Enabled bool `mapstructure:"llm_server_react4_enabled"`
 	// LlmServerThinkToolEnabled gates injection of the `think` tool into the
@@ -784,19 +783,6 @@ type appConfig struct {
 	// PR deletes the tool + all injection sites entirely.
 	// Rollback: set LLM_SERVER_THINK_TOOL_ENABLED=true in the env.
 	LlmServerThinkToolEnabled bool `mapstructure:"llm_server_think_tool_enabled"`
-	// LlmServerReact3OrchestratorModeEnabled gates the react_3 role-split prompt
-	// overlays: top-level planner instances get the orchestrator overlay (answer
-	// contract, deliberate first-iteration thought, completion self-check) while
-	// sub-agents get the executor overlay (stay in brief, surface anomalies as
-	// notes). Off = both overlays absent, prompt identical to pre-split behavior.
-	LlmServerReact3OrchestratorModeEnabled bool `mapstructure:"llm_server_react3_orchestrator_mode_enabled"`
-	// LlmServerReact3QueryLeanPromptEnabled drops the heavy investigation overlays
-	// (answer contract, notebook discipline, hypothesis tree) from the TOP-LEVEL
-	// orchestrator prompt on a plain-retrieval turn ("list pods"), and keys that
-	// lean prompt into its own cache slot so it does not thrash the full-prompt
-	// slot. Sub-agents and investigation turns are unaffected. Off = no-op, prompt
-	// and cache keys byte-identical to today. Opt-in for safe rollout.
-	LlmServerReact3QueryLeanPromptEnabled bool `mapstructure:"llm_server_react3_query_lean_prompt_enabled"`
 	// LlmServerReact3QueryModelDownshiftEnabled downshifts the MODEL TIER for a
 	// TOP-LEVEL plain-retrieval turn ("list pods") on a Reasoning-tier orchestrator
 	// from Reasoning (pro) to Summary (a cheaper/faster model): a query doesn't need
@@ -807,13 +793,17 @@ type appConfig struct {
 	// sub-agents are unaffected. Off (default) = no-op, tier byte-identical to today.
 	// Ship dark; enable after cheap-vs-pro validation on query answers.
 	LlmServerReact3QueryModelDownshiftEnabled bool `mapstructure:"llm_server_react3_query_model_downshift_enabled"`
-	// LlmServerReact3OrchestratorThinkingLevel is the thinking level applied to
-	// the orchestrator's direction-setting LLM calls (first plan call of a turn
-	// and post-critique refinement passes). Elevate-only: thinking level is
+	// LlmServerOrchestratorThinkingLevel is the thinking level applied to ReAct3
+	// and ReAct4 direction-setting calls (first plan call of a turn and
+	// post-critique refinement passes). Elevate-only: thinking level is
 	// otherwise resolved dynamically per model/tier, and this override applies
 	// only when it is above that baseline — it never lowers thinking. Executor
-	// sub-agents and mid-loop iterations always keep the dynamic resolution.
+	// sub-agents and mid-loop iterations keep the dynamic resolution.
 	// Empty disables the override.
+	LlmServerOrchestratorThinkingLevel string `mapstructure:"llm_server_orchestrator_thinking_level"`
+	// Deprecated compatibility input for deployments that have not migrated to
+	// LLM_SERVER_ORCHESTRATOR_THINKING_LEVEL. The canonical value wins when both
+	// are set; remove this after one deployment migration window.
 	LlmServerReact3OrchestratorThinkingLevel string `mapstructure:"llm_server_react3_orchestrator_thinking_level"`
 	// KGToolsEnabled gates Knowledge Graph tools (kg_list_nodes, kg_list_path) on
 	// the service_dependency_graph agent, enabling static topology + CALLS queries
@@ -1454,16 +1444,12 @@ func init() {
 	viper.SetDefault("distillation_redistill_interval", 6)
 	viper.SetDefault("enable_llm_reference_title_generation", false)
 	viper.SetDefault("llm_server_slack_compact_response", false)
-	// react_critique defaults to true: the ReWoo→ReAct3 upgrade (now permanent)
-	// used to flip this on at boot; baking it in preserves that behavior.
-	viper.SetDefault("llm_server_react_critique_enabled", true)
 	viper.SetDefault("llm_server_sdg_grounding_contract_enabled", false)
 	// ReAct4 is the default planner; an explicit false override remains the rollback path.
 	viper.SetDefault("llm_server_react4_enabled", true)
-	viper.SetDefault("llm_server_react3_orchestrator_mode_enabled", true)
-	viper.SetDefault("llm_server_react3_query_lean_prompt_enabled", true)
 	viper.SetDefault("llm_server_react3_query_model_downshift_enabled", false)
-	viper.SetDefault("llm_server_react3_orchestrator_thinking_level", "medium")
+	viper.SetDefault("llm_server_orchestrator_thinking_level", "")
+	viper.SetDefault("llm_server_react3_orchestrator_thinking_level", "")
 	// Flipped false 2026-07-12 — see LlmServerThinkToolEnabled docstring.
 	// Any env that wants the tool back sets LLM_SERVER_THINK_TOOL_ENABLED=true
 	// (env override still wins over SetDefault).
@@ -1682,10 +1668,18 @@ func init() {
 	}
 
 	viper.AutomaticEnv()
+	orchestratorThinkingLevelSet := configKeyExplicitlySet("llm_server_orchestrator_thinking_level")
+	legacyOrchestratorThinkingLevelSet := configKeyExplicitlySet("llm_server_react3_orchestrator_thinking_level")
 	err = viper.Unmarshal(&Config)
 	if err != nil {
 		fmt.Println("Error unmarshalling config:", err)
 	}
+	Config.LlmServerOrchestratorThinkingLevel = resolveOrchestratorThinkingLevelConfig(
+		Config.LlmServerOrchestratorThinkingLevel,
+		orchestratorThinkingLevelSet,
+		Config.LlmServerReact3OrchestratorThinkingLevel,
+		legacyOrchestratorThinkingLevelSet,
+	)
 
 	if Config.OtelExporterOtlpEndpoint == "" {
 		Config.OtelExporterOtlpEndpoint = "127.0.0.1:4317"
@@ -1723,6 +1717,24 @@ func init() {
 			Config.LlmServerCodeAgentNamespace = namespace
 		}
 	}
+}
+
+func configKeyExplicitlySet(key string) bool {
+	if viper.InConfig(key) {
+		return true
+	}
+	_, exists := os.LookupEnv(strings.ToUpper(key))
+	return exists
+}
+
+func resolveOrchestratorThinkingLevelConfig(canonical string, canonicalSet bool, legacy string, legacySet bool) string {
+	if canonicalSet {
+		return canonical
+	}
+	if legacySet {
+		return legacy
+	}
+	return "medium"
 }
 
 // OrphanRecoveryHorizon bounds how stale an abandoned conversation may be and still

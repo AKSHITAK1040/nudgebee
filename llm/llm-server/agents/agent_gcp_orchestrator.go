@@ -77,7 +77,7 @@ func (a *GcpOrchestratorAgent) IsWatchCapable() bool { return true }
 
 // NB: no CritiqueEnabled() method on purpose — the orchestrator does not
 // implement NBAgentReActPlannerCritiqueSupport, so critique is governed by the
-// standard gate (LlmServerReActCritiqueEnabled && top-level && investigation).
+// standard gate (top-level && investigation).
 
 func (a *GcpOrchestratorAgent) GetSupportedTools(ctx *security.RequestContext) []tocore.NBTool {
 	// Reduced cloud core (gcloud_execute + SDG + events + recommendations + delegate

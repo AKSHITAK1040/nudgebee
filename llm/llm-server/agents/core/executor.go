@@ -165,25 +165,15 @@ func resolveModelTier(agent NBAgent, request NBAgentRequest) ModelTier {
 // promptVariantForRequest returns the prompt/cache variant for a turn. Only a
 // TOP-LEVEL plain-retrieval (query) turn gets a non-default variant; investigations,
 // sub-agents, and degenerate queries resolve to "" (full/default prompt + its cache
-// slot). Query turns fork the prompt shape AND the cache slot:
-//   - lean-prompt flag ON  → promptVariantLean: drops the heavy investigation overlays
-//     (notebook / hypothesis / orchestrator contract) AND the RCA answer-format spec.
-//   - lean-prompt flag OFF → promptVariantQuery: drops ONLY the RCA answer-format spec,
-//     so a simple query is not answered as an investigation, while keeping every other
-//     overlay identical to today.
-//
-// Either way the variant keys a DISTINCT cache slot from investigation turns, so the
-// two prompt shapes coexist instead of alternating content under one slot and busting it.
+// slot). Query turns use promptVariantLean, which drops investigation-only
+// overlays and the RCA answer-format spec while retaining a distinct cache slot.
 // Classification uses isTopLevelPlainRetrievalTurn — the same canonical signal that
 // drives the model-tier downshift — so prompt variant, cache slot, and tier agree.
 func promptVariantForRequest(request NBAgentRequest) string {
 	if !isTopLevelPlainRetrievalTurn(request) {
 		return ""
 	}
-	if config.Config.LlmServerReact3QueryLeanPromptEnabled {
-		return promptVariantLean
-	}
-	return promptVariantQuery
+	return promptVariantLean
 }
 
 // isTopLevelPlainRetrievalTurn reports whether this is a TOP-LEVEL, non-investigation
@@ -1382,7 +1372,8 @@ func createAgentPlanner(ctx *security.RequestContext, agent NBAgent, request NBA
 		// Orchestrating, ReAct and ReAct3 execute as react_3 by default, or as
 		// react_4 (provider-native tool calling) when LlmServerReAct4Enabled is
 		// set AND the resolved provider/model supports native tools
-		// (useReAct4Engine). Gated off by default. See docs/planner_react_4.md.
+		// (useReAct4Engine). An explicit false override rolls back to ReAct3.
+		// See docs/planner_react_4.md.
 		//
 		// react_4 receives the react_3-style agent systemMessage (built via the
 		// same GetPromptTemplate, which carries no XML action grammar — that
