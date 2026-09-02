@@ -55,6 +55,11 @@ ml-k8s-server/tests/bench_e2e.py
 # ─── Frontend (TS / React) ───────────────────────────────────────────
 app/src/ee/
 
+# Unit tests for the EE frontend tree. Jest keeps tests outside src/, so they are
+# not covered by app/src/ee/ above, and a test importing @ee/* trips the
+# "no residual ee/ imports" assertion in build-oss-snapshot.sh.
+app/__tests__/ee/
+
 # SAML-handling Next.js pages — entire flow is EE (Okta/Azure AD/Auth0
 # enterprise SSO). Can't live under app/src/ee/ because the pages-router
 # requires filesystem paths under app/src/pages/, so they're listed

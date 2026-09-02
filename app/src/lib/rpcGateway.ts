@@ -1,4 +1,4 @@
-import { getToken, type JWT } from 'next-auth/jwt';
+import { type JWT } from 'next-auth/jwt';
 import type { NextApiRequest } from 'next';
 import {
   parse,
@@ -10,6 +10,7 @@ import {
   type ValueNode,
 } from 'graphql';
 import { decodeSessionJWT, decrypt } from '@lib/internal';
+import { readSessionToken } from '@lib/sessionCookie';
 import { isSessionRevoked } from '@lib/sessionRevocation';
 import { loadActionInputSchema, loadRpcRoutes, type RpcRoute, type SchemaFieldInfo } from '@lib/rpcRoutes';
 import { elevateRoles } from '@lib/authHooks';
@@ -146,7 +147,7 @@ export async function authenticateRequest(req: NextApiRequest): Promise<AuthCont
       }
     }
   }
-  let jwt = await getToken({ req });
+  let jwt = await readSessionToken(req);
   const fromCookie = !!jwt && !token;
   // Bearer-only flow (no NextAuth cookie): decode the bearer JWT and
   // synthesize the JWT shape buildSessionVariables expects. Without this,
