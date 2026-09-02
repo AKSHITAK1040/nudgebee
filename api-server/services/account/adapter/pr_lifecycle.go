@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"strconv"
+	"strings"
 	"time"
 
 	"nudgebee/services/common"
@@ -124,27 +127,29 @@ func CheckAndFollowupOpenPRs(ctx *security.RequestContext) error {
 	return nil
 }
 
-// followupIterationCap and followupRecoveryInterval govern how aggressively
-// the cron retries. The cron is now a safety net behind GitHub App webhooks
-// (see /api/webhooks/github in public_webhooks.go), so the base cooldown is
-// long: real PR events fire ProcessOpenPRFollowup directly, and the cron
-// only catches cases where a webhook delivery was missed. Once capped, the
-// recovery clause re-checks every 6 hours — a backstop for late reviewer
-// feedback (Gemini can take >2h after PR creation), or where downstream bugs
-// inflate the count beyond what real failures justify. Capped rows that
-// produce a no-op or success on a recovery run will not advance further.
+// followupIterationCap bounds how many times a followup that keeps reporting
+// `failed` is retried before the claim gate (claimOrMarkResolution) stops
+// admitting it. It only bites runs that actually fail: `no_op` and `success`
+// leave the counter where it was or reset it, by design — a PR reviewed hours
+// after creation must not be capped before the reviewer shows up. Because of
+// that the counter can sit at 0 forever, so it is NOT the loop's exit: the
+// unconditional exit is age. markStaleResolutions retires any followup still
+// open followupStaleAfter after the PR was raised, whatever the counter says
+// (#37472).
+//
+// The cron (cron_triggers.yaml: '0 */6 * * *') is a backstop behind GitHub App
+// webhooks (see /api/webhooks/github in public_webhooks.go): real PR events
+// fire ProcessOpenPRFollowup directly, and the 6h sweep only catches missed
+// deliveries.
 const (
-	followupIterationCap      = 5
-	followupCooldown          = "60 minutes"
-	followupRecoveryInterval  = "6 hours"
-	followupRecoveryHardLimit = 20
+	followupIterationCap = 5
 	// followupWebhookDebounce collapses a burst of webhook events on the same PR
 	// (a CI run emits many check_run transitions over several minutes) into a
-	// single followup. The cron path already spaces itself with followupCooldown,
+	// single followup. The cron path already spaces itself with its 6h schedule,
 	// but ProcessOpenPRFollowup (the webhook path) had no rate limit, so a
 	// no-op-producing PR re-dispatched once per event — the observed storm of 15
 	// followups in 16 minutes. A genuinely new event still triggers a followup
-	// once the window elapses; the 60m cron is the backstop if it is debounced.
+	// once the window elapses; the 6h cron is the backstop if it is debounced.
 	followupWebhookDebounce = "10 minutes"
 	// followupAddressingLease is how long a row may sit in 'addressing' before the
 	// cron treats the claiming run as dead and reclaims it to 'needs_followup'. A
@@ -158,13 +163,14 @@ const (
 	// the 35-min bound so a genuinely in-flight run is never reclaimed.
 	followupAddressingLease = "45 minutes"
 	// followupStaleAfter retires a followup that has been open this long while
-	// still unmerged after at least followupIterationCap attempts. These are
-	// auto-generated PRs nobody reviewed or merged; without a stale exit they
-	// churn no-op followups on the 6h recovery loop up to the hard limit for
-	// days. The window is far beyond the ">2h late reviewer" case the no_op-free
-	// counter design guards against. Stale is "stop following up" only — the PR
-	// is left open on GitHub, and a real webhook signal resurrects it (see
-	// ProcessOpenPRFollowup).
+	// still unmerged. These are auto-generated PRs nobody reviewed or merged;
+	// without a stale exit they churn a no-op followup every cron sweep forever,
+	// because `no_op`/`success` never advance pr_iteration_count and so the
+	// counter-gated cap never fires (#37472). The exit is age alone — deliberately
+	// far beyond the ">2h late reviewer" case the counter design guards against —
+	// so it does not depend on a counter that, by design, may never move. Stale
+	// is "stop following up" only: the PR is left open on GitHub, and a real
+	// webhook signal resurrects it (see ProcessOpenPRFollowup).
 	followupStaleAfter = "3 days"
 	// prCreationAbandonedAfter retires a resolution that has been "creating a pull
 	// request" without ever recording a URL for this long. Such a row is a dead
@@ -408,12 +414,18 @@ func reclaimStuckAddressingInTable(ctx *security.RequestContext, dbms *database.
 }
 
 // markStaleResolutions retires followups that have stayed open past
-// followupStaleAfter with no merge despite reaching the iteration cap. This is
-// the terminal exit the lifecycle otherwise lacks: capped rows are re-admitted
-// on the 6h recovery clause up to the hard limit, so without this an unmerged
-// auto-PR churns no-op followups for days. 'addressing' rows are left alone so a
-// mid-flight run is never yanked. Best-effort — a failure here must not stop the
-// sweep, so the error is logged, not returned.
+// followupStaleAfter with no merge. This is the lifecycle's only unconditional
+// terminal exit: pr_iteration_count only advances on a `failed` outcome, so a
+// PR that keeps producing `no_op`/`success` never reaches the cap and would
+// otherwise be followed up every cron sweep until someone merges or closes it
+// (#37472). Retirement is on age alone for that reason. The age is measured
+// from created_at, which the two deliberate-restart paths
+// (resurrectStalePRFollowup on a webhook, ResetPRFollowupBudget on a value
+// refresh) bump to now() — so it reads as "start of the current followup
+// cycle", and a resurrected or refreshed row is not re-retired on the next
+// sweep. 'addressing' rows are left alone so a mid-flight run is never yanked.
+// Best-effort — a failure here must not stop the sweep, so the error is logged,
+// not returned.
 func markStaleResolutions(ctx *security.RequestContext, dbms *database.DatabaseManager) {
 	markStaleResolutionsInTable(ctx, dbms, prFollowupTable)
 }
@@ -422,7 +434,7 @@ func markStaleResolutions(ctx *security.RequestContext, dbms *database.DatabaseM
 // markStaleResolutions, split out so the SQL can be exercised against a
 // throwaway table in tests. Returns the number of rows retired.
 func markStaleResolutionsInTable(ctx *security.RequestContext, dbms *database.DatabaseManager, table string) int64 {
-	msg := fmt.Sprintf("retired: unmerged after %s and %d followup attempts", followupStaleAfter, followupIterationCap)
+	msg := fmt.Sprintf("retired: open and unmerged for %s", followupStaleAfter)
 	res, err := dbms.Db.ExecContext(ctx.GetContext(),
 		fmt.Sprintf(`UPDATE %s SET
 			pr_lifecycle_state = 'stale',
@@ -430,9 +442,8 @@ func markStaleResolutionsInTable(ctx *security.RequestContext, dbms *database.Da
 			pr_followup_pending = false,
 			last_pr_check_at = now()
 			WHERE pr_lifecycle_state IN ('created', 'needs_followup')
-			  AND pr_iteration_count >= $2
-			  AND created_at < now() - $3::interval`, table),
-		msg, followupIterationCap, followupStaleAfter)
+			  AND created_at < now() - $2::interval`, table),
+		msg, followupStaleAfter)
 	if err != nil {
 		ctx.GetLogger().Error("pr_lifecycle: failed to mark stale resolutions", "table", table, "error", err)
 		return 0
@@ -656,6 +667,27 @@ func dispatchPRFollowup(ctx *security.RequestContext, dbms *database.DatabaseMan
 		return nil
 	}
 
+	// Confirm the PR is still open before doing any work. The GitHub webhook is
+	// what normally retires a closed PR (and clears pr_followup_pending), but it
+	// is not always delivered in prod, and neither resolution poll covers
+	// agent-raised PR rows — the event poll reads resolver_type='User' only, and
+	// the recommendation poll never writes pr_followup. Without this a closed PR
+	// keeps a 'needs_followup' row and is dispatched (and commented on) every
+	// sweep until the 3-day stale exit (#37472). An unknown result (provider
+	// unreachable) falls through to the normal path — no worse than before this
+	// check. Skipped on the internal mid-run re-dispatch: the state was just
+	// checked and the agent just ran.
+	if trigger != "redispatch" {
+		if state, known := resolvePRState(ctx, dbms, tenantID, meta); known && state.closed {
+			ctx.GetLogger().Info("pr_lifecycle: PR is closed on the provider, retiring followup",
+				"pr_url", prURL, "merged", state.merged, "trigger", trigger)
+			if _, terr := MarkAllPRResolutionsTerminalByURL(ctx, prURL, state.merged); terr != nil {
+				ctx.GetLogger().Error("pr_lifecycle: failed to retire closed PR", "pr_url", prURL, "error", terr)
+			}
+			return nil
+		}
+	}
+
 	followupID, err := findOrCreatePRFollowup(dbms, prURL, tenantID, createdAt)
 	if err != nil {
 		return err
@@ -869,9 +901,14 @@ func resurrectStalePRFollowupByURL(ctx *security.RequestContext, dbms *database.
 func resurrectStalePRFollowupInTable(ctx *security.RequestContext, dbms *database.DatabaseManager, table, prURL string) (int64, error) {
 	dbCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx.GetContext()), prDBOpTimeout)
 	defer cancel()
+	// created_at is bumped to now(): markStaleResolutions retires purely on
+	// created_at age (#37472), so without this a webhook that resurrects a
+	// >3-day-old row would see it re-retired on the very next cron sweep. The
+	// column now means "when the current followup cycle began", not "when the PR
+	// was first seen" — a deliberate restart resets that clock.
 	res, err := dbms.Db.ExecContext(dbCtx,
 		fmt.Sprintf(`UPDATE %s SET pr_lifecycle_state = 'needs_followup',
-			pr_iteration_count = 0, pr_followup_pending = false
+			pr_iteration_count = 0, pr_followup_pending = false, created_at = now()
 			WHERE pr_url = $1 AND pr_lifecycle_state = 'stale'`, table),
 		prURL)
 	if err != nil {
@@ -891,6 +928,11 @@ func resurrectStalePRFollowupInTable(ctx *security.RequestContext, dbms *databas
 // way, so this mirrors that guard rather than resurrecting a dead PR. Also a
 // no-op if no pr_followup row exists yet — a fresh one is lazily created at
 // pr_iteration_count=0/'created' already, so there's nothing to reset.
+//
+// created_at is bumped to now() for the same reason as resurrectStalePRFollowup:
+// markStaleResolutions retires on created_at age alone (#37472), so a refresh
+// landing on a PR more than 3 days old would otherwise get its fresh budget
+// immediately retired on the next cron sweep.
 func ResetPRFollowupBudget(ctx AccountAdapterContext, prURL string) error {
 	dbms, err := database.GetDatabaseManager(database.Metastore)
 	if err != nil {
@@ -900,7 +942,7 @@ func ResetPRFollowupBudget(ctx AccountAdapterContext, prURL string) error {
 	defer cancel()
 	_, err = dbms.Db.ExecContext(dbCtx,
 		fmt.Sprintf(`UPDATE %s SET pr_iteration_count = 0, pr_lifecycle_state = 'created',
-			pr_followup_pending = false, updated_at = now()
+			pr_followup_pending = false, created_at = now(), updated_at = now()
 			WHERE pr_url = $1 AND pr_lifecycle_state NOT IN ('merged', 'closed', 'unresolvable')`, prFollowupTable),
 		prURL)
 	return err
@@ -1239,6 +1281,223 @@ func classifyFollowupOutcome(responses []string) followupOutcome {
 			return followupOutcomeSuccess
 		}
 		return followupOutcomeFailed
+	}
+}
+
+// observedPRState is what a direct provider lookup reports about a pull request
+// (GitHub) or merge request (GitLab): closed at all, and — if closed — merged.
+type observedPRState struct {
+	closed bool
+	merged bool
+}
+
+// resolvePRState asks the provider directly whether a PR/MR is still open, so
+// dispatchPRFollowup can retire a PR that was closed while the GitHub webhook —
+// the signal that normally does this — was not being delivered (#37472).
+//
+// Returns known=false (never a hard error) when the state cannot be determined:
+// no integration config, a GitHub App token failure, a network error, a non-200
+// response, or an unparseable URL. The caller treats "unknown" as "still open"
+// and proceeds exactly as it did before this check existed, so a provider
+// outage degrades to the pre-existing behaviour rather than stalling followups.
+func resolvePRState(ctx *security.RequestContext, dbms *database.DatabaseManager, tenantID string, meta prMetadata) (state observedPRState, known bool) {
+	integrationType := "github"
+	if strings.EqualFold(meta.Provider, "gitlab") {
+		integrationType = "gitlab"
+	}
+	cfg, err := loadGitIntegrationConfig(dbms, tenantID, integrationType)
+	if err != nil {
+		ctx.GetLogger().Warn("pr_lifecycle: cannot verify PR state — no integration config",
+			"pr_url", meta.PRURL, "provider", integrationType, "error", err)
+		return observedPRState{}, false
+	}
+	if integrationType == "gitlab" {
+		return resolveGitLabMRState(ctx, meta, cfg)
+	}
+	return resolveGitHubPRState(ctx, meta, cfg)
+}
+
+// loadGitIntegrationConfig returns the decrypted integration_config_values
+// (keyed by config name: url, username, password, auth_type, …) for the
+// tenant's first enabled integration of the given type. Keyed by integration
+// type, not by provider name, because that is all the followup path knows —
+// prMetadata carries "github"/"gitlab", never the integration's own name.
+func loadGitIntegrationConfig(dbms *database.DatabaseManager, tenantID, integrationType string) (map[string]string, error) {
+	if tenantID == "" {
+		return nil, fmt.Errorf("tenant ID is empty")
+	}
+	var integrationID string
+	if err := dbms.Db.QueryRowx(`
+		SELECT i.id::text FROM integrations i
+		WHERE i.tenant_id = $1 AND i.type = $2 AND i.status = 'enabled'
+		LIMIT 1`, tenantID, integrationType).Scan(&integrationID); err != nil {
+		return nil, fmt.Errorf("no enabled %s integration for tenant %s: %w", integrationType, tenantID, err)
+	}
+	rows, err := dbms.Db.Queryx(`
+		SELECT name::text, value::text, is_encrypted
+		FROM integration_config_values WHERE integration_id = $1`, integrationID)
+	if err != nil {
+		return nil, fmt.Errorf("querying integration_config_values (%s): %w", integrationID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	configs := make(map[string]string)
+	for rows.Next() {
+		var name, value string
+		var encrypted bool
+		if err := rows.Scan(&name, &value, &encrypted); err != nil {
+			return nil, err
+		}
+		if encrypted && value != "" {
+			decrypted, derr := common.Decrypt(value)
+			if derr != nil {
+				return nil, fmt.Errorf("decrypt config %q: %w", name, derr)
+			}
+			value = decrypted
+		}
+		configs[name] = value
+	}
+	return configs, rows.Err()
+}
+
+// resolveGitHubPRState does GET /repos/{org}/{repo}/pulls/{n} and reads state +
+// merged_at. Matches the existing GetRecommendationResolutionStatus path: the
+// public api.github.com host (GHE PR-status is not supported there either), and
+// an installation token minted from the App installation id for auth_type
+// "application".
+func resolveGitHubPRState(ctx *security.RequestContext, meta prMetadata, cfg map[string]string) (observedPRState, bool) {
+	org, repo, number := prCoordinatesFromMeta(meta)
+	if org == "" || repo == "" || number == "" {
+		return observedPRState{}, false
+	}
+	token := cfg["password"]
+	if cfg["auth_type"] == "application" {
+		// password is the GitHub App installation id, not a usable API token.
+		tokCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx.GetContext()), 30*time.Second)
+		appToken, terr := common.GetGithubAppInstallationToken(tokCtx, token)
+		cancel()
+		if terr != nil {
+			ctx.GetLogger().Warn("pr_lifecycle: cannot verify PR state — GitHub App token failed",
+				"pr_url", meta.PRURL, "error", terr)
+			return observedPRState{}, false
+		}
+		token = appToken
+	}
+	body, status, ok := httpGetJSON(ctx,
+		fmt.Sprintf("https://api.github.com/repos/%s/%s/pulls/%s", org, repo, number),
+		map[string]string{"Authorization": "Bearer " + token, "Accept": "application/vnd.github+json"})
+	if !ok || status != 200 {
+		ctx.GetLogger().Warn("pr_lifecycle: PR state lookup did not return 200", "pr_url", meta.PRURL, "status", status)
+		return observedPRState{}, false
+	}
+	return githubPRStateFromBody(body), true
+}
+
+// resolveGitLabMRState does GET /projects/{path}/merge_requests/{iid} and maps
+// the GitLab MR state (opened / closed / merged / locked) onto observedPRState.
+func resolveGitLabMRState(ctx *security.RequestContext, meta prMetadata, cfg map[string]string) (observedPRState, bool) {
+	base := cfg["url"]
+	if base == "" {
+		base = "https://gitlab.com"
+	}
+	projectPath, mrIID, err := parseGitLabMRURL(meta.PRURL, base)
+	if err != nil {
+		ctx.GetLogger().Warn("pr_lifecycle: cannot verify MR state — unparseable MR URL", "mr_url", meta.PRURL, "error", err)
+		return observedPRState{}, false
+	}
+	encodedPath := strings.ReplaceAll(projectPath, "/", "%2F")
+	body, status, ok := httpGetJSON(ctx,
+		fmt.Sprintf("%s/api/v4/projects/%s/merge_requests/%s", strings.TrimSuffix(base, "/"), encodedPath, mrIID),
+		map[string]string{"PRIVATE-TOKEN": cfg["password"]})
+	if !ok || status != 200 {
+		ctx.GetLogger().Warn("pr_lifecycle: MR state lookup did not return 200", "mr_url", meta.PRURL, "status", status)
+		return observedPRState{}, false
+	}
+	return gitlabMRStateFromBody(body), true
+}
+
+// githubPRStateFromBody / gitlabMRStateFromBody are the pure response→state maps,
+// split out so the classification is unit-testable without a live provider.
+func githubPRStateFromBody(body map[string]any) observedPRState {
+	st, _ := body["state"].(string)
+	return observedPRState{closed: st == "closed", merged: body["merged_at"] != nil}
+}
+
+func gitlabMRStateFromBody(body map[string]any) observedPRState {
+	switch st, _ := body["state"].(string); st {
+	case "merged":
+		return observedPRState{closed: true, merged: true}
+	case "closed":
+		return observedPRState{closed: true}
+	default: // opened, locked, or anything unexpected → treat as still open
+		return observedPRState{}
+	}
+}
+
+// httpGetJSON is a small GET-and-decode-object helper for the provider lookups.
+// Any failure returns ok=false; the status code is still reported when the
+// request itself completed.
+func httpGetJSON(ctx *security.RequestContext, url string, headers map[string]string) (body map[string]any, status int, ok bool) {
+	resp, err := common.HttpGet(url, common.HttpWithHeaders(headers))
+	if err != nil {
+		ctx.GetLogger().Warn("pr_lifecycle: provider GET failed", "url", url, "error", err)
+		return nil, 0, false
+	}
+	defer func() {
+		// Drain before close so the keep-alive connection can be reused even on
+		// the io.ReadAll error path below.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, false
+	}
+	if err := common.UnmarshalJson(raw, &body); err != nil {
+		return nil, resp.StatusCode, false
+	}
+	return body, resp.StatusCode, true
+}
+
+// prCoordinatesFromMeta returns org, repo and PR number for a GitHub PR, taking
+// each from prMetadata when set and otherwise parsing the PR URL
+// (https://github.com/<org>/<repo>/pull/<n>).
+func prCoordinatesFromMeta(meta prMetadata) (org, repo, number string) {
+	org, repo = meta.Org, meta.Repo
+	number = prNumberString(meta.PRNumber)
+	if org != "" && repo != "" && number != "" {
+		return org, repo, number
+	}
+	parts := strings.Split(strings.TrimRight(meta.PRURL, "/"), "/")
+	if len(parts) >= 4 {
+		if number == "" {
+			number = parts[len(parts)-1]
+		}
+		if repo == "" {
+			repo = parts[len(parts)-3]
+		}
+		if org == "" {
+			org = parts[len(parts)-4]
+		}
+	}
+	return org, repo, number
+}
+
+// prNumberString renders the prMetadata.PRNumber (JSON-decoded, so typically
+// float64 or string) as a decimal string; "" for anything unusable.
+func prNumberString(v any) string {
+	switch n := v.(type) {
+	case string:
+		return n
+	case float64:
+		return strconv.FormatInt(int64(n), 10)
+	case int:
+		return strconv.Itoa(n)
+	case int64:
+		return strconv.FormatInt(n, 10)
+	case json.Number:
+		return n.String()
+	default:
+		return ""
 	}
 }
 

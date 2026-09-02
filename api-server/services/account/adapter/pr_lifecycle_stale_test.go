@@ -63,11 +63,12 @@ func TestGroupCandidatesByPRURL(t *testing.T) {
 }
 
 // TestMarkStaleResolutionsInTable_DB verifies the stale-sweep UPDATE against real
-// Postgres: it retires only pr_followup rows that are open, past the iteration
-// cap, and older than followupStaleAfter — leaving recent rows, under-cap rows,
-// in-flight ('addressing') rows, and already-terminal rows untouched. Uses a
-// throwaway table mirroring the columns the SQL touches, so it needs no FK
-// fixtures and no real pr_followup migration applied.
+// Postgres: it retires every open pr_followup row older than followupStaleAfter
+// regardless of pr_iteration_count (#37472 — the counter only moves on `failed`,
+// which never happens, so gating the exit on it never retired anything), while
+// leaving recent rows, in-flight ('addressing') rows, and already-terminal rows
+// untouched. Uses a throwaway table mirroring the columns the SQL touches, so it
+// needs no FK fixtures and no real pr_followup migration applied.
 //
 // DB-gated: skips when no database is reachable (CI without a metastore).
 func TestMarkStaleResolutionsInTable_DB(t *testing.T) {
@@ -93,7 +94,8 @@ func TestMarkStaleResolutionsInTable_DB(t *testing.T) {
 	)`, tbl))
 	t.Cleanup(func() { _, _ = dbms.Db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, tbl)) })
 
-	// ageDays controls created_at; capped+old is the only combination that retires.
+	// ageDays controls created_at; an open row older than followupStaleAfter
+	// retires whatever its iteration count.
 	seed := func(id, state string, iters, ageDays int) {
 		mustExec(fmt.Sprintf(`INSERT INTO %s
 			(id, pr_lifecycle_state, pr_iteration_count, created_at)
@@ -106,24 +108,25 @@ func TestMarkStaleResolutionsInTable_DB(t *testing.T) {
 		return
 	}
 
-	// Should retire: at/over cap, older than 3 days.
-	seed("stale_capped", "needs_followup", followupIterationCap, 5)
-	seed("stale_overcap", "created", followupIterationCap+10, 9)
+	// Should retire: open and older than 3 days, at any iteration count. The
+	// zero_iters row is the exact #37472 case — the counter never moved off 0.
+	seed("stale_zero_iters", "needs_followup", 0, 30)
+	seed("stale_undercap", "needs_followup", followupIterationCap-1, 9)
+	seed("stale_capped", "created", followupIterationCap, 5)
 	// Should NOT retire:
-	seed("recent", "needs_followup", followupIterationCap, 1)     // too new
-	seed("undercap", "needs_followup", followupIterationCap-1, 9) // under cap
-	seed("addressing", "addressing", followupIterationCap, 9)     // in flight
-	seed("merged", "merged", followupIterationCap, 9)             // already terminal
+	seed("recent", "needs_followup", 0, 1)                    // too new
+	seed("addressing", "addressing", followupIterationCap, 9) // in flight
+	seed("merged", "merged", followupIterationCap, 9)         // already terminal
 
 	ctx := security.NewRequestContextForSuperAdmin(nil, nil, nil)
 	n := markStaleResolutionsInTable(ctx, dbms, tbl)
-	assert.Equal(t, int64(2), n, "exactly the two open+capped+old rows are retired")
+	assert.Equal(t, int64(3), n, "every open row older than followupStaleAfter is retired")
 
+	assert.Equal(t, "stale", state("stale_zero_iters"), "a row stuck at count 0 is still retired on age")
+	assert.Equal(t, "stale", state("stale_undercap"))
 	assert.Equal(t, "stale", state("stale_capped"))
-	assert.Equal(t, "stale", state("stale_overcap"))
 
 	assert.Equal(t, "needs_followup", state("recent"), "recent row untouched")
-	assert.Equal(t, "needs_followup", state("undercap"), "under-cap row untouched")
 	assert.Equal(t, "addressing", state("addressing"), "in-flight row untouched")
 	assert.Equal(t, "merged", state("merged"), "terminal row untouched")
 }
@@ -211,9 +214,11 @@ func TestReclaimStuckAddressingInTable_DB(t *testing.T) {
 }
 
 // TestResurrectStalePRFollowupInTable_DB verifies the webhook-only resurrection: a
-// 'stale' row is reset to needs_followup with a fresh (0) iteration budget and the
-// pending flag cleared, while a non-stale row is left untouched (the guard
-// prevents a concurrent terminal from being overwritten back to active).
+// 'stale' row is reset to needs_followup with a fresh (0) iteration budget, the
+// pending flag cleared, and created_at bumped to now() so markStaleResolutions
+// (which retires on created_at age alone, #37472) does not re-retire it on the
+// next sweep. A non-stale row is left untouched (the guard prevents a concurrent
+// terminal from being overwritten back to active).
 //
 // DB-gated: skips when no database is reachable (CI without a metastore).
 func TestResurrectStalePRFollowupInTable_DB(t *testing.T) {
@@ -233,13 +238,14 @@ func TestResurrectStalePRFollowupInTable_DB(t *testing.T) {
 		pr_url text NOT NULL,
 		pr_lifecycle_state text NOT NULL,
 		pr_iteration_count int NOT NULL DEFAULT 0,
-		pr_followup_pending boolean NOT NULL DEFAULT false
+		pr_followup_pending boolean NOT NULL DEFAULT false,
+		created_at timestamptz NOT NULL DEFAULT now()
 	)`, tbl))
 	t.Cleanup(func() { _, _ = dbms.Db.Exec(fmt.Sprintf(`DROP TABLE IF EXISTS %s`, tbl)) })
 
 	seed := func(id, prURL, state string, iters int, pending bool) {
-		mustExec(fmt.Sprintf(`INSERT INTO %s (id, pr_url, pr_lifecycle_state, pr_iteration_count, pr_followup_pending)
-			VALUES ($1,$2,$3,$4,$5)`, tbl), id, prURL, state, iters, pending)
+		mustExec(fmt.Sprintf(`INSERT INTO %s (id, pr_url, pr_lifecycle_state, pr_iteration_count, pr_followup_pending, created_at)
+			VALUES ($1,$2,$3,$4,$5, now() - interval '30 days')`, tbl), id, prURL, state, iters, pending)
 	}
 	get := func(id string) (state string, iters int, pending bool) {
 		require.NoError(t, dbms.Db.QueryRow(
@@ -247,10 +253,15 @@ func TestResurrectStalePRFollowupInTable_DB(t *testing.T) {
 			Scan(&state, &iters, &pending))
 		return
 	}
+	ageDays := func(id string) (days float64) {
+		require.NoError(t, dbms.Db.QueryRow(
+			fmt.Sprintf(`SELECT EXTRACT(EPOCH FROM now() - created_at) / 86400 FROM %s WHERE id=$1`, tbl), id).Scan(&days))
+		return
+	}
 
 	ctx := security.NewRequestContextForSuperAdmin(nil, nil, nil)
 
-	// stale row -> resurrected with a fresh budget.
+	// stale row -> resurrected with a fresh budget and a fresh created_at clock.
 	seed("stale_row", "https://github.com/acme/infra/pull/1", "stale", followupIterationCap+3, false)
 	n, err := resurrectStalePRFollowupInTable(ctx, dbms, tbl, "https://github.com/acme/infra/pull/1")
 	require.NoError(t, err)
@@ -259,6 +270,7 @@ func TestResurrectStalePRFollowupInTable_DB(t *testing.T) {
 	assert.Equal(t, "needs_followup", st)
 	assert.Equal(t, 0, it, "iteration budget reset")
 	assert.False(t, pend)
+	assert.Less(t, ageDays("stale_row"), 1.0, "created_at bumped to now() so the row is not re-staled next sweep")
 
 	// non-stale row -> guard leaves it as-is.
 	seed("merged_row", "https://github.com/acme/infra/pull/2", "merged", 2, false)
