@@ -19,11 +19,13 @@ const hoursPerMonth = 730.0
 
 var storageRatesPerGBMonth = map[string]map[string]float64{
 	"gcp": {
-		"pd-standard":        0.04,
-		"pd-balanced":        0.10,
-		"pd-ssd":             0.17,
-		"pd-extreme":         0.125,
-		"hyperdisk-balanced": 0.10,
+		"pd-standard": 0.04,
+		"pd-balanced": 0.10,
+		"pd-ssd":      0.17,
+		"pd-extreme":  0.125,
+		// Capacity only. Unlike pd-*, hyperdisk also bills provisioned IOPS
+		// and throughput above baseline, so deleting one saves more than this.
+		"hyperdisk-balanced": 0.08,
 	},
 	"aws": {
 		"gp2":      0.10,

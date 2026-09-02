@@ -17,7 +17,9 @@ STORAGE_RATES_PER_GB_MONTH = {
         "pd-balanced": 0.10,
         "pd-ssd": 0.17,
         "pd-extreme": 0.125,
-        "hyperdisk-balanced": 0.10,
+        # Capacity only. Unlike pd-*, hyperdisk also bills provisioned IOPS
+        # and throughput above baseline, so deleting one saves more than this.
+        "hyperdisk-balanced": 0.08,
     },
     "aws": {
         "gp2": 0.10,

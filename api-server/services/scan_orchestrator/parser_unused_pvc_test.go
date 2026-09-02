@@ -246,6 +246,18 @@ func TestResolveStoragePricing_Ladder(t *testing.T) {
 	if p := resolveStoragePricing(bare, nil, "azure"); p.Source != "provider_default" || p.PricePerGB != 0.075 {
 		t.Errorf("account-provider backstop: got %+v", p)
 	}
+	// GKE's newer default class, and the only GCP type whose rate is not
+	// shared with pd-balanced — a drifted entry here overstates savings on
+	// most modern GKE clusters.
+	hdClasses := map[string]map[string]any{
+		"hyperdisk-balanced-rwo": {
+			"provisioner": "pd.csi.storage.gke.io",
+			"parameters":  map[string]any{"type": "hyperdisk-balanced"},
+		},
+	}
+	if p := resolveStoragePricing(pvWithClass("hyperdisk-balanced-rwo"), hdClasses, ""); p.Source != "parameters" || p.PricePerGB != 0.08 {
+		t.Errorf("hyperdisk-balanced: got %+v", p)
+	}
 	// On-prem class name that collides with a GKE default must NOT price as GCP.
 	onPrem := map[string]map[string]any{
 		"standard": {"provisioner": "rancher.io/local-path"},

@@ -57,6 +57,18 @@ class TestResolveStoragePricing(unittest.TestCase):
         self.assertEqual(pricing["source"], "parameters")
         self.assertEqual(pricing["price_per_gb"], 0.17)
 
+    def test_hyperdisk_balanced_is_priced_below_pd_balanced(self):
+        pv = {"spec": {"storage_class_name": "hyperdisk-balanced-rwo"}}
+        classes = {
+            "hyperdisk-balanced-rwo": {
+                "provisioner": "pd.csi.storage.gke.io",
+                "parameters": {"type": "hyperdisk-balanced"},
+            }
+        }
+        pricing = sp.resolve_storage_pricing(pv, storage_classes=classes)
+        self.assertEqual(pricing["source"], "parameters")
+        self.assertEqual(pricing["price_per_gb"], 0.08)
+
     def test_well_known_gke_standard_is_pd_standard(self):
         pv = {"spec": {"storage_class_name": "standard"}}
         classes = {"standard": {"provisioner": "kubernetes.io/gce-pd"}}

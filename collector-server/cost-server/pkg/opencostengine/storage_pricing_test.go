@@ -15,6 +15,7 @@ func TestResolveStorageRatePerGBMonth(t *testing.T) {
 	}{
 		{"gcp parameters type", "custom-ssd", map[string]string{"type": "pd-ssd"}, "gcp", 0.17},
 		{"azure skuName casing", "fast", map[string]string{"skuName": "Premium_LRS"}, "azure", 0.12},
+		{"gcp hyperdisk balanced", "hyperdisk-balanced-rwo", map[string]string{"type": "hyperdisk-balanced"}, "gcp", 0.08},
 		{"well-known gke standard", "standard", nil, "gcp", 0.04},
 		{"well-known aks managed-premium", "managed-premium", nil, "azure", 0.12},
 		{"unknown class provider default", "who-knows", nil, "aws", 0.10},
