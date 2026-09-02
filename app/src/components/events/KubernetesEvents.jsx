@@ -1354,9 +1354,9 @@ const KubernetesEventsTable = ({
                 size='xs'
                 trailingAccent={<FiArrowRight />}
                 href={`/investigate?id=${item.id}&accountId=${item.account_id}`}
-                data-testid='investigate-btn'
+                data-testid={item.is_investigated ? 'view-analysis-btn' : 'investigate-btn'}
               >
-                Investigate
+                {item.is_investigated ? 'View Analysis' : 'Investigate'}
               </DsButton>
               <ThreeDotsMenu
                 sx={{ ...action.primary }}

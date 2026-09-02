@@ -177,6 +177,7 @@ export const LIST_CLOUD_ISSUES = `
       computed_score
       score_factors
       score_confidence
+      is_investigated
     }
   }
 }`;
@@ -217,6 +218,7 @@ export const LIST_CLOUD_ISSUES_LIGHT = `
       computed_priority
       computed_score
       score_confidence
+      is_investigated
     }
   }
 }`;

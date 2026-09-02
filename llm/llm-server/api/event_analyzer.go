@@ -779,7 +779,7 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 				finalResponse.RelatedEventId = existingAnalysis.RelatedEventId
 			}
 			finalResponse.TaskStatuses[string(aType)] = existingAnalysis.Status
-			if existingAnalysis.Status != string(events.AnalysisStatusCompleted) || eventAnalysisRepo.IsAnalysisStale(existingAnalysis.UpdatedAt) {
+			if existingAnalysis.Status != string(events.AnalysisStatusCompleted) {
 				allCompleted = false
 			}
 			if isLiveFailure(eventAnalysisRepo, existingAnalysis) {
@@ -833,6 +833,13 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 		} else {
 			allCompleted = false
 		}
+	}
+
+	// One post-loop check on the newest stage (not per-stage in the loop) so it
+	// stays identical to the events-list "View Analysis" test in
+	// services/query is_investigated: completion_ts >= event.created_at - window.
+	if allCompleted && eventAnalysisRepo.IsAnalysisStaleForEvent(latestAnalysisAt, eventInfo.CreatedAt) {
+		allCompleted = false
 	}
 
 	if anyStarted && !request.Regenerate {

@@ -666,6 +666,13 @@ var prDependentColumns = map[string]bool{
 	"pr_title": true,
 }
 
+// Columns that add the investigation-status join, keyed on the (fingerprint,
+// account, aggregation_key) triple rather than event_id: analysis is cached per
+// fingerprint, so a sibling event's run is what /investigate serves.
+var investigationStatusDependentColumns = map[string]bool{
+	"is_investigated": true,
+}
+
 // Columns that depend on the event_correlations same_incident JOINs
 // (same-subject incident grouping, epic #34655).
 var incidentDependentColumns = map[string]bool{
@@ -1342,6 +1349,28 @@ var table_metadata = map[string]TableDefinition{
 					GROUP BY event_id, cloud_account_id
 				) ela ON ela.event_id = events.id AND ela.cloud_account_id = events.cloud_account_id`
 			}
+			// One row per triple (not per analysis stage), so it can't fan out
+			// event rows. The inner DISTINCT ON picks the newest row per stage —
+			// V850 keeps history rows. completion_ts is that newest stage's
+			// timestamp; the is_investigated column compares it to created_at.
+			if requestReferencesColumns(request, investigationStatusDependentColumns) {
+				from += ` LEFT JOIN (
+					SELECT event_fingerprint, cloud_account_id, event_aggregation_key,
+					       count(*) FILTER (WHERE status = 'COMPLETED') = 4 AS is_complete,
+					       max(ts) FILTER (WHERE status = 'COMPLETED') AS completion_ts
+					FROM (
+						SELECT DISTINCT ON (event_fingerprint, cloud_account_id, event_aggregation_key, analysis_type)
+						       event_fingerprint, cloud_account_id, event_aggregation_key,
+						       status, coalesce(updated_at, recorded_at) AS ts
+						FROM event_log_analysis
+						WHERE analysis_type IN ('summary', 'investigation', 'log_analysis', 'detailed_response')
+						ORDER BY event_fingerprint, cloud_account_id, event_aggregation_key, analysis_type, coalesce(updated_at, recorded_at) DESC
+					) latest
+					GROUP BY event_fingerprint, cloud_account_id, event_aggregation_key
+				) eia ON eia.event_fingerprint = events.fingerprint
+					AND eia.cloud_account_id = events.cloud_account_id
+					AND eia.event_aggregation_key = events.aggregation_key`
+			}
 			return from, request, nil
 		},
 		Name:                "event_groupings_v2",
@@ -1697,6 +1726,14 @@ var table_metadata = map[string]TableDefinition{
 				Def:          "bool_or(ecl.related_event_id IS NOT NULL)",
 				IsAggregated: true,
 			},
+			// eia.* (see the join in DefGenerator) is constant within a
+			// fingerprint group; the >= reuses the analysis for events that
+			// fired up to 24h after it, or any time before.
+			"is_investigated": {
+				Type:         ColumnDefinitionTypeBoolean,
+				Def:          "bool_and(coalesce(eia.is_complete, false)) AND max(eia.completion_ts) >= max(events.created_at) - INTERVAL '24 hours'",
+				IsAggregated: true,
+			},
 			// The event id the Grouped Alerts drill-down resolves the row's
 			// group from. A row's newest event is usually neither a leader nor
 			// a member — the leader is the OLDEST event of a recurring
@@ -1760,6 +1797,30 @@ var table_metadata = map[string]TableDefinition{
 						FROM event_correlations WHERE correlation_type = 'same_incident'
 						GROUP BY related_event_id, cloud_account_id) ecc
 						ON ecc.related_event_id = e.id AND ecc.cloud_account_id = e.cloud_account_id`)
+			}
+			if requestReferencesColumns(request, investigationStatusDependentColumns) {
+				// LATERAL rather than a whole-table grouped subquery: per list
+				// row this is an index range scan on
+				// idx_event_log_analysis_fingerprint_account_agg_type (V850),
+				// Memoized across repeated fingerprints, so cost stays flat as
+				// event_log_analysis grows. DISTINCT ON picks the newest row per
+				// stage — V850 keeps history rows.
+				selects = append(selects, `coalesce(eia.is_investigated, false) as is_investigated`)
+				joins = append(joins, `LEFT JOIN LATERAL (
+						SELECT count(*) FILTER (WHERE latest.status = 'COMPLETED') = 4
+							AND max(latest.ts) FILTER (WHERE latest.status = 'COMPLETED') >= e.created_at - INTERVAL '24 hours'
+							AS is_investigated
+						FROM (
+							SELECT DISTINCT ON (ela.analysis_type)
+							       ela.status, coalesce(ela.updated_at, ela.recorded_at) AS ts
+							FROM event_log_analysis ela
+							WHERE ela.event_fingerprint = e.fingerprint
+								AND ela.cloud_account_id = e.cloud_account_id
+								AND ela.event_aggregation_key = e.aggregation_key
+								AND ela.analysis_type IN ('summary', 'investigation', 'log_analysis', 'detailed_response')
+							ORDER BY ela.analysis_type, coalesce(ela.updated_at, ela.recorded_at) DESC
+						) latest
+					) eia ON true`)
 			}
 			if len(joins) == 0 {
 				return "events", request, nil
@@ -1894,6 +1955,10 @@ var table_metadata = map[string]TableDefinition{
 			},
 			"pr_title": {
 				Type: ColumnDefinitionTypeString,
+			},
+			// No Def: the LATERAL join in DefGenerator emits the aliased boolean.
+			"is_investigated": {
+				Type: ColumnDefinitionTypeBoolean,
 			},
 			"fingerprint_first_seen_at": {
 				Type: ColumnDefinitionTypeDatetime,

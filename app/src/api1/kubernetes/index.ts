@@ -1682,7 +1682,8 @@ const apiKubernetes = {
       score_factors
       score_confidence
       incident_leader_id
-      incident_member_count${issueTypeFields}
+      incident_member_count
+      is_investigated${issueTypeFields}
     }
   }
 }`;
@@ -1719,7 +1720,8 @@ const apiKubernetes = {
        score_factors
        score_confidence
        incident_leader_id
-       incident_member_count${issueTypeFields}
+       incident_member_count
+       is_investigated${issueTypeFields}
      }
    }
  }`;

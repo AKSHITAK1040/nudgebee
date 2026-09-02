@@ -307,9 +307,9 @@ const transformTableData = (
                 size='xs'
                 trailingAccent={<FiArrowRight />}
                 href={`/investigate?id=${item.latest_event_id}&accountId=${item.account_id}`}
-                data-testid='investigate-btn'
+                data-testid={item.is_investigated ? 'view-analysis-btn' : 'investigate-btn'}
               >
-                Investigate
+                {item.is_investigated ? 'View Analysis' : 'Investigate'}
               </DsButton>
               <DropdownMenu
                 align='end'
@@ -914,6 +914,7 @@ const KubernetesGroupedEventsTable: React.FC<KubernetesGroupedEventsTableProps> 
         'incident_group_size',
         'is_incident_child',
         'incident_group_leader_id',
+        'is_investigated',
       ];
       // Grouped by the workload, not by the pod (#37273). A fingerprint resolves to the
       // owning workload, so grouping on subject_name split one deployment's replicas into
