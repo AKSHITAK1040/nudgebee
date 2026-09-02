@@ -37,7 +37,8 @@ func isAlphaNum(c uint8) bool {
 }
 
 type ShellTool struct {
-	AccountId string
+	AccountId        string
+	workspaceManager workspace.WorkspaceManager
 }
 
 func (m ShellTool) Name() string {
@@ -57,7 +58,7 @@ func (m ShellTool) Description() string {
 
 	**Persistence:** Files at relative paths persist across turns within this conversation. Files at absolute ` + "`/tmp/...`" + ` paths are shared with other conversations on the same account — do NOT write secrets, credentials, or per-chat state there. Treat absolute ` + "`/tmp/`" + ` as system scratch only.
 
-	**Stateless shell:** Each call is a fresh ` + "`sh -c`" + `, so ` + "`cd`" + ` and unexported variables do NOT persist. Files do (they live on disk). For env vars that must survive across calls, append to ` + "`.nb_profile`" + ` (` + "`echo 'export FOO=bar' >> .nb_profile`" + `).
+	**Stateless shell:** Each call is a fresh ` + "`sh -c`" + `, so ` + "`cd`" + ` and environment variables do NOT persist. Files do (they live on disk). Put environment setup and the command that consumes it in the same call (` + "`export FOO=bar && command`" + `), or pass the value through the CLI's explicit flags. Shell profile files are not sourced automatically.
 
 	**Credentials auto-injected:** AWS / GCP / Azure credentials, ` + "`GITHUB_TOKEN`" + ` and ` + "`GITLAB_TOKEN`" + ` are injected automatically when the command invokes the corresponding CLI. You do NOT need to plan an ` + "`aws configure`, `gcloud auth`, `gh auth login`, or `glab auth login`" + ` step.
 
@@ -119,7 +120,7 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 	}
 
 	// originalCommand snapshots the user-issued command before any
-	// downstream wrapping (work_dir prefix, .nb_profile sourcing,
+	// downstream wrapping (work_dir prefix,
 	// cloud-auth env). Captured here while command is still the
 	// trimmed, validated user input so first-token-based classification
 	// (e.g. grep-exit-1 success reinterpretation) and error-hint
@@ -150,11 +151,6 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 			command = fmt.Sprintf("cd %s && %s", common.ShellEscape(sanitizedWd), command)
 		}
 	}
-
-	// Auto-persistence: touch the profile to ensure it exists, then source it, then run command
-	// We use '.' instead of 'source' for better POSIX compatibility (e.g. Alpine ash)
-	const profileFile = ".nb_profile"
-	command = fmt.Sprintf("touch %s && . ./%s && %s", profileFile, profileFile, command)
 
 	// Prepare env — inject cloud credentials if the account is a cloud account (AWS/GCP/Azure).
 	// This allows the shell tool to run cloud CLI commands (aws, gcloud, az) without requiring
@@ -193,7 +189,11 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 		}
 	}
 
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
+	manager := m.workspaceManager
+	if manager == nil {
+		manager = wm
+	}
+	response, err := manager.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
 
 	// Scrub any sensitive credential values from the output to prevent accidental
 	// exposure (e.g. if the LLM runs "env" or "printenv" on a cloud account).

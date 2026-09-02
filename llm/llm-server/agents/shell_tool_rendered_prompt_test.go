@@ -59,8 +59,9 @@ func TestShellTool_DescriptionReachesRenderedPrompt(t *testing.T) {
 		"shared with other conversations on the same account": "the /tmp leak warning must reach the LLM via the rendered tool list",
 		"no_matches":    "the grep/find/jq exit-1 success semantic must reach the LLM via the rendered tool list",
 		"auto-injected": "the cloud + GITHUB_TOKEN credential injection rule must reach the LLM via the rendered tool list",
-		"`.nb_profile`": "the env-persistence pattern must reach the LLM via the rendered tool list",
+		"environment setup and the command that consumes it in the same call": "stateless environment guidance must reach the LLM via the rendered tool list",
 	}
+	assert.NotContains(t, rendered, ".nb_profile", "rendered guidance must not advertise a writable auto-sourced profile")
 	for snippet, why := range contractRequired {
 		assert.Contains(t, rendered, snippet,
 			"rendered tool list is missing workspace contract snippet %q — %s", snippet, why)

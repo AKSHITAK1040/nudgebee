@@ -16,7 +16,7 @@ import (
 //     file / the "Evidence already gathered" index → grep that exact file)
 //
 // Tool mechanics (the B content — workspace cwd, /tmp/ scope,
-// .nb_profile, no_matches semantic, credential auto-injection) belong
+// stateless environment handling, no_matches semantic, credential auto-injection) belong
 // in ShellTool.Description() instead, which auto-ships with the tool
 // list whenever the tool is available. See
 // TestShellToolDescription_CarriesWorkspaceContract in

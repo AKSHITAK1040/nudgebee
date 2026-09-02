@@ -86,7 +86,7 @@ Central orchestrator for workspace pod lifecycle.
 LLM-facing tool registered as `shell_execute`. Provides shell access to agents.
 
 **Key behaviors:**
-- Auto-sources `.nb_profile` for environment persistence across stateless commands
+- Keeps shell calls stateless; environment setup must be included in the call that consumes it
 - Injects cloud credentials (AWS/GCP/Azure) based on account type
 - Scrubs credential values from command output
 - Feature-gated via `LlmServerShellToolEnabled`
@@ -137,7 +137,7 @@ Handles `POST /workspace/execute` from workspace pod shims. Validates JWT, resol
 Agent calls shell_execute tool
   → ShellTool.Call()
     → Inject cloud credentials into env
-    → Prepend ".nb_profile" sourcing
+    → Apply the optional working-directory prefix
     → wm.ExecuteOrLazyCreate(accountId, conversationId, command, env)
       → Try ExecuteCommand (direct HTTP to pod IP)
         → POST http://{podIP}:8080/execute
@@ -218,7 +218,7 @@ Compose deployments use `LLM_SERVER_WORKSPACE_RUNTIME=docker`. The host Docker s
 - [#27731](https://github.com/nudgebee/nudgebee/issues/27731) — Command validation blocklist is bypassable
 - [#27733](https://github.com/nudgebee/nudgebee/issues/27733) — JWT token lifetime (365d) and in-memory-only revocation
 - [#27734](https://github.com/nudgebee/nudgebee/issues/27734) — Missing seccomp, capability drops, read-only rootfs
-- [#27735](https://github.com/nudgebee/nudgebee/issues/27735) — Credential exposure via env vars and .nb_profile
+- [#27735](https://github.com/nudgebee/nudgebee-enterprise/issues/27735) — Credential exposure via env vars (automatic `.nb_profile` sourcing removed)
 - [#27736](https://github.com/nudgebee/nudgebee/issues/27736) — Auth bypass when workspace token env var is empty
 
 ### Enhancements
