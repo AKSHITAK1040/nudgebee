@@ -181,6 +181,11 @@ type validateCredentialsRequest struct {
 	AccessKey    string `json:"access_key,omitempty"`
 	AccessSecret string `json:"access_secret,omitempty"`
 	Region       string `json:"region,omitempty"`
+
+	// AWS CUR selection (optional — narrows discovery to one named report).
+	// Sent by Edit Billing Config; empty during onboarding, which auto-picks.
+	CurReportName string `json:"cur_report_name,omitempty"`
+	CurS3Bucket   string `json:"cur_s3_bucket,omitempty"`
 }
 
 func buildContextFromGin(c *gin.Context, logger *slog.Logger, tracer *trace.Tracer, meter *metric.Meter, account string) (*security.RequestContext, context.CancelFunc, error) {
@@ -1317,11 +1322,13 @@ func handleCloudProviderApis(r *gin.Engine, tracer *trace.Tracer, meter *metric.
 			result = common.ValidateGCPCredentials(c.Request.Context(), creds)
 		case "AWS":
 			creds := common.AWSCredentials{
-				AssumeRole:   request.AssumeRole,
-				ExternalId:   request.ExternalID,
-				AccessKey:    request.AccessKey,
-				AccessSecret: request.AccessSecret,
-				Region:       request.Region,
+				AssumeRole:    request.AssumeRole,
+				ExternalId:    request.ExternalID,
+				AccessKey:     request.AccessKey,
+				AccessSecret:  request.AccessSecret,
+				Region:        request.Region,
+				CurReportName: request.CurReportName,
+				CurS3Bucket:   request.CurS3Bucket,
 			}
 			result = common.ValidateAWSCredentials(c.Request.Context(), creds)
 		default:

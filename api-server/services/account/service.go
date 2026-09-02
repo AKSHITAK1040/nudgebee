@@ -2,6 +2,7 @@ package account
 
 import (
 	"bytes"
+	"cmp"
 	ctx "context"
 	"crypto/sha256"
 	"database/sql"
@@ -55,6 +56,12 @@ const (
 const (
 	// azureCostManagementWarningMsg is the message shown when Azure credentials lack Cost Management API access
 	azureCostManagementWarningMsg = "Azure account created successfully, but the credentials do not have permission to access the Azure Cost Management API. Please grant the 'Cost Management Reader' role or equivalent to enable cost tracking. You can update the permissions in the Azure Portal and the system will automatically detect the change on the next sync."
+
+	// awsNoCurWarningMsg is the message shown when an AWS account is created
+	// without a usable Cost & Usage Report. Onboarding no longer blocks on this
+	// (the account works for everything except cost), so this is the only place
+	// the user is told cost data will be missing.
+	awsNoCurWarningMsg = "AWS account created successfully, but no usable Cost & Usage Report was found, so spend, rightsizing and cost recommendations will stay empty. Create a CUR in the AWS billing console with TimeUnit=DAILY and Format=text/csv (the newer Data Exports / CUR 2.0 format is not supported), then attach it via Edit Billing Config on the account. The system also picks it up automatically on the next daily sync."
 
 	// azureBulkOnboardConcurrency caps how many subscriptions AzureBulkOnboard
 	// creates at once, and so how much of the connection pool (20 per pod) one
@@ -746,6 +753,7 @@ func CreateAccount(context *security.RequestContext, query AccountCreateRequest)
 
 	k8sAccessSecret := ""
 	azureCostManagementWarning := "" // Track Azure Cost Management permission issue
+	awsNoCurWarning := ""            // Track AWS account onboarded without a Cost & Usage Report
 
 	if strings.EqualFold(query.CloudProvider, "k8s") || strings.EqualFold(query.AccountType, "kubernetes") {
 		k8sAccessKey := common.GenerateUUID()
@@ -793,8 +801,11 @@ func CreateAccount(context *security.RequestContext, query AccountCreateRequest)
 			}
 
 			// Re-run validation server-side at create time (STS + CUR + S3
-			// probe). This blocks onboarding when no usable Cost & Usage
-			// Report is discoverable — see plan "Block onboarding (hard error)".
+			// probe). Only the STS/auth step blocks onboarding: the validator
+			// leaves Success=true when just the cost steps fail, so an account
+			// with no usable Cost & Usage Report is created without cost data
+			// rather than refused. The user is warned below and can attach a
+			// CUR later via Edit Billing Config.
 			validationResult := validateAWSCredentialsInternal(context.GetContext(), AwsValidateInternalRequest{
 				AssumeRole:   query.AssumeRole,
 				ExternalID:   query.ExternalId,
@@ -835,6 +846,15 @@ func CreateAccount(context *security.RequestContext, query AccountCreateRequest)
 						query.Data["cur_source"] = "manual_role"
 					}
 				}
+			} else {
+				// No usable CUR. The account is still created — cost is
+				// optional — but spend, rightsizing and cost recommendations
+				// stay empty until one is attached, so say so explicitly
+				// rather than letting the user discover it as silence.
+				awsNoCurWarning = awsNoCurWarningMsg
+				context.GetLogger().Warn("aws: account will be created without cost & usage report",
+					"account_number", validationResult.AccountNumber,
+					"missing_permissions", validationResult.MissingPermissions)
 			}
 		case "Azure":
 			// AccountNumber = Tenant (Directory) ID
@@ -1136,7 +1156,7 @@ func CreateAccount(context *security.RequestContext, query AccountCreateRequest)
 		Id:           newAccountId,
 		AccessKey:    query.AgentAccessKey,
 		AccessSecret: k8sAccessSecret,
-		Warning:      azureCostManagementWarning,
+		Warning:      cmp.Or(azureCostManagementWarning, awsNoCurWarning),
 	}, nil
 }
 
@@ -2082,6 +2102,44 @@ func ValidateCloudCredentials(context *security.RequestContext, query ValidateCl
 
 	switch provider {
 	case "AWS":
+		// AccountID resolves the credentials of an already-onboarded account
+		// server-side, for callers (Edit Billing Config) that only have a CUR
+		// report name and no raw secret. Mirrors the GCP branch below, but AWS
+		// has two credential shapes: assume_role is stored in plaintext, while
+		// access_secret is encrypted at rest.
+		if query.AccountID != "" {
+			if !context.GetSecurityContext().HasAccountAccess(query.AccountID, security.SecurityAccessTypeRead) {
+				return ValidateCloudCredentialsResponse{}, common.ErrorUnauthorized("unauthorized")
+			}
+			acct, err := GetAccount(context, query.AccountID)
+			if err != nil {
+				return ValidateCloudCredentialsResponse{}, fmt.Errorf("failed to load account %s: %w", query.AccountID, err)
+			}
+			switch {
+			case acct.AssumeRole != nil && strings.TrimSpace(*acct.AssumeRole) != "":
+				query.AssumeRole = *acct.AssumeRole
+				if acct.ExternalId != nil {
+					query.ExternalID = *acct.ExternalId
+				}
+			case acct.AccessKey != nil && strings.TrimSpace(*acct.AccessKey) != "" && acct.AccessSecret != nil && *acct.AccessSecret != "":
+				decrypted, derr := common.Decrypt(*acct.AccessSecret)
+				if derr != nil {
+					return ValidateCloudCredentialsResponse{}, fmt.Errorf("failed to decrypt credentials for account %s: %w", query.AccountID, derr)
+				}
+				query.AccessKey = *acct.AccessKey
+				query.AccessSecret = decrypted
+			default:
+				return ValidateCloudCredentialsResponse{
+					Success:      false,
+					Provider:     provider,
+					ErrorMessage: "no stored credentials found for this account",
+				}, nil
+			}
+			if query.Region == "" && acct.Region != nil {
+				query.Region = *acct.Region
+			}
+		}
+
 		hasRole := strings.TrimSpace(query.AssumeRole) != ""
 		hasKeys := strings.TrimSpace(query.AccessKey) != "" && strings.TrimSpace(query.AccessSecret) != ""
 		if !hasRole && !hasKeys {
@@ -2100,11 +2158,13 @@ func ValidateCloudCredentials(context *security.RequestContext, query ValidateCl
 		}
 
 		result := validateAWSCredentialsInternal(context.GetContext(), AwsValidateInternalRequest{
-			AssumeRole:   query.AssumeRole,
-			ExternalID:   query.ExternalID,
-			AccessKey:    query.AccessKey,
-			AccessSecret: query.AccessSecret,
-			Region:       query.Region,
+			AssumeRole:    query.AssumeRole,
+			ExternalID:    query.ExternalID,
+			AccessKey:     query.AccessKey,
+			AccessSecret:  query.AccessSecret,
+			Region:        query.Region,
+			CurReportName: query.CurReportName,
+			CurS3Bucket:   query.CurS3Bucket,
 		})
 
 		if !result.Success {

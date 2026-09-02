@@ -2,11 +2,28 @@ package providers
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"nudgebee/collector/cloud/security"
 	"strings"
 	"time"
 )
+
+// ErrCostNotConfigured reports that an account has no billing source attached
+// — no AWS Cost & Usage Report, no GCP billing_data — as distinct from having
+// one that failed. Both are "no spend data", but only the latter is a fault:
+//
+//   - Not configured is a steady state. Cost is optional at onboarding, so an
+//     account can legitimately sit here forever. The cost-report consumer ACKs
+//     these without dead-lettering; otherwise every such account would poison
+//     one message per day, indefinitely.
+//   - Failure (revoked cur:DescribeReportDefinitions, an unreadable bucket, a
+//     BigQuery error) is a fault worth retrying and worth a DLQ entry, and must
+//     NOT be wrapped in this sentinel.
+//
+// Compare with errors.ErrUnsupported, which means the provider has no billing
+// concept at all. Both are benign for the queue; this one is fixable by the user.
+var ErrCostNotConfigured = errors.New("cost reporting is not configured for this account")
 
 type CloudProviderContext interface {
 	GetContext() context.Context

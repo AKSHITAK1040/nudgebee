@@ -994,3 +994,38 @@ func getTestAccountForBilling(t *testing.T) providers.Account {
 		Data:          &accountData,
 	}
 }
+
+// TestBillingConfigMissingIsNotConfiguredNotFailure pins the distinction the
+// cost-report consumer relies on to decide whether to dead-letter. GCP billing
+// is optional at onboarding, so an account with no billing_data is a steady
+// state — dead-lettering it would poison one message per account per day,
+// forever. A malformed billing_data block is still a genuine error.
+func TestBillingConfigMissingIsNotConfiguredNotFailure(t *testing.T) {
+	notConfigured := []struct {
+		name string
+		data *string
+	}{
+		{name: "nil account data", data: nil},
+		{name: "empty account data", data: strPtr("")},
+		{name: "no billing_data key", data: strPtr(`{"cost_report_name":"x"}`)},
+	}
+	for _, tt := range notConfigured {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := getBillingConfigFromAccount(providers.Account{AccountNumber: "a", AccountName: "a", Data: tt.data})
+			if !errors.Is(err, providers.ErrCostNotConfigured) {
+				t.Fatalf("expected ErrCostNotConfigured so the consumer ACKs instead of dead-lettering, got %v", err)
+			}
+		})
+	}
+
+	// Malformed input is a real fault and must stay retriable/dead-letterable.
+	_, err := getBillingConfigFromAccount(providers.Account{AccountNumber: "a", AccountName: "a", Data: strPtr("{not json")})
+	if err == nil {
+		t.Fatal("expected an error for malformed account data")
+	}
+	if errors.Is(err, providers.ErrCostNotConfigured) {
+		t.Fatal("malformed account data must NOT be classified as not-configured — it is a real fault")
+	}
+}
+
+func strPtr(s string) *string { return &s }

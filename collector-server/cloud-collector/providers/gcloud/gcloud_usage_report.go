@@ -2,6 +2,7 @@ package gcloud
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"nudgebee/collector/cloud/common"
@@ -33,8 +34,13 @@ var newBigQueryClient = func(ctx context.Context, projectID string, opts ...opti
 func getBillingConfigFromAccount(account providers.Account) (models.BillingConfig, error) {
 	config := models.BillingConfig{}
 
+	// No account data and no billing_data both mean the same thing: billing was
+	// never configured. GCP onboarding makes the billing fields optional, so
+	// this is a steady state rather than a fault — flag it so the cost-report
+	// consumer ACKs instead of dead-lettering one message per account per day.
+	// A malformed billing_data block below is still a genuine error.
 	if account.Data == nil || *account.Data == "" {
-		return config, fmt.Errorf("account data is required for GCP billing configuration")
+		return config, providers.ErrCostNotConfigured
 	}
 
 	// Parse the JSON into a generic map
@@ -47,7 +53,7 @@ func getBillingConfigFromAccount(account providers.Account) (models.BillingConfi
 	// Get billing_data sub-object
 	billingDataRaw, ok := accountData["billing_data"]
 	if !ok {
-		return config, fmt.Errorf("missing 'billing_data' field in account data")
+		return config, providers.ErrCostNotConfigured
 	}
 
 	billingData, ok := billingDataRaw.(map[string]any)
@@ -551,7 +557,13 @@ func getGcloudUsageReport(ctx providers.CloudProviderContext, account providers.
 	// Extract billing configuration
 	config, err := getBillingConfigFromAccount(account)
 	if err != nil {
-		logger.Error("failed to get billing config", "error", err, "accountNumber", account.AccountNumber)
+		// Billing is optional at onboarding, so "never configured" is an
+		// expected state and not worth an ERROR line on every daily sync.
+		if errors.Is(err, providers.ErrCostNotConfigured) {
+			logger.Info("gcp: no billing export configured for account", "accountNumber", account.AccountNumber)
+		} else {
+			logger.Error("failed to get billing config", "error", err, "accountNumber", account.AccountNumber)
+		}
 		return providers.GetUsageReportResponse{}, err
 	}
 

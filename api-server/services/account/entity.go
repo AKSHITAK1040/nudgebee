@@ -179,6 +179,11 @@ type ValidateCloudCredentialsRequest struct {
 	BillingDatasetID string `json:"billing_dataset_id,omitempty" mapstructure:"billing_dataset_id"`
 	BillingTableID   string `json:"billing_table_id,omitempty" mapstructure:"billing_table_id"`
 
+	// AWS CUR selection (optional). Narrows CUR discovery to one named report
+	// instead of auto-picking the first usable one. Sent by Edit Billing Config.
+	CurReportName string `json:"cur_report_name,omitempty" mapstructure:"cur_report_name"`
+	CurS3Bucket   string `json:"cur_s3_bucket,omitempty" mapstructure:"cur_s3_bucket"`
+
 	// AWS fields — exactly one of (AssumeRole) or (AccessKey + AccessSecret) must be set.
 	AssumeRole   string `json:"assume_role,omitempty" mapstructure:"assume_role"`
 	ExternalID   string `json:"external_id,omitempty" mapstructure:"external_id"`

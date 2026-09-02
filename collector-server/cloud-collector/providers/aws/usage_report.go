@@ -246,7 +246,12 @@ func getUsageBucketFromCostReport(ctx providers.CloudProviderContext, account pr
 			break
 		}
 	}
-	return "", "", "", "GZIP", "", "", "", errors.New("unable to find cost report")
+	// Enumeration succeeded and simply matched nothing — the account has no
+	// usable CUR. That is a supported state (cost is optional at onboarding),
+	// not a fault, so flag it as such and let the caller ACK instead of
+	// dead-lettering. A DescribeReportDefinitions failure above is a real
+	// error and stays one.
+	return "", "", "", "GZIP", "", "", "", providers.ErrCostNotConfigured
 }
 
 func getS3KeysFromUsageReport(
@@ -403,13 +408,19 @@ func resolveCostReportDefinition(ctx providers.CloudProviderContext, account pro
 	if region == "" {
 		s3Bucket, region, pathPrefix, compression, reportVersion, reportName, timeUnit, err = getUsageBucketFromCostReport(ctx, account, reportName, s3Bucket)
 		if err != nil {
-			ctx.GetLogger().Error("unable to find cost report", "error", err)
+			// Not-configured is expected for accounts onboarded without a CUR
+			// and is logged at info; anything else is a genuine failure.
+			if errors.Is(err, providers.ErrCostNotConfigured) {
+				ctx.GetLogger().Info("aws: no cost report configured for account", "accountNumber", account.AccountNumber)
+			} else {
+				ctx.GetLogger().Error("unable to find cost report", "error", err)
+			}
 			return "", "", "", "", "", "", "", err
 		}
 	}
 
 	if s3Bucket == "" {
-		return "", "", "", "", "", "", "", errors.New("unable to find cost report")
+		return "", "", "", "", "", "", "", providers.ErrCostNotConfigured
 	}
 
 	return s3Bucket, region, pathPrefix, compression, reportVersion, reportName, timeUnit, nil

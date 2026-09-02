@@ -395,9 +395,22 @@ func StoreUsage(ctx *security.RequestContext, accountId string, month time.Month
 	usageReport, account1, err := getUsageDataInternal(ctx, accountId, month, year)
 	account = account1
 	if err != nil {
-		if errors.Is(err, errors.ErrUnsupported) {
+		// Two benign cases the queue must not retry or dead-letter:
+		//   ErrUnsupported       — the provider has no billing concept at all.
+		//   ErrCostNotConfigured — the account has no CUR / billing export
+		//                          attached. Cost is optional at onboarding, so
+		//                          an account can sit here indefinitely.
+		// Both are steady states, so retrying cannot help and dead-lettering
+		// would poison one message per account per day, forever. Everything
+		// else (revoked permissions, an unreadable bucket, a BigQuery error) is
+		// a real fault that should still surface in the DLQ.
+		benign := errors.Is(err, errors.ErrUnsupported) || errors.Is(err, providers.ErrCostNotConfigured)
+		switch {
+		case errors.Is(err, errors.ErrUnsupported):
 			ctx.GetLogger().Debug("usagereport: service does not support usage reports", "accountId", accountId)
-		} else {
+		case errors.Is(err, providers.ErrCostNotConfigured):
+			ctx.GetLogger().Info("usagereport: no cost reporting configured for account", "accountId", accountId)
+		default:
 			ctx.GetLogger().Error("usagereport: unable to fetch usage report", "error", err)
 		}
 		// A spend/billing fetch failure must NOT zero out the rest of the account.
@@ -406,12 +419,17 @@ func StoreUsage(ctx *security.RequestContext, accountId string, month time.Month
 		// the same way the no-billing-data path below does. Otherwise one misconfigured
 		// or unreadable billing export (wrong table, bad schema, revoked BigQuery
 		// access) silently blocks resource inventory, recommendations, and
-		// event-to-resource linkage for the whole account. The error is still
-		// returned so the agent-status defer records spends as disconnected.
+		// event-to-resource linkage for the whole account.
 		shouldPublishPostReport = true
 		usageReportResponse = StoreUsageReportResponse{
 			Count:    0,
 			Duration: time.Since(t0),
+		}
+		// `err` stays set either way so the agent-status defer above still
+		// records spends as disconnected with the reason — only the value
+		// handed back to the queue differs.
+		if benign {
+			return usageReportResponse, nil
 		}
 		return usageReportResponse, err
 	}
