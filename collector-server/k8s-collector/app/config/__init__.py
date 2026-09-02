@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     EVENT_CLOSE_ON_WORKLOAD_RECOVERY: bool = False
     K8S_COLLECTOR_CONSUMER_MAX_WORKERS: int = 2
     K8S_COLLECTOR_CONSUMER_HEARTBEAT: int = 120
+    # Drop agent messages whose cloud account is status='disabled' instead of
+    # ingesting them. Off = a disabled account's agent keeps its events, discovery
+    # snapshots and spend flowing, and each event still runs the full server-side
+    # enrichment path (which calls back to that account's agent over the relay).
+    # Set false only to rule this gate out while debugging missing ingestion.
+    DROP_DISABLED_ACCOUNT_MESSAGES: bool = True
     LLM_SERVER_ENDPOINT: str = "http://llm-server:8000"
     EKS_VERSIONS_SUPPORT: ClassVar[Dict[str, Dict[str, str]]] = {
         "1.32": {
