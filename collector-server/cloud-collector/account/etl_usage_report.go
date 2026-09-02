@@ -314,6 +314,42 @@ func runHistoricalBackfill(ctx *security.RequestContext, accountId, tenantId str
 	ctx.GetLogger().Info("usagereport: historical backfill complete", "accountId", accountId, "discovered", len(periods), "processed", processed, "maxMonths", maxMonths)
 }
 
+// isBenignCostOutcome reports whether a spend-sync error is a steady state
+// rather than a fault:
+//
+//   - ErrCostNotConfigured — no Cost & Usage Report or billing export attached.
+//     Onboarding accepts this, so the account can sit here indefinitely.
+//   - ErrUnsupported — the provider has no billing concept at all.
+//
+// Neither can be fixed by retrying, so the queue must ACK rather than
+// dead-letter, and the agent must not be reported disconnected for it.
+//
+// This is the single definition of "benign" — both decisions call it. Keeping
+// two copies is how the sts:ExternalId drift happened (#37513): one caller was
+// updated and the other silently kept the old behaviour.
+func isBenignCostOutcome(err error) bool {
+	return errors.Is(err, errors.ErrUnsupported) || errors.Is(err, providers.ErrCostNotConfigured)
+}
+
+// agentStatusForUsageSync decides whether a spend-sync outcome should mark the
+// whole agent disconnected.
+//
+// A genuine failure does. A benign outcome does not: onboarding accepts an
+// account with no Cost & Usage Report, so that account is working as intended
+// and everything except spend syncs normally. Reporting it as disconnected puts
+// a red "The Agent is not connected" banner above a feature table where every
+// row reads Connected, and trips agent-health alerting for a supported
+// configuration.
+//
+// The error is still recorded either way, so the reason reaches the Spends
+// error column.
+func agentStatusForUsageSync(err error) AgentStatus {
+	if err != nil && !isBenignCostOutcome(err) {
+		return AgentStatusDisconnected
+	}
+	return AgentStatusConnected
+}
+
 func StoreUsage(ctx *security.RequestContext, accountId string, month time.Month, year int) (StoreUsageReportResponse, error) {
 	// Capture month-of-call before any defers so the post-report publish is
 	// stable across mid-run month rollovers.
@@ -354,10 +390,7 @@ func StoreUsage(ctx *security.RequestContext, accountId string, month time.Month
 		if err != nil {
 			msg = err.Error()
 		}
-		agentStatus := AgentStatusConnected
-		if err != nil {
-			agentStatus = AgentStatusDisconnected
-		}
+		agentStatus := agentStatusForUsageSync(err)
 		connectionStatus := map[string]any{
 			"account_number": account.AccountNumber,
 			"spends": map[string]any{
@@ -404,7 +437,6 @@ func StoreUsage(ctx *security.RequestContext, accountId string, month time.Month
 		// would poison one message per account per day, forever. Everything
 		// else (revoked permissions, an unreadable bucket, a BigQuery error) is
 		// a real fault that should still surface in the DLQ.
-		benign := errors.Is(err, errors.ErrUnsupported) || errors.Is(err, providers.ErrCostNotConfigured)
 		switch {
 		case errors.Is(err, errors.ErrUnsupported):
 			ctx.GetLogger().Debug("usagereport: service does not support usage reports", "accountId", accountId)
@@ -428,7 +460,7 @@ func StoreUsage(ctx *security.RequestContext, accountId string, month time.Month
 		// `err` stays set either way so the agent-status defer above still
 		// records spends as disconnected with the reason — only the value
 		// handed back to the queue differs.
-		if benign {
+		if isBenignCostOutcome(err) {
 			return usageReportResponse, nil
 		}
 		return usageReportResponse, err
