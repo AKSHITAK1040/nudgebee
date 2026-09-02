@@ -18,8 +18,11 @@ var (
 )
 
 type CloudAccountCredentials struct {
-	ID            string
-	AssumeRole    *string
+	ID         string
+	AssumeRole *string
+	// ExternalId is the sts:ExternalId to present when assuming AssumeRole.
+	// Omitting it fails any trust policy carrying an sts:ExternalId condition.
+	ExternalId    *string
 	AccessKey     *string
 	AccessSecret  *string
 	Region        *string
@@ -38,6 +41,7 @@ func GetCloudAccountCredentials(accountId string) (CloudAccountCredentials, erro
 	query := `
 		SELECT
 			assume_role,
+			external_id,
 			access_key,
 			access_secret,
 			region,
@@ -54,11 +58,11 @@ func GetCloudAccountCredentials(accountId string) (CloudAccountCredentials, erro
 	}
 
 	var (
-		assumeRole, accessKey, accessSecret, region, cloudProvider, accountNumber, accountName *string
-		data                                                                                   sql.NullString
+		assumeRole, externalId, accessKey, accessSecret, region, cloudProvider, accountNumber, accountName *string
+		data                                                                                               sql.NullString
 	)
 
-	err = r.Scan(&assumeRole, &accessKey, &accessSecret, &region, &data, &cloudProvider, &accountNumber, &accountName)
+	err = r.Scan(&assumeRole, &externalId, &accessKey, &accessSecret, &region, &data, &cloudProvider, &accountNumber, &accountName)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return CloudAccountCredentials{}, fmt.Errorf("account with id %s not found", accountId)
@@ -85,6 +89,7 @@ func GetCloudAccountCredentials(accountId string) (CloudAccountCredentials, erro
 	creds := CloudAccountCredentials{
 		ID:            accountId,
 		AssumeRole:    assumeRole,
+		ExternalId:    externalId,
 		AccessKey:     accessKey,
 		AccessSecret:  accessSecret,
 		Region:        region,

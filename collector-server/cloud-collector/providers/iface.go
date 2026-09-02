@@ -60,8 +60,13 @@ type QueryMetricsRequest struct {
 }
 
 type Account struct {
-	ID              string  `json:"id" mapstructure:"id"` // Nudgebee cloud account UUID
-	AssumeRole      *string `json:"assume_role" mapstructure:"assume_role"`
+	ID         string  `json:"id" mapstructure:"id"` // Nudgebee cloud account UUID
+	AssumeRole *string `json:"assume_role" mapstructure:"assume_role"`
+	// ExternalId is the sts:ExternalId to present when assuming AssumeRole. It
+	// must be carried here, not just validated at onboarding: a trust policy
+	// with an ExternalId condition rejects an assume-role call that omits it,
+	// so an account would validate green and then fail every sync.
+	ExternalId      *string `json:"external_id" mapstructure:"external_id"`
 	AccessKey       *string `json:"access_key" mapstructure:"access_key"`
 	AccessSecret    *string `json:"access_secret" mapstructure:"access_secret"`
 	Region          *string `json:"region" mapstructure:"region"`

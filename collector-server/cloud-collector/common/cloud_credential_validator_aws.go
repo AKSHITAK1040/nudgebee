@@ -210,8 +210,8 @@ func buildAWSConfigForValidation(ctx context.Context, c AWSCredentials) (aws.Con
 	stsClient := sts.NewFromConfig(baseCfg)
 	provider := stscreds.NewAssumeRoleProvider(stsClient, c.AssumeRole, func(o *stscreds.AssumeRoleOptions) {
 		o.RoleSessionName = "nudgebee-onboarding-validate"
-		if strings.TrimSpace(c.ExternalId) != "" {
-			o.ExternalID = aws.String(c.ExternalId)
+		if extID := strings.TrimSpace(c.ExternalId); extID != "" {
+			o.ExternalID = aws.String(extID)
 		}
 	})
 	baseCfg.Credentials = aws.NewCredentialsCache(provider)
