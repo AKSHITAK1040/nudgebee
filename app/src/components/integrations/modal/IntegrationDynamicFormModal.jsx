@@ -731,7 +731,7 @@ const IntegrationDynamicFormModal = ({
           isOptionsLoading={ag.loading}
           sx={{ width: '100%' }}
           disabled={field.disabled || field.allow_edit === false}
-          searchPlaceholder='Search or type to add…'
+          searchPlaceholder={field.search_placeholder || 'Search or type to add…'}
         />
         {errorText && (
           <Typography variant='body2' color='error' sx={{ mt: 0.5, fontSize: 'var(--ds-text-small)' }}>

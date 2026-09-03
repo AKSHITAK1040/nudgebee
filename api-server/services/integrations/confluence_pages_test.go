@@ -214,26 +214,65 @@ func TestConfluence_ListPagesAutogen(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, res.Options)
 	require.Contains(t, res.Message, "Re-enter the token")
+	// Every guidance message leads with what the field does, because the
+	// description itself is only reachable through a tooltip.
+	require.Contains(t, res.Message, confluencePageTreesHint)
 
-	// A pasted URL keeps its typed value as the option value, so the chip
-	// shows the title before the save rewrites it to the ID.
-	pastedURL := srv.URL + "/spaces/OPS/pages/100/x"
+	// Only pages inside the configured space: no space suffix, and the hint
+	// stays on the default guidance.
+	pastedURL := srv.URL + "/spaces/SRE/pages/100/x"
 	form["token"] = "pat"
+	form[confluencePageTreesField] = pastedURL
+	res, err = listConfluencePages(nil, form)
+	require.NoError(t, err)
+	require.Equal(t, []core.AutoGenOption{
+		{Label: "Runbooks", Value: pastedURL},
+		{Label: "Site Reliability", Value: "1"},
+	}, res.Options)
+	require.Contains(t, res.Message, confluencePageTreesHint)
+	require.Contains(t, res.Message, "paste a URL for anything deeper")
+
+	// A page from another space is what the save will reject, so the picker
+	// names it immediately and tags the option with the space it came from.
 	form[confluencePageTreesField] = "200," + pastedURL
 	res, err = listConfluencePages(nil, form)
 	require.NoError(t, err)
 	require.Equal(t, []core.AutoGenOption{
-		{Label: "Other", Value: "200"},
+		{Label: "Other (OPS)", Value: "200"},
 		{Label: "Runbooks", Value: pastedURL},
 		{Label: "Site Reliability", Value: "1"},
 	}, res.Options)
+	require.Equal(t,
+		`"Other" (OPS) is not in the configured space "SRE". `+
+			"Saving will fail until it is removed, or the space key is cleared.",
+		res.Message)
 
 	// An unlistable space must not hide the titles already resolved.
 	form["namespace"] = "NOPE"
 	res, err = listConfluencePages(nil, form)
 	require.NoError(t, err)
-	require.Equal(t, []core.AutoGenOption{{Label: "Other", Value: "200"}, {Label: "Runbooks", Value: pastedURL}}, res.Options)
-	require.Contains(t, res.Message, `"NOPE"`)
+	require.Equal(t, []core.AutoGenOption{
+		{Label: "Other (OPS)", Value: "200"},
+		{Label: "Runbooks (SRE)", Value: pastedURL},
+	}, res.Options)
+	// Two offenders: the message counts them and pluralises the fix, rather
+	// than comma-splicing one clause per page onto a singular pronoun.
+	require.Equal(t,
+		`2 pages are not in the configured space "NOPE": "Other" (OPS), "Runbooks" (SRE). `+
+			"Saving will fail until they are removed, or the space key is cleared.",
+		res.Message)
+
+	// With no space key there is nothing to compare against, so every option
+	// carries its space and the guidance points at both ways in.
+	form["namespace"] = ""
+	res, err = listConfluencePages(nil, form)
+	require.NoError(t, err)
+	require.Equal(t, []core.AutoGenOption{
+		{Label: "Other (OPS)", Value: "200"},
+		{Label: "Runbooks (SRE)", Value: pastedURL},
+	}, res.Options)
+	require.Contains(t, res.Message, confluencePageTreesHint)
+	require.Contains(t, res.Message, "Enter a space key above")
 }
 
 func TestConfluence_ConfigSchema_PageTreesIsAdvanced(t *testing.T) {
@@ -244,4 +283,8 @@ func TestConfluence_ConfigSchema_PageTreesIsAdvanced(t *testing.T) {
 	require.Equal(t, confluenceListPagesAutogenFunc, prop.AutoGenerateFunc)
 	require.Contains(t, prop.DependsOn, "token")
 	require.Contains(t, prop.DependsOn, confluencePageTreesField)
+	// The storage key is a contract three services read, so the clearer name
+	// has to travel as a label rather than as a rename.
+	require.Equal(t, "Limit to pages", prop.DisplayName)
+	require.NotEmpty(t, prop.SearchPlaceholder)
 }

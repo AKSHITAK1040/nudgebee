@@ -81,14 +81,22 @@ const (
 )
 
 type IntegrationSchemaProperty struct {
-	Type             IntegrationSchemaType `json:"type"`
-	Description      string                `json:"description,omitempty"`
-	Items            map[string]any        `json:"items,omitempty"`
-	Enum             []any                 `json:"enum,omitempty"`
-	Default          any                   `json:"default,omitempty"`
-	Pattern          string                `json:"pattern,omitempty"`
-	IsEncrypted      bool                  `json:"is_encrypted,omitempty"`
-	AutoGenerateFunc string                `json:"auto_generate_func,omitempty"`
+	Type IntegrationSchemaType `json:"type"`
+	// DisplayName overrides the field label, which otherwise title-cases the
+	// property key. Use it when the storage key is not the clearest name for
+	// the user (e.g. page_trees -> "Limit to pages"); the key itself is a
+	// stored contract and must not be renamed to improve wording.
+	DisplayName string `json:"display_name,omitempty"`
+	Description string `json:"description,omitempty"`
+	// SearchPlaceholder overrides the placeholder inside a picker's search box.
+	// Only meaningful on fields rendered as a dropdown.
+	SearchPlaceholder string         `json:"search_placeholder,omitempty"`
+	Items             map[string]any `json:"items,omitempty"`
+	Enum              []any          `json:"enum,omitempty"`
+	Default           any            `json:"default,omitempty"`
+	Pattern           string         `json:"pattern,omitempty"`
+	IsEncrypted       bool           `json:"is_encrypted,omitempty"`
+	AutoGenerateFunc  string         `json:"auto_generate_func,omitempty"`
 	// DependsOn lists other field names whose values are inputs to
 	// AutoGenerateFunc. The frontend watches these fields and refetches the
 	// autogen options when any of them changes. Used for cascading dropdowns

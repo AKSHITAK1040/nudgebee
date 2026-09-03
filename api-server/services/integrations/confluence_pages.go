@@ -310,6 +310,12 @@ func confluenceListTopLevelPages(apiBase, authHeader, spaceKey string) ([]conflu
 	return pages, nil
 }
 
+// confluencePageTreesHint states what the field does, not how it works. It
+// leads every picker message because "indexes everything beneath it" is the one
+// idea a user has to hold to use the field at all, and the field's own
+// description is only reachable through a tooltip.
+const confluencePageTreesHint = "Each page you add is indexed along with every page beneath it."
+
 // listConfluencePages is the autogen handler behind the page_trees picker.
 // It always echoes titles for the pages already selected (so a reopened form
 // shows names, not IDs) and adds the configured space's top-level pages.
@@ -321,15 +327,15 @@ func listConfluencePages(_ *security.RequestContext, form map[string]any) (core.
 	namespace := stringFromForm(form, "namespace")
 
 	if host == "" {
-		return core.AutoGenResult{Message: "Enter the Confluence base URL to list pages."}, nil
+		return core.AutoGenResult{Message: confluencePageTreesHint + " Enter the Confluence base URL to list pages."}, nil
 	}
 	// Edit-existing flow: the token is never echoed back into the form, so
 	// there is nothing to authenticate the listing with.
 	if token == "" {
-		return core.AutoGenResult{Message: "Re-enter the token to list pages, or paste a page URL."}, nil
+		return core.AutoGenResult{Message: confluencePageTreesHint + " Re-enter the token to list pages, or paste a page URL."}, nil
 	}
 	if confluenceNeedsUsername(mode) && username == "" {
-		return core.AutoGenResult{Message: "Enter the username to list pages, or paste a page URL."}, nil
+		return core.AutoGenResult{Message: confluencePageTreesHint + " Enter the username to list pages, or paste a page URL."}, nil
 	}
 	if err := confluenceValidateHost(host, mode); err != nil {
 		return core.AutoGenResult{}, err
@@ -338,13 +344,22 @@ func listConfluencePages(_ *security.RequestContext, form map[string]any) (core.
 	authHeader := confluenceAuthHeader(mode, username, token)
 
 	var opts []core.AutoGenOption
+	var offSpace []string
 	seen := map[string]bool{}
 	add := func(page confluencePage, value string) {
 		if seen[page.ID] {
 			return
 		}
 		seen[page.ID] = true
-		opts = append(opts, core.AutoGenOption{Label: page.Title, Value: value})
+		// The space is worth showing only when it is not the one already
+		// configured: that is the case a user needs to notice (a pasted URL
+		// that landed elsewhere). Repeating the configured key on every row
+		// would be noise on the common path.
+		label := page.Title
+		if page.SpaceKey != "" && !strings.EqualFold(page.SpaceKey, namespace) {
+			label = fmt.Sprintf("%s (%s)", page.Title, page.SpaceKey)
+		}
+		opts = append(opts, core.AutoGenOption{Label: label, Value: value})
 	}
 
 	// Selected entries the user has typed but not yet saved may be URLs. The
@@ -357,21 +372,51 @@ func listConfluencePages(_ *security.RequestContext, form map[string]any) (core.
 			continue
 		}
 		if page, err := confluenceResolvePage(apiBase, authHeader, ref); err == nil {
+			if namespace != "" && !strings.EqualFold(page.SpaceKey, namespace) {
+				offSpace = append(offSpace, fmt.Sprintf("%q (%s)", page.Title, page.SpaceKey))
+			}
 			add(page, entry)
 		}
 	}
 
 	if namespace == "" {
-		return core.AutoGenResult{Options: opts, Message: "Enter a space key to list its top-level pages, or paste a page URL."}, nil
+		return core.AutoGenResult{
+			Options: opts,
+			Message: confluencePageTreesHint + " Enter a space key above to list top-level pages, or paste a page URL here.",
+		}, nil
 	}
 	// A failed listing is reported as a hint, not an error: the endpoint drops
 	// the options on error, which would hide the titles resolved above.
+	var listErr string
 	pages, err := confluenceListTopLevelPages(apiBase, authHeader, namespace)
 	if err != nil {
-		return core.AutoGenResult{Options: opts, Message: err.Error()}, nil
+		listErr = err.Error()
 	}
 	for _, page := range pages {
 		add(page, page.ID)
 	}
-	return core.AutoGenResult{Options: opts}, nil
+
+	// Ordered by what the user has to act on first. A page outside the
+	// configured space is rejected at save, so saying so here turns a
+	// fill-in-the-whole-form-then-fail into an immediate correction.
+	switch {
+	case len(offSpace) > 0:
+		// Singular and plural are built separately: one message shape covering
+		// both ends up either listing "1 page" or pluralising a pronoun over a
+		// single item, and this string is the whole point of the field's copy.
+		subject := fmt.Sprintf("%s is not in the configured space %q", offSpace[0], namespace)
+		fix := "Saving will fail until it is removed, or the space key is cleared."
+		if len(offSpace) > 1 {
+			subject = fmt.Sprintf("%d pages are not in the configured space %q: %s",
+				len(offSpace), namespace, strings.Join(offSpace, ", "))
+			fix = "Saving will fail until they are removed, or the space key is cleared."
+		}
+		return core.AutoGenResult{Options: opts, Message: subject + ". " + fix}, nil
+	case listErr != "":
+		return core.AutoGenResult{Options: opts, Message: listErr}, nil
+	}
+	return core.AutoGenResult{
+		Options: opts,
+		Message: confluencePageTreesHint + " The list shows top-level pages; paste a URL for anything deeper.",
+	}, nil
 }
