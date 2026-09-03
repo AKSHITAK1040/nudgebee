@@ -29,6 +29,7 @@ import AutoSuggestTextarea from '@components/k8s/common/TextAreaV2';
 import { SummaryBlock } from '@components/k8s/KubernetesClusterSummary';
 import { isFailedCachedConversation } from '@api1/ask-nudgebee';
 import { isCompleteWorkflowDefinition } from './utils/isCompleteWorkflowDefinition';
+import { readNubiConversationPointer, writeNubiConversationPointer, clearNubiConversationPointer } from './utils/nubiConversationPointer';
 import ConversationShimmer from './common/ConversationShimmer';
 import { ConversationTokenUsage } from './common/TokenUsageDisplay';
 import ConversationList from './ConversationListV2';
@@ -125,6 +126,9 @@ const KubernetesLLMResponseGenerator = ({
   drawerIsOpen = true,
   // Owns the shared localStorage "last opened conversation" pointer — global drawer only.
   persistLastSession = true,
+  // callback(sessionId) whenever the conversation on screen changes — lets the
+  // global drawer point "Open full page" at the current chat without reading cache.
+  onActiveSessionChange = undefined,
 }) => {
   const router = useRouter();
   const { assistantName, baseTitle } = useTenantBranding();
@@ -165,8 +169,8 @@ const KubernetesLLMResponseGenerator = ({
 
   const [uiState, uiDispatch] = useReducer(componentReducer, null, () => {
     let restoredSessionId = router.query.session_id || sessionId || '';
-    if (popup && persistLastSession && typeof window !== 'undefined' && !restoredSessionId) {
-      const stored = localStorage.getItem('nubi_selected_conversation_id');
+    if (popup && persistLastSession && !restoredSessionId) {
+      const stored = readNubiConversationPointer(accountId);
       if (stored) {
         restoredSessionId = stored;
       }
@@ -228,13 +232,21 @@ const KubernetesLLMResponseGenerator = ({
       return;
     }
 
-    if (!selectedSessionId && typeof window !== 'undefined') {
-      const stored = localStorage.getItem('nubi_selected_conversation_id');
+    if (!selectedSessionId) {
+      const stored = readNubiConversationPointer(accountId);
       if (stored) {
         setSelectedSessionId(stored);
       }
     }
-  }, [popup, persistLastSession, drawerIsOpen, selectedSessionId, setSelectedSessionId]);
+  }, [popup, persistLastSession, drawerIsOpen, selectedSessionId, setSelectedSessionId, accountId]);
+
+  // Report the conversation on screen upward. Deliberately NOT persisted here:
+  // merely opening the drawer onto a conversation (investigate "Ask a follow up")
+  // must not overwrite the cached "last opened" pointer — only genuine engagement
+  // (send / history-pick, below) does. "Open full page" uses this live value.
+  useEffect(() => {
+    onActiveSessionChange?.(selectedSessionId);
+  }, [selectedSessionId, onActiveSessionChange]);
 
   const isNewChat = useMemo(() => !selectedSessionId && !selectedConversationId, [selectedSessionId, selectedConversationId]);
   const { troubleShootData, optimizationData } = useClusterInsights(accountId);
@@ -445,7 +457,7 @@ const KubernetesLLMResponseGenerator = ({
             // Standardize on session_id for new chats, clear conversation_id to avoid ambiguity
             applyFiltersOnRouter(router, { session_id: llmSessionId, conversation_id: null }, { shallow: true });
           } else if (persistLastSession) {
-            localStorage.setItem('nubi_selected_conversation_id', llmSessionId);
+            writeNubiConversationPointer(accountId, llmSessionId);
           }
           setSelectedSessionId(llmSessionId);
           setSelectedConversationId(''); // Reset conversationId as we have a fresh session
@@ -943,7 +955,7 @@ const KubernetesLLMResponseGenerator = ({
     if (!popup) {
       applyFiltersOnRouter(router, { session_id: '', conversation_id: '' });
     } else if (persistLastSession) {
-      localStorage.removeItem('nubi_selected_conversation_id');
+      clearNubiConversationPointer();
     }
     setTimeout(() => {
       textareaRef.current?.focus();
@@ -1011,7 +1023,7 @@ const KubernetesLLMResponseGenerator = ({
         if (!popup) {
           applyFiltersOnRouter(router, { session_id: index, conversation_id: null });
         } else if (persistLastSession) {
-          localStorage.setItem('nubi_selected_conversation_id', index);
+          writeNubiConversationPointer(accountId, index);
         }
         setMessages([]);
         clearSuggestions();
@@ -1020,6 +1032,7 @@ const KubernetesLLMResponseGenerator = ({
       }
     },
     [
+      accountId,
       selectedSessionId,
       popup,
       persistLastSession,
@@ -2104,6 +2117,7 @@ KubernetesLLMResponseGenerator.propTypes = {
   historyButtonRef: PropTypes.object,
   drawerIsOpen: PropTypes.bool,
   persistLastSession: PropTypes.bool,
+  onActiveSessionChange: PropTypes.func,
 };
 
 export default KubernetesLLMResponseGenerator;
