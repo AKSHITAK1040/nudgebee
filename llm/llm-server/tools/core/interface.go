@@ -109,6 +109,14 @@ type MissingFieldsResponder interface {
 	OnMissingRequiredFields(request NBToolCallRequest, missing []string) *NBToolResponse
 }
 
+// SchemaValidationInputNormalizer lets a tool canonicalize legacy input shapes
+// before its published InputSchema is enforced. The returned input is used only
+// for validation; Call still receives the original payload so compatibility
+// parsing and persisted tool parameters remain unchanged.
+type SchemaValidationInputNormalizer interface {
+	NormalizeInputForSchemaValidation(input string) string
+}
+
 type NBToolResposeType string
 
 const (
