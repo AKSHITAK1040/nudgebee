@@ -347,6 +347,47 @@ const parseJsonObjectLines = (text) => {
   return parsed;
 };
 
+// search_execute returns an array of raw scraped pages, each wrapping its
+// markdown a second time inside `_body` (itself a JSON string) — the page's
+// own `content` field is never at the top level. Nothing else in this file
+// parses that inner layer, so the response fell through to the generic
+// raw-text fallback below, which unescapes `\n` with a single-pass regex and
+// never touches `&` at all. Against still-double-encoded text that just
+// strips one backslash off each `\n` (leaving a stray backslash next to every
+// link) and leaves literal `&` sitting inside every href (#37539). A real
+// JSON.parse of `_body` decodes every escape correctly in one pass instead.
+export const parseWebSearchResults = (responseText) => {
+  let parsed;
+  try {
+    parsed = JSON.parse(responseText);
+  } catch (e) {
+    console.warn('parseWebSearchResults: not JSON', e);
+    return null;
+  }
+  if (!Array.isArray(parsed)) {
+    return null;
+  }
+  const results = [];
+  for (const item of parsed) {
+    if (!item || typeof item !== 'object') {
+      continue;
+    }
+    let content = typeof item.content === 'string' ? item.content : null;
+    if (!content && typeof item._body === 'string') {
+      try {
+        const body = JSON.parse(item._body);
+        content = typeof body?.content === 'string' ? body.content : null;
+      } catch (e) {
+        console.warn('parseWebSearchResults: _body JSON parse failed', e);
+      }
+    }
+    if (content) {
+      results.push({ content, url: item.url });
+    }
+  }
+  return results.length > 0 ? results : null;
+};
+
 const isPreformattedText = (text) => {
   if (!text) {
     return false;
@@ -584,6 +625,7 @@ const isLokiTool = (name) => ['queryLoki', 'loki', 'loki_execute'].includes(name
 const isEsTool = (name) => ['queryES', 'es', 'elastic_search_execute'].includes(name);
 const isKubectlTool = (name) => ['KubectlExecutor', 'k8s', 'kubectl', 'kubectl_execute'].includes(name);
 const isDocsTool = (name) => ['search_docs', 'docs', 'docs_agent'].includes(name);
+const isWebSearchTool = (name) => name === 'search_execute';
 const isSecurityIssuesTool = (name) => name === 'GetSecurityIssues';
 const isLogsTool = (name) => name && name.toLowerCase().includes('logs');
 const isPlannerTool = (name) => name === 'planner' || name === 'TroubleshootPlanner';
@@ -857,6 +899,26 @@ const FormattedToolResponse = ({ responseText, toolName, toolCall, accountId }) 
       }
     } catch (e) {
       console.warn('FormattedToolResponse: docs tool render failed', e);
+    }
+  }
+
+  // Web search (each result's markdown is nested inside a `_body` JSON string)
+  if (isWebSearchTool(toolName)) {
+    const results = parseWebSearchResults(responseText);
+    if (results) {
+      return (
+        <Box>
+          {results.map((r, i) => (
+            <React.Fragment key={i}>
+              <MarkDowns
+                data={prettifyJsonFencesInMarkdown(r.content).replace(/~/g, '\\~')}
+                sx={{ width: '100%', p: 0, fontSize: 'var(--ds-text-small)' }}
+              />
+              {i < results.length - 1 && <Divider style='dashed' thickness={0.75} color='var(--ds-gray-300)' sx={{ my: ds.space[2], mx: 0 }} />}
+            </React.Fragment>
+          ))}
+        </Box>
+      );
     }
   }
 
