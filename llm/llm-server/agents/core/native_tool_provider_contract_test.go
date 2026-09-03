@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/llms/anthropic"
-	"github.com/tmc/langchaingo/llms/openai"
+	"nudgebee/llm/llms/openai"
 )
 
 func TestOpenAINativeToolRoundTrip(t *testing.T) {

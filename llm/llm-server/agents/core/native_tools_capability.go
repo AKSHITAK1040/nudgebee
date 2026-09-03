@@ -9,7 +9,11 @@ import "strings"
 // clients have no tool-conversion path — so agents on those providers stay on
 // the ReAct3 (XML) planner. See docs/planner_react_4.md.
 var nativeToolProviders = map[string]bool{
-	"openai":            true,
+	"openai": true,
+	// custom is served by getCustomLLM, which delegates to getOpenAILLM — the
+	// same client, with the same tool-schema conversion. Gateways on this
+	// provider (OpenRouter, LiteLLM, vLLM) speak the OpenAI tools API.
+	"custom":            true,
 	"bedrock":           true,
 	"azure":             true,
 	"googleai":          true,
