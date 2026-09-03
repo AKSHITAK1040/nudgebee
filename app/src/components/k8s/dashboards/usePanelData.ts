@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import observability from '@api1/observability';
 import apiDashboards, { isCommandDatasource, type AccountOption, type Panel, type PanelQueryResult } from '@api1/dashboards';
-import { draftFromQuery, findTable, type EntityColumnFormat, type EntityQueryDraft } from './entityQuery';
+import { draftFromQuery, findTable, renderEntityQuery, type EntityColumnFormat, type EntityQueryDraft } from './entityQuery';
 import { runTracePanel } from './traceQuery';
 import { panelQueryAccounts, resolvePanelAccounts } from './panelAccounts';
 import { AWS_METRICS_PROVIDER, ES_PROVIDER, isAwsAccount } from './panelProviders';
@@ -111,7 +111,18 @@ export function usePanelData({
   const accountsKey = resolved.map((a) => a.value).join(',');
 
   // Serialised so a new object identity per render doesn't refetch forever.
-  const targetsKey = JSON.stringify((panel.targets || []).map((t) => [t.ref_id, renderTemplate(t.expr || '', variables), t.legend_format, t.hide]));
+  // The entity `query` is in here alongside `expr`: it is where an entity
+  // panel's filters live, so without it changing a variable those filters
+  // reference would substitute a new value that never gets fetched.
+  const targetsKey = JSON.stringify(
+    (panel.targets || []).map((t) => [
+      t.ref_id,
+      renderTemplate(t.expr || '', variables),
+      t.query ? renderEntityQuery(t.query, (v) => renderTemplate(v, variables)) : undefined,
+      t.legend_format,
+      t.hide,
+    ])
+  );
 
   /**
    * Being on screen says the panel SHOULD load; the queue says when. Without it
@@ -218,7 +229,7 @@ export function usePanelData({
 
       // One account: the traces API takes a single accountId, which is why a
       // traces panel resolves to exactly one (auto-selected, or picked).
-      runTracePanel(draftFromQuery(stored), resolved[0].value, startTime, endTime)
+      runTracePanel(draftFromQuery(renderEntityQuery(stored, (v) => renderTemplate(v, variables))), resolved[0].value, startTime, endTime)
         .then((result) => {
           if (cancelledTraces) return;
           if (result.unsupported.length > 0) {
@@ -242,7 +253,8 @@ export function usePanelData({
 
     // `nudgebee` panels read the internal query engine.
     if (panel.datasource === 'nudgebee') {
-      const query = targets[0]?.query;
+      const stored = targets[0]?.query;
+      const query = stored ? renderEntityQuery(stored, (v) => renderTemplate(v, variables)) : undefined;
       if (!query) {
         setError({ kind: 'config', message: 'This panel has no query' });
         return;
