@@ -40,6 +40,32 @@ const MAX_TABLE_ROWS = 100;
 const MAX_CHART_DATASETS = 20;
 const MAX_CHART_DATA_POINTS = 500;
 
+// A metric series can hold values JSON cannot carry as numbers: +Inf and -Inf from a
+// ratio query whose denominator hit zero, NaN from 0/0, or something the provider sent
+// that was not a number at all. The backend sends each of those points as null and
+// reports what it was per series in `non_finite`, so the chart gap can be explained
+// instead of leaving the reader to guess whether data is missing or broken.
+const NON_FINITE_LABELS: Record<string, string> = {
+  nan: 'undefined (NaN)',
+  '+inf': 'infinite (+Inf)',
+  '-inf': 'negative infinite (-Inf)',
+  unparseable: 'not numeric',
+};
+
+const summariseNonFinite = (results: any[]): Record<string, number> => {
+  const totals: Record<string, number> = {};
+  results?.forEach((result: any) => {
+    result?.payload?.forEach((series: any) => {
+      Object.entries(series?.non_finite || {}).forEach(([kind, count]) => {
+        if (typeof count === 'number' && count > 0) {
+          totals[kind] = (totals[kind] || 0) + count;
+        }
+      });
+    });
+  });
+  return totals;
+};
+
 interface QueryMetricsProps {
   accountId: string;
   showDrilldown: boolean;
@@ -109,6 +135,11 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     chartDatasets?: { total: number; shown: number };
     chartDataPoints?: { total: number; shown: number };
   }>({});
+  // Counts of samples the provider returned that cannot be plotted, keyed by what
+  // they were ("nan", "+inf", "-inf", "unparseable"). The backend sends those points
+  // as null so the gap lands at the right time; without this the chart would show an
+  // unexplained hole and the reader could not tell a divide-by-zero from bad data.
+  const [nonFiniteCounts, setNonFiniteCounts] = useState<Record<string, number>>({});
 
   const deleteDataOnQueryBlockDeletion = (query_key: string) => {
     setData((prevData) => prevData.filter((item) => item.query_key !== query_key));
@@ -159,6 +190,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     setIsAiLoading(false);
     setLoading(false);
     setTruncationWarnings({});
+    setNonFiniteCounts({});
   };
 
   // Execute queries from URL parameters when router is ready and metrics provider is prometheus
@@ -287,6 +319,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
       setData(tableData);
       setChartData(graphData);
       setTruncationWarnings(truncationInfo);
+      setNonFiniteCounts(summariseNonFinite(preparedEvidences));
       setLoading(false);
     }
   }, [preparedEvidences]);
@@ -609,6 +642,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
     setData([]);
     setChartData([]);
     setTruncationWarnings({});
+    setNonFiniteCounts({});
 
     const queryBlocks = query
       .replace(/^;+|;+$/g, '')
@@ -707,6 +741,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
           setData(tableData);
           setChartData(graphData);
           setTruncationWarnings(truncationInfo);
+          setNonFiniteCounts(summariseNonFinite(results));
         } else if (res?.data?.errors?.length) {
           setData([]);
           setChartData([]);
@@ -750,6 +785,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
         setData(tableData);
         setChartData(graphData);
         setTruncationWarnings(truncationInfo);
+        setNonFiniteCounts(summariseNonFinite([{ payload: metricsData }]));
       }
     }
   }, [llmQueryResponse]);
@@ -762,6 +798,42 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
   };
 
   // Truncation warning component for large datasets
+  const NonFiniteNotice = () => {
+    const kinds = Object.entries(nonFiniteCounts).filter(([, count]) => count > 0);
+
+    if (kinds.length === 0) {
+      return null;
+    }
+
+    const total = kinds.reduce((sum, [, count]) => sum + count, 0);
+    const described = kinds.map(([kind, count]) => `${count} ${NON_FINITE_LABELS[kind] || kind}`).join(', ');
+
+    return (
+      <Box
+        sx={{
+          padding: 'var(--ds-space-2) var(--ds-space-4)',
+          backgroundColor: 'var(--ds-amber-100)',
+          border: '1px solid var(--ds-amber-200)',
+          borderRadius: 'var(--ds-radius-sm)',
+          marginTop: 'var(--ds-space-4)',
+          marginBottom: 'var(--ds-space-2)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 'var(--ds-space-2)',
+        }}
+        data-testid='metrics-non-finite-notice'
+      >
+        <InfoIcon sx={{ color: 'var(--ds-amber-700)', fontSize: 'var(--ds-text-title)' }} />
+        <Typography sx={{ fontSize: 'var(--ds-text-body)', color: 'var(--ds-amber-700)' }}>
+          <strong>
+            {total} data {total === 1 ? 'point' : 'points'} could not be plotted:
+          </strong>{' '}
+          {described}. They appear as gaps at the time they occurred.
+        </Typography>
+      </Box>
+    );
+  };
+
   const TruncationWarning = () => {
     const warnings: string[] = [];
 
@@ -1018,6 +1090,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
           )}
           <Box sx={{ width: '100%', maxWidth: '100%', marginTop: 'var(--ds-space-4)' }}>
             <TruncationWarning />
+            <NonFiniteNotice />
             {loading ? (
               <Skeleton shape='rect' height='400px' width='98%' />
             ) : showChartView ? (

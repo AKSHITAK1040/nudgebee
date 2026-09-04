@@ -297,6 +297,16 @@ type Result struct {
 	Metric     map[string]string `json:"metric"`     // Label key-value pairs
 	Timestamps []int64           `json:"timestamps"` // Unix epoch milliseconds
 	Values     []float64         `json:"values"`     // Metric/count values
+
+	// NonFinite counts samples this series could not carry as a number, keyed by
+	// what they actually were: "nan", "+inf", "-inf", "unparseable". Those samples
+	// are sent as JSON `null` — the position is preserved, so Values and Timestamps
+	// stay index-aligned and a chart shows a gap at the right point in time — and
+	// this map is what lets a caller say *why* the gap is there instead of showing
+	// an unexplained hole. Populated at marshal time (see Result.MarshalJSON in
+	// metrics_sanitize.go); a parser may pre-set "unparseable" for values it could
+	// not read at all. Omitted when the series is entirely finite.
+	NonFinite map[string]int `json:"non_finite,omitempty"`
 }
 
 type DefaultProvider struct {
