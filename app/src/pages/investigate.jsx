@@ -1526,14 +1526,13 @@ const Investigate = () => {
     });
   }, []);
 
-  // Also fires when a Fix-it form inside a CollapsableCard closes (submit or
-  // cancel) — refetch so a just-created InProgress resolution replaces the
-  // "Fix it" button with a live status label without waiting for a poll tick.
+  // Also fires when the "Take action to fix it" form closes (submit or cancel) —
+  // refetch so a just-created InProgress resolution shows a live status without
+  // waiting for a poll tick.
   const handleCloseResolveComponent = useCallback(() => {
     setOpenResolveComponentId(null);
     refetchEventResolutions();
   }, [refetchEventResolutions]);
-  const handleOpenResolveComponent = useCallback((id) => setOpenResolveComponentId(id), []);
 
   const handleInsightClick = (text) => {
     const tasksCards = matchedOptions.filter((option) => option?.id !== 'AskAiCard' && option?.id !== 'RCACard');
@@ -2892,20 +2891,14 @@ const Investigate = () => {
                                     idx={index}
                                     icon={option?.icon}
                                     text={option?.text}
-                                    resolveButton={option?.resolveButton}
                                     highlightsData={option?.getHighLightsData?.() ?? []}
                                     contentComponents={option?.getContentComponents?.() ?? []}
                                     onCardClick={handleCardClick}
                                     collapsedObj={collapsedObj}
                                     isCollapsed={collapsedObj[index]}
                                     expandedCardIndex={openCardIndex}
-                                    resolveButtonClick={option?.resolveButton ? option?.handleResolveButtonClick : null}
-                                    ResolveComponent={option?.resolveButton ? option?.getResolveComponent?.() ?? null : null}
                                     isBeta={option?.isBeta}
                                     newUI
-                                    openResolveComponent={option.id === openResolveComponentId}
-                                    onCloseResolveComponent={handleCloseResolveComponent}
-                                    onOpenResolveComponent={handleOpenResolveComponent}
                                     maxWidth='100%'
                                     eventResolution={isK8s ? getResolutionForCard(option?.id) : undefined}
                                   />
