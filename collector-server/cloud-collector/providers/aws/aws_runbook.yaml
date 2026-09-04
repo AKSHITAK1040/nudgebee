@@ -1302,7 +1302,10 @@ rules:
     event_template:
       title:
         template: "EC2 Instance {{ (index .Detail \"instanceId\") }} is {{ (index .Detail \"state\") }}"
-      severity: "Error"
+      # A state-change notification alone cannot tell a deliberate StopInstances apart
+      # from a host failure -- the stateReason only arrives via the actions below, after
+      # severity is already fixed. Report it as Info rather than paging on every stop.
+      severity: "Info"
       description:
         template: >-
           EC2 Instance {{ (index .Detail "instanceId") }} in account {{ (index .Event "account") }} (region {{ (index .Event "region") }})
