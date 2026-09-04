@@ -469,16 +469,30 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command is too long"}}))
 		return
 	}
+	// Checked before the metacharacter guard: that guard is quote-aware for cloud CLI commands, and
+	// stripping quoted content is only sound once the quotes are known to be balanced. An unbalanced
+	// quote would otherwise let the stripper swallow the rest of the command, metacharacters included.
+	if isStructurallyTruncated(command) {
+		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command has unbalanced quotes or braces and looks truncated; regenerate the plan"}}))
+		return
+	}
+	cloudCliTool := tools.CloudCliToolFor(command)
 	// A remediation command is a single invocation. Reject shell metacharacters up front: they let a
 	// single string smuggle a second command (e.g. "kubectl get pods; kubectl delete ns prod") past
 	// the safety blocklist while the shell on the workspace pod still evaluates it. This also blunts
 	// indirect prompt injection, since the plan is seeded from attacker-influencable investigation text.
-	if containsShellMetacharacters(command) {
-		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command contains shell metacharacters (; & | < > ( ) ` $ or newlines) and was rejected; run a single command"}}))
-		return
+	//
+	// Cloud CLI commands are checked with quoted content removed. JMESPath carries ( ) | inside
+	// --query arguments routinely ("Reservations[].Instances[?State.Name=='running']"), and rejecting
+	// those leaves the cloud plan unable to express most of what it needs. Quoted text cannot start a
+	// second command precisely because it stays quoted, so only unquoted metacharacters are a smuggling
+	// risk — and those the stripped check still catches.
+	metaCheckTarget := command
+	if cloudCliTool != "" {
+		metaCheckTarget = tools.StripQuotedContent(command)
 	}
-	if isStructurallyTruncated(command) {
-		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command has unbalanced quotes or braces and looks truncated; regenerate the plan"}}))
+	if containsShellMetacharacters(metaCheckTarget) {
+		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command contains shell metacharacters (; & | < > ( ) ` $ or newlines) and was rejected; run a single command"}}))
 		return
 	}
 
@@ -505,32 +519,46 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 		return
 	}
 
-	relayJob, registeredToolName := remediationRelayModule(command)
-	nbTool, found := toolcore.GetNBTool(request.AccountId, registeredToolName)
-	if !found {
-		c.JSON(404, buildApiResponse(nil, []error{common.Error{Message: "execution tool is not configured for this account"}}))
-		return
-	}
-
-	var queryConfig toolcore.NBQueryConfig
-	if request.ConfigName != "" {
-		queryConfig = toolcore.NBQueryConfig{ToolConfigs: map[string]string{nbTool.Name(): request.ConfigName}}
-	}
-
-	toolCtx := toolcore.NewNbToolContext(ctx, nbTool, request.AccountId, sc.GetUserId(), "", "", "", command, nil, "", queryConfig, "")
-
+	// Two execution substrates, picked by what the command targets rather than by account type.
+	// A cloud CLI talks to a public API endpoint and only needs credentials, so it runs in a
+	// workspace pod here. kubectl/helm/psql/ssh target hosts that live inside the customer network
+	// and are unreachable from here, so they go down the relay to an agent inside that network.
+	registeredToolName := cloudCliTool
 	start := time.Now()
-	result, execErr := tools.ExecuteContainerJob(toolCtx, relayJob, command, request.AccountId, map[string]any{}, true)
+	var raw string
+	var execErr error
+
+	if cloudCliTool != "" {
+		raw, execErr = tools.ExecuteCloudCli(ctx, cloudCliTool, request.AccountId, command)
+	} else {
+		var relayJob tools.RelayJob
+		relayJob, registeredToolName = remediationRelayModule(command)
+		nbTool, found := toolcore.GetNBTool(request.AccountId, registeredToolName)
+		if !found {
+			c.JSON(404, buildApiResponse(nil, []error{common.Error{Message: "execution tool is not configured for this account"}}))
+			return
+		}
+
+		var queryConfig toolcore.NBQueryConfig
+		if request.ConfigName != "" {
+			queryConfig = toolcore.NBQueryConfig{ToolConfigs: map[string]string{nbTool.Name(): request.ConfigName}}
+		}
+
+		toolCtx := toolcore.NewNbToolContext(ctx, nbTool, request.AccountId, sc.GetUserId(), "", "", "", command, nil, "", queryConfig, "")
+
+		var result any
+		result, execErr = tools.ExecuteContainerJob(toolCtx, relayJob, command, request.AccountId, map[string]any{}, true)
+		if s, ok := result.(string); ok {
+			raw = s
+		}
+	}
+
 	response := tools.RemediationExecutionResult{
 		Command:    command,
 		ExecutedAt: start.Format(time.RFC3339),
 		Duration:   time.Since(start).String(),
 	}
 
-	raw := ""
-	if s, ok := result.(string); ok {
-		raw = s
-	}
 	// Whether the executor actually told us how the command exited. False means "ran, outcome
 	// unknown" rather than "ran and succeeded".
 	exitCodeReported := false

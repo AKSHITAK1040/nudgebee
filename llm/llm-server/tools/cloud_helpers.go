@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"nudgebee/llm/common"
+	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
+	"strings"
 )
 
 var (
@@ -126,4 +128,84 @@ func isCloudCLIInfoFlag(parts []string) core.ToolRequestType {
 		}
 	}
 	return ""
+}
+
+// CloudCliToolFor returns the registered cloud-CLI tool that owns this command, or "" when the
+// command is not a cloud CLI.
+//
+// The generic executors (remediation, shell) run whatever they are given in a workspace pod carrying
+// no provider credentials. A cloud CLI invoked that way does not fail loudly — it prints its
+// auth-required hint to stdout and exits 0, so the caller records a success for an action that never
+// ran (see #28804). Routing the command to its own tool is what gets the credentials injected.
+func CloudCliToolFor(command string) string {
+	fields := strings.Fields(command)
+	if len(fields) == 0 {
+		return ""
+	}
+	switch strings.ToLower(fields[0]) {
+	case "aws":
+		return ToolExecuteAwsCliCommand
+	case "az":
+		return ToolExecuteAzureCliCommand
+	case "gcloud", "gsutil":
+		return ToolExecuteGcpCliCommand
+	default:
+		return ""
+	}
+}
+
+// ExecuteCloudCli runs a cloud CLI command through its own NBTool, which resolves the account's
+// credentials and executes in a workspace pod. Returns the command output and any execution error.
+func ExecuteCloudCli(ctx *security.RequestContext, toolName, accountId, command string) (string, error) {
+	// Guarded here rather than at the GetUserId call below: ListToolConfigs dereferences the security
+	// context first (for the tenant id), so a nil one panics before that line is ever reached.
+	if ctx == nil || ctx.GetSecurityContext() == nil {
+		return "", fmt.Errorf("cloud cli: a security context is required to run %s", toolName)
+	}
+	if strings.TrimSpace(accountId) == "" {
+		return "", fmt.Errorf("cloud cli: account ID cannot be empty")
+	}
+
+	nbTool, found := core.GetNBTool(accountId, toolName)
+	if !found {
+		return "", fmt.Errorf("cloud cli: %s is not available", toolName)
+	}
+
+	// These tools source their config from the account list, which covers every active cloud account
+	// of that provider in the tenant — so the account's own row has to be picked out by id. Its
+	// absence is the useful signal that the command does not belong to this account, which is how an
+	// `aws` command on a Kubernetes or Azure account is caught.
+	configs, err := core.ListToolConfigs(ctx, accountId, nbTool)
+	if err != nil {
+		return "", fmt.Errorf("cloud cli: unable to resolve %s config: %w", toolName, err)
+	}
+	configName := ""
+	for _, cfg := range configs {
+		for _, v := range cfg.Values {
+			if v.Name == "id" && strings.EqualFold(strings.TrimSpace(v.Value), strings.TrimSpace(accountId)) {
+				configName = cfg.Name
+				break
+			}
+		}
+		if configName != "" {
+			break
+		}
+	}
+	if configName == "" {
+		return "", fmt.Errorf("cloud cli: this account has no %s credentials configured, so the command cannot be run", toolName)
+	}
+
+	queryConfig := core.NBQueryConfig{ToolConfigs: map[string]string{nbTool.Name(): configName}}
+	toolCtx := core.NewNbToolContext(ctx, nbTool, accountId, ctx.GetSecurityContext().GetUserId(), "", "", "", command, nil, "", queryConfig, "")
+
+	resp, err := nbTool.Call(toolCtx, core.NBToolCallRequest{Command: command})
+	if err != nil {
+		return resp.Data, fmt.Errorf("cloud cli: %s failed: %w", toolName, err)
+	}
+	// A credential or STS failure comes back as an error status with a nil error (the tool reports it
+	// as data so the model can read it). Without this the caller would record that run as a success.
+	if resp.Status == core.NBToolResponseStatusError {
+		return resp.Data, fmt.Errorf("cloud cli: %s reported an error: %s", toolName, resp.Data)
+	}
+	return resp.Data, nil
 }

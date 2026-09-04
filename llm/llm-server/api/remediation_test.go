@@ -412,3 +412,71 @@ func TestVerifySlotDoesNotCreateItsOwnResolution(t *testing.T) {
 		t.Error("only verify is a verify")
 	}
 }
+
+// TestRemediationCloudCliTool_Routing verifies which commands leave the relay path for a workspace
+// pod. Only the cloud CLIs do: everything else targets a host inside the customer network and stays
+// on the relay, so a "" result here is what keeps kubectl reaching the cluster agent.
+func TestRemediationCloudCliTool_Routing(t *testing.T) {
+	cases := []struct {
+		command string
+		want    string
+	}{
+		{"aws ec2 describe-instances --region us-east-1", tools.ToolExecuteAwsCliCommand},
+		{"AWS s3 ls", tools.ToolExecuteAwsCliCommand},
+		{"az vm list", tools.ToolExecuteAzureCliCommand},
+		{"gcloud compute instances list", tools.ToolExecuteGcpCliCommand},
+		{"gsutil ls gs://bucket", tools.ToolExecuteGcpCliCommand},
+		{"kubectl get pods -n prod", ""},
+		{"helm status api -n prod", ""},
+		{"systemctl restart kubelet", ""},
+		// A command whose name merely starts with a CLI name is not that CLI.
+		{"awslogs get mygroup", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, tools.CloudCliToolFor(tc.command), "routing for %q", tc.command)
+	}
+}
+
+// TestCloudCliMetacharacterGuard_AllowsQuotedJmesPath is the reason the guard is quote-aware for cloud
+// commands: JMESPath uses ( ) | [ ] inside --query routinely, and the unmodified guard rejected every
+// one of them. The check runs on the quote-stripped command, so the operators stay allowed only while
+// they remain inside quotes.
+func TestCloudCliMetacharacterGuard_AllowsQuotedJmesPath(t *testing.T) {
+	allowed := []string{
+		`aws ec2 describe-instances --query "Reservations[].Instances[?State.Name=='running'].InstanceId"`,
+		`aws logs filter-log-events --filter-pattern "ERROR" --query "events[*].message | [0:5]"`,
+		`az vm list --query "[?powerState=='VM running'].name"`,
+		`gcloud compute instances list --filter="status=(RUNNING)"`,
+	}
+	for _, cmd := range allowed {
+		assert.NotEmpty(t, tools.CloudCliToolFor(cmd), "precondition: %q must route to a cloud CLI", cmd)
+		assert.False(t, isStructurallyTruncated(cmd), "precondition: %q must have balanced quotes", cmd)
+		assert.False(t, containsShellMetacharacters(tools.StripQuotedContent(cmd)),
+			"expected quoted JMESPath to be allowed: %q", cmd)
+	}
+}
+
+// TestCloudCliMetacharacterGuard_StillBlocksUnquotedInjection is the other half: quote-awareness must
+// not become an injection hole. An operator outside quotes can still start a second command, so it is
+// still rejected — and an attempt to hide one behind an unbalanced quote is caught by the truncation
+// check that runs first.
+func TestCloudCliMetacharacterGuard_StillBlocksUnquotedInjection(t *testing.T) {
+	blocked := []string{
+		"aws s3 ls; aws s3 rb --force s3://prod-backups",
+		"aws s3 ls && aws iam delete-user --user-name admin",
+		"aws s3 ls $(aws iam create-access-key --user-name admin)",
+		"az vm list | xargs -I{} az vm delete --name {}",
+	}
+	for _, cmd := range blocked {
+		assert.True(t, containsShellMetacharacters(tools.StripQuotedContent(cmd)),
+			"expected unquoted injection to be rejected: %q", cmd)
+	}
+
+	// Hiding a metacharacter behind an unbalanced quote defeats the stripper, which is exactly why
+	// isStructurallyTruncated is checked before it rather than after.
+	sneaky := `aws s3 ls "; aws s3 rb --force s3://prod-backups`
+	assert.False(t, containsShellMetacharacters(tools.StripQuotedContent(sneaky)),
+		"precondition: the stripper does swallow this, so the truncation check must be what rejects it")
+	assert.True(t, isStructurallyTruncated(sneaky), "unbalanced quote must be rejected")
+}

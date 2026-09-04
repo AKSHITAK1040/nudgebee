@@ -449,7 +449,7 @@ func (m AwsCliTool) IdentifyConfig(ctx core.NbToolContext, input core.NBToolCall
 // arguments like JMESPath queries which use &&, ||, and pipe operators inside quotes.
 func isShellSyntax(command string) bool {
 	// Strip quoted content so operators inside quotes (e.g. JMESPath) are not flagged.
-	stripped := stripQuotedContent(command)
+	stripped := StripQuotedContent(command)
 
 	// Structurally unambiguous shell operators
 	unambiguousPatterns := []string{"$(", "&&", "||", "; do", ";do", "\ndo ", "\ndone"}
@@ -467,10 +467,10 @@ func isShellSyntax(command string) bool {
 	return false
 }
 
-// stripQuotedContent removes content inside single-quoted and double-quoted strings,
+// StripQuotedContent removes content inside single-quoted and double-quoted strings,
 // preserving the quote delimiters. This prevents operators inside CLI arguments
 // (e.g. JMESPath --query '... && ...') from being misidentified as shell syntax.
-func stripQuotedContent(s string) string {
+func StripQuotedContent(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	i := 0
