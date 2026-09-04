@@ -762,6 +762,9 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 	anyFailed := false
 	anyInProgress := false
 	anyStarted := len(dbAnalyses) > 0
+	// Newest completed stage's write time; the post-loop staleness check ages
+	// it against the event's created_at.
+	var latestAnalysisAt time.Time
 
 	// First-time analyses are system-initiated (auto-triggered on event
 	// ingestion), not user-driven. Attribute them to the system user so
@@ -781,6 +784,9 @@ func executeEventInvestigation(ctx *security.RequestContext, request EventAnalys
 			finalResponse.TaskStatuses[string(aType)] = existingAnalysis.Status
 			if existingAnalysis.Status != string(events.AnalysisStatusCompleted) {
 				allCompleted = false
+			}
+			if existingAnalysis.UpdatedAt.After(latestAnalysisAt) {
+				latestAnalysisAt = existingAnalysis.UpdatedAt
 			}
 			if isLiveFailure(eventAnalysisRepo, existingAnalysis) {
 				anyFailed = true
