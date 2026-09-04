@@ -1117,10 +1117,24 @@ func getAgentResponseFromConversation(ctx *security.RequestContext, sessionId st
 	if err != nil {
 		return "", false
 	}
-	// Search backwards for the latest COMPLETED response from this agent
+	return latestAgentGenerationResponse(messages, agentName)
+}
+
+// latestAgentGenerationResponse returns the newest completed agent answer for
+// agentName. Only `generation` rows carry an agent answer: a `followup` row is
+// the tool-approval prompt the agent raised, and its Response column holds the
+// *user's* reply ("yes"/"no"), not analysis. Because the followup row is created
+// after the generation row it answers, an unfiltered backwards scan picks it
+// first — that is how event a1ffed9c stored "yes" as its whole investigation and
+// synthesised a "root cause undetermined" report on top of a completed RCA.
+func latestAgentGenerationResponse(messages []core.ConversationMessage, agentName string) (string, bool) {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].AgentName != nil && *messages[i].AgentName == agentName && messages[i].Response != "" && messages[i].Status == core.ConversationStatusCompleted {
-			return messages[i].Response, true
+		msg := messages[i]
+		if msg.MessageType != string(core.MessageTypeGeneration) {
+			continue
+		}
+		if msg.AgentName != nil && *msg.AgentName == agentName && msg.Response != "" && msg.Status == core.ConversationStatusCompleted {
+			return msg.Response, true
 		}
 	}
 	return "", false
