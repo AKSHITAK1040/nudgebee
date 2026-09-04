@@ -33,6 +33,14 @@ import (
 )
 
 const imageAnnotationKey = "nudgebee.com/code-agent-image"
+const workspaceSpecAnnotationKey = "nudgebee.com/workspace-spec-version"
+
+// workspaceSpecVersion is bumped whenever an existing healthy workspace pod
+// must be recreated to pick up a pod-spec-only change. CreateWorkspace checks
+// it during recovery, while the leader sweep upgrades a bounded batch at a time.
+const workspaceSpecVersion = "security-baseline-v1"
+
+const workspaceSpecUpgradeBatchSize = 5
 
 const CacheNamespaceWorkspaceTokens = "workspace_tokens"
 
@@ -372,12 +380,24 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 			// kubeconfig and must not stomp on pods owned by the real
 			// in-cluster llm-server (e.g. if the developer's local
 			// LLM_SERVER_CODE_AGENT_IMAGE differs from what's deployed).
-			if _, inClusterErr := rest.InClusterConfig(); inClusterErr == nil {
+			if config.IsInCluster() {
 				needsReplace = true
 				replaceReason = fmt.Sprintf("image mismatch (pod=%s, expected=%s)", podImage, image)
 			} else {
 				logger.Warn("workspace: skipping image-mismatch replacement (not running in-cluster), reusing existing pod",
 					"pod_name", podName, "pod_image", podImage, "expected_image", image)
+			}
+		} else if !hasCurrentWorkspaceSpec(existingPod) {
+			podSpecVersion := existingPod.Annotations[workspaceSpecAnnotationKey]
+			// Apply pod-spec-only security changes lazily when the workspace is next
+			// used. Local llm-server processes may point at a shared cluster and must
+			// not replace pods owned by the in-cluster deployment.
+			if config.IsInCluster() {
+				needsReplace = true
+				replaceReason = fmt.Sprintf("workspace spec mismatch (pod=%s, expected=%s)", podSpecVersion, workspaceSpecVersion)
+			} else {
+				logger.Warn("workspace: skipping spec-mismatch replacement (not running in-cluster), reusing existing pod",
+					"pod_name", podName, "pod_spec_version", podSpecVersion, "expected_spec_version", workspaceSpecVersion)
 			}
 		}
 
@@ -425,10 +445,6 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 	// Command to start server (no arguments usually starts server, based on main.go)
 	args := []string{"/app/code-analysis-agent", "--server"}
 
-	runAsUser := int64(1000)
-	runAsGroup := int64(3000)
-	runAsNonRoot := true
-
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      podName,
@@ -438,15 +454,11 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 				"account_id": strings.ToLower(accountId),
 			},
 			Annotations: map[string]string{
-				imageAnnotationKey: image,
+				imageAnnotationKey:         image,
+				workspaceSpecAnnotationKey: workspaceSpecVersion,
 			},
 		},
 		Spec: corev1.PodSpec{
-			SecurityContext: &corev1.PodSecurityContext{
-				RunAsUser:    &runAsUser,
-				RunAsGroup:   &runAsGroup,
-				RunAsNonRoot: &runAsNonRoot,
-			},
 			// GKE resolves metadata.google.internal to the real metadata IP
 			// (169.254.169.254) inside pods, but the NetworkPolicy blackholes
 			// that IP to prevent IMDS credential theft — silently dropping
@@ -520,6 +532,7 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 			RestartPolicy: corev1.RestartPolicyAlways, // Server should restart
 		},
 	}
+	applyWorkspaceSecurityDefaults(pod)
 
 	// Pass only required secret keys as env vars instead of mounting the entire secret
 	if config.Config.LlmServerCodeAgentSecret != "" {
@@ -572,6 +585,54 @@ func (w *workspaceManager) CreateWorkspace(ctx *security.RequestContext, account
 	}
 	logger.Info("workspace pod created", "pod_name", podName)
 	return nil
+}
+
+func hasCurrentWorkspaceSpec(pod *corev1.Pod) bool {
+	return pod != nil && pod.Annotations[workspaceSpecAnnotationKey] == workspaceSpecVersion
+}
+
+// applyWorkspaceSecurityDefaults establishes the portable baseline for every
+// workspace container. ReadOnlyRootFilesystem is deliberately deferred: the
+// code-analysis image still needs explicit writable mounts for its workspace,
+// HOME, temporary files, and provider CLI state before that can be enabled.
+func applyWorkspaceSecurityDefaults(pod *corev1.Pod) {
+	runAsUser := int64(1000)
+	runAsGroup := int64(3000)
+	runAsNonRoot := true
+	disabled := false
+
+	pod.Spec.AutomountServiceAccountToken = &disabled
+	pod.Spec.EnableServiceLinks = &disabled
+	if pod.Spec.SecurityContext == nil {
+		pod.Spec.SecurityContext = &corev1.PodSecurityContext{}
+	}
+	pod.Spec.SecurityContext.RunAsUser = &runAsUser
+	pod.Spec.SecurityContext.RunAsGroup = &runAsGroup
+	pod.Spec.SecurityContext.RunAsNonRoot = &runAsNonRoot
+	pod.Spec.SecurityContext.SeccompProfile = &corev1.SeccompProfile{
+		Type: corev1.SeccompProfileTypeRuntimeDefault,
+	}
+
+	applyContainerSecurityDefaults(pod.Spec.InitContainers)
+	applyContainerSecurityDefaults(pod.Spec.Containers)
+}
+
+func applyContainerSecurityDefaults(containers []corev1.Container) {
+	for i := range containers {
+		containerRunAsNonRoot := true
+		privileged := false
+		allowPrivilegeEscalation := false
+		if containers[i].SecurityContext == nil {
+			containers[i].SecurityContext = &corev1.SecurityContext{}
+		}
+		securityContext := containers[i].SecurityContext
+		securityContext.RunAsNonRoot = &containerRunAsNonRoot
+		securityContext.Privileged = &privileged
+		securityContext.AllowPrivilegeEscalation = &allowPrivilegeEscalation
+		securityContext.Capabilities = &corev1.Capabilities{
+			Drop: []corev1.Capability{"ALL"},
+		}
+	}
 }
 
 // extraEnvKeyRe matches valid env var names. Anything else is skipped: an
@@ -801,7 +862,9 @@ func (w *workspaceManager) TerminateWorkspace(ctx *security.RequestContext, acco
 	return nil
 }
 
-// CleanupStaleWorkspaces deletes workspace pods running an outdated image.
+// CleanupStaleWorkspaces deletes workspace pods running an outdated image or
+// pod spec. Image changes retain the existing immediate behavior; spec-only
+// changes are bounded per sweep to avoid restarting the whole fleet at once.
 // Called on startup AND on a periodic leader schedule: the lazy-create path is
 // optimistic (a healthy pod's image is never re-checked), so without the
 // periodic sweep a long-lived pod keeps serving a stale image until its first
@@ -851,8 +914,41 @@ func CleanupStaleWorkspaces(ctx context.Context) {
 				slog.Warn("workspace: failed to delete stale workspace pod; it keeps serving the old image until the next sweep",
 					"pod", pod.Name, "error", err)
 			}
+			continue
 		}
 	}
+
+	for _, pod := range selectWorkspaceSpecUpgrades(pods.Items, currentImage, workspaceSpecUpgradeBatchSize) {
+		slog.Info("workspace: deleting workspace pod with outdated spec",
+			"pod", pod.Name,
+			"pod_spec_version", pod.Annotations[workspaceSpecAnnotationKey],
+			"current_spec_version", workspaceSpecVersion)
+		gracePeriod := int64(0)
+		if err := clientset.CoreV1().Pods(namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{
+			GracePeriodSeconds: &gracePeriod,
+		}); err != nil && !errors.IsNotFound(err) {
+			slog.Warn("workspace: failed to delete workspace pod with outdated spec; it will be retried on the next sweep",
+				"pod", pod.Name, "error", err)
+		}
+	}
+}
+
+func selectWorkspaceSpecUpgrades(pods []corev1.Pod, currentImage string, limit int) []*corev1.Pod {
+	if limit <= 0 {
+		return nil
+	}
+
+	selected := make([]*corev1.Pod, 0, min(limit, len(pods)))
+	for i := range pods {
+		if pods[i].DeletionTimestamp != nil || pods[i].Annotations[imageAnnotationKey] != currentImage || hasCurrentWorkspaceSpec(&pods[i]) {
+			continue
+		}
+		selected = append(selected, &pods[i])
+		if len(selected) == limit {
+			break
+		}
+	}
+	return selected
 }
 
 type executePayload struct {
