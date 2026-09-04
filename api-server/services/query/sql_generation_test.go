@@ -870,6 +870,31 @@ func TestSQLGen_RealTable_EventGroupings(t *testing.T) {
 	assert.NotContains(t, sql, "event_duplicates")
 }
 
+// events.subject_owner is written as the empty string (never NULL) when the
+// subject has no owning workload, so the fallback to subject_name has to be
+// NULL-ified first. A plain COALESCE over subject_owner stops at the empty
+// string and the grouped-events view renders a blank Application column for
+// every node, cloud resource, and owner-less alert.
+func TestSQLGen_RealTable_EventGroupings_SubjectOwnerFallsBackOnEmptyString(t *testing.T) {
+	td, ok := GetTableMetadata("event_groupings_v2")
+	require.True(t, ok)
+
+	req := QueryRequest{
+		Table:   "event_groupings_v2",
+		Columns: cols("subject_owner", "event_count"),
+		Where: QueryWhereClause{
+			Binary: BinaryWhereClause{
+				"tenant_id": {Eq: "t1"},
+			},
+		},
+		Limit: 10,
+	}
+	sql, err := GenerateSqlQuery(superAdminCtx(), "", req, td)
+	require.NoError(t, err)
+
+	assert.Contains(t, sql, "COALESCE(NULLIF(subject_owner, ''), subject_name, '')")
+}
+
 func TestSQLGen_RealTable_EventGroupings_WithFingerprintJoin(t *testing.T) {
 	td, ok := GetTableMetadata("event_groupings_v2")
 	require.True(t, ok)

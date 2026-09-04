@@ -1388,7 +1388,12 @@ var table_metadata = map[string]TableDefinition{
 			},
 			"subject_owner": {
 				Type: ColumnDefinitionTypeString,
-				Def:  "COALESCE(subject_owner, subject_name, '')",
+				// NULLIF before COALESCE: events.subject_owner is never NULL —
+				// producers write '' when the subject has no owning workload
+				// (nodes, cloud resources, alerts whose labels resolved no
+				// owner), so a plain COALESCE returns '' and never reaches the
+				// subject_name fallback the grouped-events view depends on.
+				Def: "COALESCE(NULLIF(subject_owner, ''), subject_name, '')",
 			},
 			"priority": {
 				Type: ColumnDefinitionTypeString,
