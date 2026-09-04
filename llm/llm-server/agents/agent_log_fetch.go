@@ -129,6 +129,17 @@ func (a *FetchLogsAgent) generateKubeCtlLogQueryAndExecute(ctx *security.Request
 		}
 		return errorResponse(a.GetName(), fmt.Errorf("kubectl fetch failed: %s", reason)), nil
 	}
+	// A filter_pattern narrows kubectl logs server-side (buildKubectlLogCommand
+	// pipes it through grep). Zero lines back proves only that nothing matched
+	// THIS filter, not that the container has no relevant output — but
+	// makeFetchResponse's logs_complete=true reads as "nothing to see here"
+	// either way. Flag the ambiguity explicitly rather than let a narrow,
+	// LLM-chosen keyword list (see kubectlErrorRegex) stand in for "the pod is
+	// healthy".
+	if strings.TrimSpace(intent.FilterPattern) != "" && kubectlStdoutFieldIsEmpty(logs) {
+		logs = filteredEmptyLogsCaveat(intent.FilterPattern, logs)
+	}
+
 	fileRef, flattened, fileRefs := saveLogsToWorkspace(ctx, a.accountId, request.ConversationId, "kubectl", logs)
 	bundleSignal, err := runAutoDiagnosticBundle(ctx, a.accountId, request, fileRef)
 	if err != nil {
@@ -178,6 +189,49 @@ func extractKubectlStdout(out string) string {
 		return strings.TrimSpace(env.Stdout)
 	}
 	return strings.TrimSpace(out)
+}
+
+// kubectlStdoutFieldIsEmpty reports whether a kubectl_execute {"stdout":...}
+// envelope's stdout field is present and blank. Unlike extractKubectlStdout
+// (which falls back to the raw envelope string when Stdout == "", so it is
+// never itself empty), this only cares about the actual field value —
+// EXPERIMENTAL, added alongside the filter_pattern empty-result caveat above.
+func kubectlStdoutFieldIsEmpty(out string) bool {
+	var env map[string]json.RawMessage
+	if json.Unmarshal([]byte(out), &env) != nil {
+		return false
+	}
+	raw, ok := env["stdout"]
+	if !ok {
+		return false
+	}
+	var stdout string
+	if json.Unmarshal(raw, &stdout) != nil {
+		return false
+	}
+	return strings.TrimSpace(stdout) == ""
+}
+
+// filteredEmptyLogsCaveat builds the {"stdout":...} envelope replacing an
+// empty, filtered kubectl result — see the call site in
+// generateKubeCtlLogQueryAndExecute. Built via json.Marshal, not a hand-built
+// `{"stdout":"...%q..."}` literal: pattern can contain characters (quotes,
+// backslashes) that Go's %q verb escapes Go-style rather than JSON-style,
+// producing invalid JSON that every downstream JSON-consuming caller
+// (extractKubectlStdout, kubectlStdoutFieldIsEmpty, makeFetchResponse) would
+// then fail to parse — caught in review before this shipped. fallback is
+// returned unchanged if marshaling somehow fails (never expected for a
+// map[string]string, but this must never itself panic or emit broken JSON).
+func filteredEmptyLogsCaveat(pattern, fallback string) string {
+	msg := fmt.Sprintf(
+		"[FILTERED — zero lines matched the pattern %q. This does NOT mean the container has no relevant output, only that nothing matched this specific filter. Re-fetch without a filter_pattern (or with a broader one) before concluding there is no issue.]",
+		pattern,
+	)
+	payload, err := json.Marshal(map[string]string{"stdout": msg})
+	if err != nil {
+		return fallback
+	}
+	return string(payload)
 }
 
 const discoveryCandidateCap = 5

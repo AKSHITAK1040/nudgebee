@@ -32,6 +32,54 @@ func TestSplitKubectlStderrNoise(t *testing.T) {
 	}
 }
 
+// TestContainerDefaultWarning guards against a real production miss: a
+// multi-container pod with no default-container annotation silently returns
+// only one container's logs, and — before this warning existed — nothing in
+// the observation told the LLM another container was never checked. See
+// namespace-233's cart-cache-test repro: the agent concluded "no issues" off
+// a single clean container while the other one carried the actual warning.
+func TestContainerDefaultWarning(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		want   string // "" means no warning expected; non-empty checked via Contains
+	}{
+		{"no stderr", "", ""},
+		{"stderr with unrelated noise only", "Warning: some other notice", ""},
+		{
+			"multi-container defaulted — warns and names the others",
+			`Defaulted container "cache" out of: cache, redis`,
+			"redis",
+		},
+		{
+			"single-container pod — kubectl never emits 'out of' with one name, nothing to warn about",
+			`Defaulted container "app" out of: app`,
+			"",
+		},
+		{
+			"three containers — lists every one not fetched",
+			`Defaulted container "main" out of: main, sidecar, exporter`,
+			"sidecar",
+		},
+		{
+			"CRLF line ending and irregular spacing — names parsed without stray whitespace",
+			"Defaulted container \"cache\" out of: cache,  redis \r\n",
+			"(redis)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := containerDefaultWarning(tc.stderr)
+			if tc.want == "" {
+				assert.Empty(t, got)
+				return
+			}
+			assert.Contains(t, got, tc.want)
+			assert.Contains(t, got, "does not mean the pod is healthy")
+		})
+	}
+}
+
 func TestKubectlResourceKind(t *testing.T) {
 	cases := []struct {
 		name    string

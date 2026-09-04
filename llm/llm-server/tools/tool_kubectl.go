@@ -110,6 +110,52 @@ func splitKubectlStderrNoise(response string) (stdout, stderr string) {
 	return strings.Join(lines[i:], "\n"), strings.Join(lines[:i], "\n")
 }
 
+// containerDefaultWarning parses a "Defaulted container ... out of: a, b, c"
+// stderr line and, when the pod has more than one container, returns a
+// stdout-visible note listing the ones that were NOT fetched — so the LLM
+// can't mistake "this container's logs are clean" for "the pod is healthy".
+// Returns "" when stderr doesn't contain the notice, or the pod only has one
+// container (nothing was actually skipped).
+func containerDefaultWarning(stderr string) string {
+	const marker = `Defaulted container "`
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimRight(line, "\r")
+		idx := strings.Index(line, marker)
+		if idx == -1 {
+			continue
+		}
+		rest := line[idx+len(marker):]
+		nameEnd := strings.Index(rest, `"`)
+		if nameEnd == -1 {
+			continue
+		}
+		defaulted := rest[:nameEnd]
+		const outOf = `" out of: `
+		if !strings.HasPrefix(rest[nameEnd:], outOf) {
+			continue
+		}
+		var names, others []string
+		for _, n := range strings.Split(rest[nameEnd+len(outOf):], ",") {
+			n = strings.TrimSpace(n)
+			if n == "" {
+				continue
+			}
+			names = append(names, n)
+			if n != defaulted {
+				others = append(others, n)
+			}
+		}
+		if len(names) < 2 || len(others) == 0 {
+			return ""
+		}
+		return fmt.Sprintf(
+			"\n\n[NOTE: this pod has multiple containers (%s). This command only returned logs for the default container %q — the others (%s) were NOT checked. A clean result here does not mean the pod is healthy; re-run with -c <container> for each of the others before concluding there is no issue.]",
+			strings.Join(names, ", "), defaulted, strings.Join(others, ", "),
+		)
+	}
+	return ""
+}
+
 func init() {
 	core.RegisterNBToolFactory(ToolExecuteKubectlCommand, func(accountId string) (core.NBTool, error) {
 		return KubectlExecuteTool{}, nil
@@ -921,6 +967,17 @@ func (m KubectlExecuteTool) Call(nbRequestContext core.NbToolContext, input core
 	}
 
 	stdout, stderr := splitKubectlStderrNoise(response)
+
+	// "Defaulted container" is the one stderr notice that changes what the
+	// LLM should conclude from stdout: `kubectl logs pod/x` with no `-c` on a
+	// multi-container pod silently picks one container and returns only its
+	// logs. Hiding that in Metadata.Stderr (like every other noise line)
+	// means the LLM never learns the other containers were never checked and
+	// treats a clean single-container log as proof the whole pod is healthy.
+	// See containerDefaultWarning for the exact trigger condition.
+	if warning := containerDefaultWarning(stderr); warning != "" {
+		stdout += warning
+	}
 
 	// Wrap stdout in JSON so agents can parse it. Stderr is intentionally
 	// NOT packed into this envelope — it travels via Metadata.Stderr so it
