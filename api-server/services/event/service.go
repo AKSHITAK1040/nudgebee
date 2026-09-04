@@ -3313,3 +3313,77 @@ func UpdateEvent(ctx *security.RequestContext, request models.UpdateEventRequest
 
 	return r, nil
 }
+
+// AddEvidence appends evidences to an event that already exists.
+//
+// This exists because InvestigateEvent's duplicate branch deliberately refuses
+// to touch evidences ("playbook-collected evidences would be lost"), so a
+// workflow that wants to attach diagnostic output to the alarm event it was
+// triggered by has no way in. Storing a fresh event instead would split one
+// incident across two rows.
+//
+// The append is done in SQL rather than read-modify-write in Go, and that is
+// load-bearing rather than stylistic: the playbook enricher pipeline writes
+// this same jsonb column via RefreshInvestigation, and both run within seconds
+// of an event being created. A read, merge and full-column overwrite would let
+// whichever transaction commits last silently discard the other's evidence.
+// `evidences || $1::jsonb` is a single atomic statement, so concurrent appends
+// both survive.
+//
+// Duplicate suppression therefore happens on read (dedupeEvidencesByContent is
+// already applied where evidences are consumed) rather than by rewriting the
+// column here.
+func AddEvidence(ctx *security.RequestContext, eventId string, evidences []any) error {
+	if eventId == "" {
+		return fmt.Errorf("event: event_id is required")
+	}
+	if len(evidences) == 0 {
+		return fmt.Errorf("event: at least one evidence is required")
+	}
+
+	existing, err := GetEvent(ctx, eventId)
+	if err != nil {
+		return err
+	}
+	if existing.CloudAccountId == nil || *existing.CloudAccountId == "" {
+		return fmt.Errorf("event %s has no account association", eventId)
+	}
+	if !ctx.GetSecurityContext().HasAccountAccess(*existing.CloudAccountId, security.SecurityAccessTypeUpdate) {
+		return common.ErrorUnauthorized("access denied for account: " + *existing.CloudAccountId)
+	}
+
+	evidencesJson, err := common.MarshalJson(evidences)
+	if err != nil {
+		return fmt.Errorf("event: failed to marshal evidences: %w", err)
+	}
+
+	dbms, err := database.GetDatabaseManager(database.Metastore)
+	if err != nil {
+		return err
+	}
+
+	// Two distinct empty states have to be normalised before concatenating.
+	// A SQL NULL would make the whole expression NULL. A jsonb 'null' would
+	// not — `'null'::jsonb || '[{...}]'::jsonb` yields `[null, {...}]`, which
+	// keeps the evidence but leaves a junk null element in the array for every
+	// consumer to skip. The CASE covers both; coalesce alone only covers the
+	// first.
+	res, err := dbms.Db.Exec(
+		`UPDATE events
+		    SET evidences = CASE
+		            WHEN evidences IS NULL OR evidences = 'null'::jsonb THEN '[]'::jsonb
+		            ELSE evidences
+		        END || $1::jsonb,
+		        updated_at = $2
+		  WHERE id = $3`,
+		string(evidencesJson), time.Now().UTC(), eventId)
+	if err != nil {
+		return fmt.Errorf("event: failed to append evidences: %w", err)
+	}
+	if affected, aerr := res.RowsAffected(); aerr == nil && affected == 0 {
+		return fmt.Errorf("event %s not found", eventId)
+	}
+
+	slog.Info("event: appended evidences", "event_id", eventId, "count", len(evidences))
+	return nil
+}
