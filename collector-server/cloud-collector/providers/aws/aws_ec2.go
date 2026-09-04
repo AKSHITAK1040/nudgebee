@@ -446,6 +446,13 @@ func (a *amazonEc2) GetResources(ctx providers.CloudProviderContext, account pro
 // GetResourcesByIds fetches specific EC2 instances by their IDs using server-side filtering.
 // This avoids the full DescribeInstances + per-instance DescribeAlarms scan that GetResources does.
 func (a *amazonEc2) GetResourcesByIds(ctx providers.CloudProviderContext, account providers.Account, region string, resourceIds []string) ([]providers.Resource, error) {
+	if len(resourceIds) == 0 {
+		// DescribeInstances with an empty InstanceIds describes every instance in
+		// the region — the full scan this method exists to avoid. Deliberately not
+		// ErrUnsupported: that would send ListResources back to GetResources.
+		return []providers.Resource{}, nil
+	}
+
 	cfg, err := getAwsConfigFromAccount(ctx.GetContext(), account)
 	if err != nil {
 		return nil, err
