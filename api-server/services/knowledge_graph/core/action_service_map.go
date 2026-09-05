@@ -216,7 +216,7 @@ func (a *knowledgeGraphServiceMapAction) Execute(ctx playbooks.PlaybookActionCon
 	}
 
 	return &KnowledgeGraphServiceMapResponse{
-		Nodes:          toEvidenceNodes(graph.Nodes),
+		Nodes:          ToEvidenceNodes(graph.Nodes),
 		Edges:          graph.Edges,
 		TargetService:  serviceName,
 		Namespace:      namespace,
@@ -229,12 +229,16 @@ func (a *knowledgeGraphServiceMapAction) Execute(ctx playbooks.PlaybookActionCon
 // knowledge_graph_service_map evidence block. A full KgNode is a copy of the
 // stored graph row — every property a source wrote, including the k8s
 // annotations map, which alone accounted for ~31% of one measured block
-// (22,539 of 72,671 bytes) via kubectl's last-applied-configuration. None of
-// the consumers of this evidence read those fields: the investigate UI renders
-// id / node_type / properties.name / properties.namespace (unique_key as the
-// name fallback), and triage's dependency parser needs the same set plus the
-// edges. Projecting here keeps the evidence to what is read instead of
-// filtering noisy keys one at a time.
+// (22,539 of 72,671 bytes) via kubectl's last-applied-configuration.
+//
+// Two consumers read this block. The investigate UI renders id / node_type /
+// properties.name / properties.namespace (unique_key as the name fallback).
+// triage's dependency parser needs that set plus the edges — and, for cloud
+// nodes, properties.resource_id / properties.arn, which are how it matches an
+// event to the node the event is about. Projecting here keeps the evidence to
+// what is read instead of filtering noisy keys one at a time; the cost of
+// getting the allowlist wrong is that a consumer degrades silently, so add to
+// evidenceNodeProperties rather than trimming it on size grounds alone.
 type KgEvidenceNode struct {
 	ID           string         `json:"id"`
 	NodeType     NodeType       `json:"node_type"`
@@ -244,22 +248,35 @@ type KgEvidenceNode struct {
 }
 
 // evidenceNodeProperties is the property allowlist for KgEvidenceNode: what
-// the node is (name, namespace, cluster, kind, engine, role, region) and
-// whether it is healthy (phase, status, state, ready). Everything a service
-// map is asked — which neighbours surround the alerting resource, of what
-// kind, in what shape — is answerable from these; the rest (annotations,
-// container images, resource requests/limits, ARNs, timestamps) is reachable
-// from the KG APIs when an investigation actually needs it.
+// the node is (name, namespace, cluster, kind, engine, role, region), how to
+// identify it (resource_id, arn) and whether it is healthy (phase, status,
+// state, ready). The rest — annotations, container images, resource
+// requests/limits, timestamps — is reachable from the KG APIs when an
+// investigation actually needs it.
+//
+// resource_id and arn are here because the card has a second consumer besides
+// the UI. Correlation parses it to build its dependency graph, and it joins an
+// event to a node by the event's subject. A cloud event names its subject by
+// provider id (i-0dcee3621b8456783); a node is named from its Name tag
+// (nudgebee-scenario-services-order). Without an identifier on the node there
+// is nothing to join on, so correlation saw the right topology and still scored
+// every pair at distance 0.
+//
+// Excluding ARNs was a deliberate choice when this card was only read by
+// humans, for whom they are noise. It is two strings per node, and dropping
+// them silently disables cross-resource correlation for every cloud provider —
+// which is not a trade the size saving is worth.
 var evidenceNodeProperties = []string{
 	"name", "namespace", "cluster",
 	"kind", "engine", "role", "region",
+	"resource_id", "arn",
 	"phase", "status", "state", "ready",
 }
 
-// toEvidenceNodes projects each node onto KgEvidenceNode. Absent and nil
+// ToEvidenceNodes projects each node onto KgEvidenceNode. Absent and nil
 // properties are skipped rather than emitted as nulls, so a node contributes
 // only the keys its source actually populated.
-func toEvidenceNodes(nodes []KgNode) []KgEvidenceNode {
+func ToEvidenceNodes(nodes []KgNode) []KgEvidenceNode {
 	evidenceNodes := make([]KgEvidenceNode, 0, len(nodes))
 	for i := range nodes {
 		properties := make(map[string]any, len(evidenceNodeProperties))
