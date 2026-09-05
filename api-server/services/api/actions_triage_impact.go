@@ -175,6 +175,23 @@ func resolveEventSubjectNodeID(kg *core.Service, tenantID, accountID, name, name
 			}
 		}
 	}
+
+	// Every candidate above is a name. A cloud alarm names its subject by the
+	// provider's identifier - i-0dcee3621b8456783 - while the node is named from
+	// its Name tag, so none of them can match and the blast radius came back
+	// "we don't have a service map for this one" for any resource whose tag
+	// differs from its id, which is most of them. Measured on dev: 0 nodes are
+	// named by instance id, 3 carry it as properties.resource_id.
+	//
+	// Last resort, after every name attempt, so a resource that genuinely is
+	// named by its id still resolves through the cheaper indexed path first.
+	// namespaced is false: cloud nodes carry no namespace, and claiming one
+	// makes the seed key disagree with the topology map keyed without it.
+	for _, cand := range candidates {
+		if nodeID, ok := kg.ResolveNodeByProviderIdentifier(tenantID, accountID, cand); ok {
+			return nodeID, false, true
+		}
+	}
 	return "", false, false
 }
 

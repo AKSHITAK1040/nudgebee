@@ -337,11 +337,51 @@ var serviceMapNeighbourTypes = []NodeType{
 // them. resource_id is not indexed into query_attributes, so this reads
 // properties directly; it runs only after the name lookups have failed.
 func findServiceNodesByResourceID(dbManager *database.DatabaseManager, tenantID, accountID, resourceID string) ([]string, error) {
+	return findNodesByProviderIdentifierInTable(dbManager, "knowledge_graph_node", tenantID, accountID, resourceID)
+}
+
+// ResolveNodeByProviderIdentifier resolves the single graph node a cloud event's
+// subject names, when that subject is a provider identifier (instance id, ARN)
+// rather than the display name the node carries.
+//
+// This exists because the same mismatch has now been fixed three times in three
+// layers - the evidence lookup, the evidence property projection, and the blast
+// radius seed - each time by a different one-off. An event says
+// i-0dcee3621b8456783; the node is named nudgebee-scenario-services-order from
+// its Name tag. Any lookup that matches on name alone silently resolves nothing,
+// and every caller degrades quietly rather than erroring: no evidence, no
+// correlation, "no service map for this one".
+//
+// Callers that resolve a subject to a node should use this after their
+// name-based attempts fail, so a fourth layer cannot reintroduce the same gap.
+//
+// Exactly one match counts. Two nodes sharing an identifier means we cannot say
+// which resource the event is about, and guessing seeds a blast radius on the
+// wrong one - the same rule the name-based path applies.
+func (s *Service) ResolveNodeByProviderIdentifier(tenantID, accountID, identifier string) (string, bool) {
+	ids, err := findServiceNodesByResourceID(s.dbManager, tenantID, accountID, identifier)
+	if err != nil {
+		s.logger.Warn("resolve node by provider identifier failed",
+			"identifier", identifier, "error", err)
+		return "", false
+	}
+	if len(ids) != 1 {
+		return "", false
+	}
+	return ids[0], true
+}
+
+// findNodesByProviderIdentifierInTable is the SQL, with the table as a parameter
+// so a DB test can run it against a throwaway table instead of needing the real
+// graph and its foreign keys (the convention pr_lifecycle_*_test.go established).
+// The table name is never caller-supplied at runtime - production passes a
+// constant.
+func findNodesByProviderIdentifierInTable(dbManager *database.DatabaseManager, table, tenantID, accountID, resourceID string) ([]string, error) {
 	if resourceID == "" {
 		return nil, nil
 	}
 	query := `
-		SELECT id FROM knowledge_graph_node
+		SELECT id FROM ` + table + `
 		WHERE tenant_id = $1
 		  AND (properties->>'resource_id' = $2 OR properties->>'arn' = $2)
 		  AND node_type = ANY($3)
