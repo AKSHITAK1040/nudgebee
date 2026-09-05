@@ -80,7 +80,13 @@ func aliasPriorityFor(nodeType string) int {
 // shape and sort order.
 type pendingAlias struct {
 	key, namespace, kind, name string
-	priority                   int
+	// resourceID and arn are the provider's own identifiers. A cloud event
+	// names its subject by those, while the node is named from its Name tag, so
+	// without them nothing bridges "i-0b079820a95b1517a" to a node keyed
+	// ":ComputeInstance:orders-api" and the event can never reach its own
+	// dependencies.
+	resourceID, arn string
+	priority        int
 }
 
 // sortAliasesByPriority sorts pending alias registrations in priority order
@@ -270,13 +276,29 @@ var k8sAliasKinds = map[string]bool{
 // K8s-kinded nodes are left to registerNodeAliases: their names ("flagd") are
 // only unique within a namespace, so registering them unqualified would let a
 // workload in one namespace answer for a same-named workload in another.
-func (g *DependencyGraph) registerCloudResourceAliases(canonical, kind, name string) {
-	if name == "" || k8sAliasKinds[kind] {
+func (g *DependencyGraph) registerCloudResourceAliases(canonical, kind, name, resourceID, arn string) {
+	if k8sAliasKinds[kind] {
 		return
 	}
-	g.addAlias(name, canonical)
-	if resourceID := cloudResourceIDFromARN(name); resourceID != "" {
+	if name != "" {
+		g.addAlias(name, canonical)
+		if id := cloudResourceIDFromARN(name); id != "" {
+			g.addAlias(id, canonical)
+		}
+	}
+	// The provider's identifiers, which is how events name their subject. A
+	// CloudWatch alarm arrives as "i-0b079820a95b1517a" or as an alarm ARN
+	// ending in it, while the node is keyed by its Name tag - registering only
+	// the display name left the two unable to meet, so every AWS instance event
+	// scored dependency_distance 0 no matter how correct the graph was.
+	if resourceID != "" {
 		g.addAlias(resourceID, canonical)
+	}
+	if arn != "" {
+		g.addAlias(arn, canonical)
+		if id := cloudResourceIDFromARN(arn); id != "" {
+			g.addAlias(id, canonical)
+		}
 	}
 }
 
@@ -490,7 +512,7 @@ func buildDependencyGraph(nodes []ServiceNode) *DependencyGraph {
 	sortAliasesByPriority(pending)
 	for _, p := range pending {
 		graph.registerNodeAliases(p.key, p.namespace, p.kind, p.name)
-		graph.registerCloudResourceAliases(p.key, p.kind, p.name)
+		graph.registerCloudResourceAliases(p.key, p.kind, p.name, "", "")
 	}
 
 	// Second pass: Build edges
@@ -720,12 +742,17 @@ func parseKnowledgeGraphEvidence(evidence map[string]interface{}) *DependencyGra
 			},
 		}
 
+		resourceID, _ := properties["resource_id"].(string)
+		arn, _ := properties["arn"].(string)
+
 		pending = append(pending, pendingAlias{
-			key:       nodeKey,
-			namespace: namespace,
-			kind:      kind,
-			name:      name,
-			priority:  aliasPriorityFor(kind),
+			key:        nodeKey,
+			namespace:  namespace,
+			kind:       kind,
+			name:       name,
+			resourceID: resourceID,
+			arn:        arn,
+			priority:   aliasPriorityFor(kind),
 		})
 	}
 
@@ -734,7 +761,7 @@ func parseKnowledgeGraphEvidence(evidence map[string]interface{}) *DependencyGra
 	sortAliasesByPriority(pending)
 	for _, p := range pending {
 		graph.registerNodeAliases(p.key, p.namespace, p.kind, p.name)
-		graph.registerCloudResourceAliases(p.key, p.kind, p.name)
+		graph.registerCloudResourceAliases(p.key, p.kind, p.name, p.resourceID, p.arn)
 	}
 
 	// Build edges from KG edges (directional dependency relationships only)

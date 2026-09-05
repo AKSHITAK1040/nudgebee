@@ -1211,6 +1211,31 @@ func (a *cloudServiceMapAction) Execute(ctx playbooks.PlaybookActionContext, raw
 		return nil, nil
 	}
 
+	// A map where nothing has an upstream or a downstream is containment only:
+	// the resource, its VPC, its security group. It carries no dependency
+	// information, and the knowledge-graph card on the same event already holds
+	// the real traffic edges (VPC flow logs, eBPF, traces).
+	//
+	// Emitting it anyway was actively harmful rather than merely useless. The
+	// cloud card is written before the knowledge-graph card, and correlation
+	// used to take the first service_map evidence it found - so every cloud
+	// event built its dependency graph from this empty one and could never
+	// score a hop. Correlation now prefers the knowledge-graph card, but the
+	// empty card still renders in the UI and still tells an operator a database
+	// alarm has no callers when the same event carries "instance CALLS
+	// database". Provider-agnostic on purpose: AWS Config, GCP and Azure all
+	// produce containment-only maps for resources with no discovered links.
+	hasDependency := false
+	for _, app := range resourceResp.Applications {
+		if len(app.Upstreams) > 0 || len(app.Downstreams) > 0 {
+			hasDependency = true
+			break
+		}
+	}
+	if !hasDependency {
+		return nil, nil
+	}
+
 	resp := playbooks.NewPlaybookActionResponseJson(map[string]any{"data": resourceResp.Applications}, additionalInfo, []playbooks.PlaybookActionResponseInsight{}, metadata)
 	resp.Format = "service_map"
 	return resp, err

@@ -1,12 +1,14 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"nudgebee/services/eventrule/playbooks"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/security"
 	"strings"
+	"time"
 
 	"github.com/lib/pq"
 )
@@ -119,8 +121,53 @@ func (a *knowledgeGraphServiceMapAction) Execute(ctx playbooks.PlaybookActionCon
 			nodeIDs, err = findServiceNodes(dbManager, ctx.GetTenantId(), ctx.GetAccountId(), lbName, "")
 		}
 		if err != nil || len(nodeIDs) == 0 {
+			// Same mismatch as the load balancer above, for every other cloud
+			// resource: the alarm names its subject by the provider id
+			// ("i-0dcee3621b8456783") while the node is named from its Name tag
+			// ("orders-api"). The id is not in query_attributes, so the name
+			// lookups above cannot match it, and an EC2 alarm produced no
+			// knowledge_graph evidence at all - which silently removed it from
+			// correlation, because correlation walks that evidence and had
+			// nothing to walk.
+			nodeIDs, err = findServiceNodesByResourceID(dbManager, ctx.GetTenantId(), ctx.GetAccountId(), serviceName)
+		}
+		if err != nil || len(nodeIDs) == 0 {
 			logger.Info("knowledge_graph_service_map: no matching service nodes found",
 				"service", serviceName, "namespace", namespace)
+			// Returning no evidence here removes the event from correlation and
+			// from analysis, and nothing downstream can tell that happened - the
+			// alarm, the event and the graph all look fine. Two days of this
+			// looked like "correlation is broken on AWS" when the truth was
+			// "one lookup could not name a resource". Record the near-miss so
+			// an unresolvable subject is reviewable instead of invisible.
+			//
+			// Off the caller's path entirely. Recording is best-effort, this
+			// branch runs on every unresolvable event, and a slow metastore
+			// would otherwise add its timeout to event processing at exactly
+			// the moment things are already going wrong. Request-scoped values
+			// are read here, not inside the goroutine, so a pooled or reused
+			// context cannot race with it.
+			tenantID := ctx.GetTenantId()
+			accountID := ctx.GetAccountId()
+			go func() {
+				recCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer cancel()
+				RecordUncertainClassification(recCtx, dbManager, UncertainClassificationCandidate{
+					TenantID:           tenantID,
+					Source:             "knowledge_graph_service_map",
+					ClassificationKind: "node_match",
+					CandidateName:      serviceName,
+					CandidateNamespace: namespace,
+					ReasonCode:         "no_node_for_event_subject",
+					ReasonDescription: "event subject matched no graph node by name, " +
+						"namespace-less name, load-balancer dimension, resource_id or arn",
+					Evidence: map[string]interface{}{
+						"account_id": accountID,
+						"subject":    serviceName,
+						"namespace":  namespace,
+					},
+				})
+			}()
 			return nil, nil
 		}
 	}
@@ -266,6 +313,52 @@ var serviceMapNeighbourTypes = []NodeType{
 // while cloud nodes carry no namespace at all, so filtering on it can only ever
 // fail. Kubernetes callers must keep passing it — a workload name is unique only
 // within its namespace.
+// findServiceNodesByResourceID resolves a node by the provider's own identifier
+// (instance id, ARN) rather than its display name. Cloud alarms identify their
+// subject by id, while nodes are named from the Name tag, so the name-based
+// lookups miss every resource whose tag differs from its id - which is most of
+// them. resource_id is not indexed into query_attributes, so this reads
+// properties directly; it runs only after the name lookups have failed.
+func findServiceNodesByResourceID(dbManager *database.DatabaseManager, tenantID, accountID, resourceID string) ([]string, error) {
+	if resourceID == "" {
+		return nil, nil
+	}
+	query := `
+		SELECT id FROM knowledge_graph_node
+		WHERE tenant_id = $1
+		  AND (properties->>'resource_id' = $2 OR properties->>'arn' = $2)
+		  AND node_type = ANY($3)
+		  AND level = 'Tenant'
+		  AND is_active = true
+	`
+	args := []interface{}{tenantID, resourceID, pq.Array(seedNodeTypeNames)}
+	if accountID != "" {
+		query += " AND cloud_account_id = $4"
+		args = append(args, accountID)
+	}
+	query += " LIMIT 5"
+
+	rows, err := dbManager.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query service nodes by resource id: %w", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			slog.Warn("failed to close rows", "error", closeErr)
+		}
+	}()
+
+	var nodeIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("failed to scan node id: %w", err)
+		}
+		nodeIDs = append(nodeIDs, id)
+	}
+	return nodeIDs, rows.Err()
+}
+
 func findServiceNodes(dbManager *database.DatabaseManager, tenantID, accountID, name, namespace string) ([]string, error) {
 	query := `
 		SELECT id FROM knowledge_graph_node
