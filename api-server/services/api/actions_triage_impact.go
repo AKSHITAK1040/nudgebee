@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"database/sql"
 	"log/slog"
 	"net/http"
@@ -99,6 +100,28 @@ func scopeAndNormalize(services []core.ImpactedService, namespace string) []core
 
 func impactKey(ns, name string) string {
 	return strings.ToLower(strings.TrimSpace(ns)) + "\x00" + strings.ToLower(strings.TrimSpace(name))
+}
+
+// topologyLostItsDependents reports the shape every identity bug in this
+// subsystem has taken: the graph returned dependents, and none of them survived
+// into the map the tiers are assembled against. No error, an empty list, and a
+// believable explanation on screen. Four of those were found by a person reading
+// a screenshot; this is so the fifth arrives as data.
+//
+// It compares against the RAW graph result, not the scoped lists the map is
+// built from. Comparing against those is a tautology — they are the map's own
+// input, so an empty map implies they were empty too and the condition can never
+// fire. The first version of this guard did exactly that and was dead code,
+// which is the same silent no-op it exists to catch.
+//
+// What survives between the two is namespace scoping (scopeAndNormalize) and
+// keying, so this fires when a resource has dependents in the graph that were
+// all scoped away or all keyed under identities no alert can carry.
+func topologyLostItsDependents(dependsOnMap map[string][]string, impact *core.ImpactSummary) bool {
+	if impact == nil || len(dependsOnMap) > 0 {
+		return false
+	}
+	return len(impact.Dependents) > 0 || len(impact.InfrastructureDependents) > 0
 }
 
 // resolveEventSubjectNodeID maps an event's subject to a single knowledge-graph
@@ -466,15 +489,45 @@ func handleEventGetImpact(h *ActionRequest, c *gin.Context, ctx *security.Reques
 	// can ever have. scopeAndNormalize has already stripped it; this keeps the two in
 	// agreement even if a caller passes an unnormalized list.
 	seedKey := triage.SubjectKey(seedIdentity)
-	topoKey := func(s core.ImpactedService) string {
-		return triage.SubjectKey(triage.AlertIdentity{SubjectNamespace: s.Namespace, SubjectName: s.Name})
+
+	// A cloud resource has two spellings and the tiers are matched on the one the
+	// EVENT carries. An alarm's subject is the provider id (i-0dcee3621b8456783);
+	// the graph node is named from its Name tag (nudgebee-scenario-services-order).
+	// Keying the topology by name alone left AssembleTiers comparing
+	// "|nudgebee-scenario-services-order" against candidates keyed
+	// "|i-0dcee3621b8456783", so the impact tier came back empty on every cloud
+	// event — and the UI, which reads that tier rather than the alerting flags,
+	// said "none of them alerted" on the same response that reported two
+	// dependents alerting.
+	//
+	// Both spellings are registered so a k8s node (where the two are the same) is
+	// unaffected and a cloud node matches whichever the alert used.
+	topoKeys := func(s core.ImpactedService) []string {
+		keys := []string{triage.SubjectKey(triage.AlertIdentity{SubjectNamespace: s.Namespace, SubjectName: s.Name})}
+		if s.ResourceID != "" && !strings.EqualFold(s.ResourceID, s.Name) {
+			keys = append(keys, triage.SubjectKey(triage.AlertIdentity{
+				SubjectNamespace: s.Namespace, SubjectName: s.ResourceID}))
+		}
+		return keys
 	}
+
+	// Infrastructure dependents belong in the topology map, not only in the
+	// alerting annotation below. On a VM stack every dependent is a
+	// ComputeInstance and so lands in this list rather than in deps, which left
+	// the map empty for exactly the topology being investigated. The same
+	// omission was already found and fixed for the alerting path a few lines
+	// down; the map was missed.
+	infraDeps := scopeAndNormalize(impact.InfrastructureDependents, "")
+
 	for _, u := range dependsOn {
-		dependsOnMap[seedKey] = append(dependsOnMap[seedKey], topoKey(u))
+		dependsOnMap[seedKey] = append(dependsOnMap[seedKey], topoKeys(u)...)
 	}
-	for _, d := range deps {
-		dk := topoKey(d)
-		dependsOnMap[dk] = append(dependsOnMap[dk], seedKey)
+	for _, group := range [][]core.ImpactedService{deps, infraDeps} {
+		for _, d := range group {
+			for _, dk := range topoKeys(d) {
+				dependsOnMap[dk] = append(dependsOnMap[dk], seedKey)
+			}
+		}
 	}
 
 	// Topology-driven correlation: which dependents are actually alerting in the window.
@@ -484,9 +537,30 @@ func handleEventGetImpact(h *ActionRequest, c *gin.Context, ctx *security.Reques
 	// ComputeInstance and so lands here rather than in deps: the database's callers
 	// could be alarming loudly and the incident still reported nothing impacted.
 	infrastructure, infraCorrelated := annotateImpactedWithActiveAlerts(dbms.Db, accountID, eventID, rootTime,
-		scopeAndNormalize(impact.InfrastructureDependents, ""), !seedNamespaced)
+		infraDeps, !seedNamespaced)
 	correlatedCount += infraCorrelated
 	assembly := buildIncidentAssembly(ctx.GetLogger(), dbms.Db, accountID, eventID, rootTime, seedIdentity, dependsOnMap, !seedNamespaced)
+
+	if topologyLostItsDependents(dependsOnMap, impact) {
+		tenantForRec, accountForRec := tenantID, accountID
+		seedName, seedNs := derefStr(ev.SubjectName), derefStr(ev.SubjectNamespace)
+		go func() {
+			recCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			core.RecordUncertainClassification(recCtx, dbms, core.UncertainClassificationCandidate{
+				TenantID:           tenantForRec,
+				Source:             "event_get_impact",
+				ClassificationKind: "node_match",
+				CandidateName:      seedName,
+				CandidateNamespace: seedNs,
+				ReasonCode:         "topology_empty_for_resolved_seed",
+				ReasonDescription: "the event's subject resolved to a graph node and that node has " +
+					"dependents, but none of them keyed into the topology map, so every tier is " +
+					"empty and the UI reports nothing was affected",
+				Evidence: map[string]interface{}{"account_id": accountForRec, "event_id": eventID},
+			})
+		}()
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"event_id":              eventID,

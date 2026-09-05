@@ -125,6 +125,28 @@ var impactRelationshipDefaults = map[NodeType][]RelationshipType{
 	NodeTypeService:         {RelationshipCalls},
 }
 
+// notImpactableTypes are node types that can be attached to a resource but can
+// never be *impacted* by it failing. An instance's inbound edges include its
+// owner (OWNS, from the ownership enricher) and the IaC stack that declares it
+// (MANAGES), and both were reported as dependents — a live blast radius listed
+// a person and a CloudFormation stack under "calls this directly", beside the
+// two instances that genuinely do.
+//
+// Filtered by node type rather than by relationship: OWNS and MANAGES are
+// meaningful inbound edges for a Kubernetes Node, where they reach the pods it
+// runs. It is the destination type that is wrong here, not the edge.
+//
+// These stay in DependentsByType — the ownership and stack links are real and
+// worth knowing — they are simply not blast radius.
+var notImpactableTypes = map[NodeType]bool{
+	NodeTypeUserAccount:     true, // a human owner
+	NodeTypeUserGroup:       true, // an owning team
+	NodeTypeInfraStack:      true, // the CloudFormation/Terraform stack that declares it
+	NodeTypeServiceIdentity: true, // the IAM role it assumes
+}
+
+func canBeImpacted(t NodeType) bool { return !notImpactableTypes[t] }
+
 // ImpactSeedNodeTypes returns the node types that have a defined blast-radius
 // traversal, sorted for deterministic iteration.
 //
@@ -551,7 +573,7 @@ func summarizeImpact(seedID string, seedType NodeType, nodes []*DbNode, edges []
 
 	attribution := attributeConnectingEdges(edges, nodeMinDepth, TraverseDirectionUpstream)
 	for _, n := range nodes {
-		if n == nil || n.ID == seedID {
+		if n == nil || n.ID == seedID || !canBeImpacted(n.NodeType) {
 			continue
 		}
 		summary.DependentsByType[n.NodeType]++
