@@ -422,15 +422,25 @@ func getAwsCloudwatchAlarms(ctx providers.CloudProviderContext, account provider
 			stateReason := aws.ToString(alarm.StateReason)
 			alarmArn := aws.ToString(alarm.AlarmArn)
 
-			// Handle StateTransitionedTimestamp safely
+			// Handle StateTransitionedTimestamp safely.
+			//
+			// FindingId is deliberately left unset so the per-firing identity comes
+			// from providers.Event.FiringFindingID() — the same key the EventBridge
+			// path produces. A CloudWatch state change reaches us twice, by push and
+			// by this poller, and both already key on the alarm ARN plus the
+			// transition timestamp; this path used to print that pair as
+			// "<arn>/<RFC3339>" while the shared key prints "<arn>-<unix>", so the
+			// unique index on (tenant, cloud_account_id, finding_id) could not match
+			// them. Every alarm was stored twice and every firing advanced its dedup
+			// chain by two.
+			//
+			// Nothing is lost by dropping the bespoke format: eventDate *is* the
+			// transition timestamp, so the shared key is equally deterministic. When
+			// the timestamp is absent it falls back to now() and the finding id
+			// stops being stable across polls — pre-existing, and unchanged here.
 			var eventDate time.Time
-			var findingId string
 			if alarm.StateTransitionedTimestamp != nil {
 				eventDate = *alarm.StateTransitionedTimestamp
-				// Use deterministic FindingId only when we have a real transition timestamp.
-				// When timestamp is nil (fallback to time.Now()), leave FindingId empty
-				// so etl_events.go computes it from fingerprint+timestamp.
-				findingId = fmt.Sprintf("%s/%s", alarmArn, eventDate.Format(time.RFC3339))
 			} else {
 				eventDate = time.Now()
 			}
@@ -445,7 +455,6 @@ func getAwsCloudwatchAlarms(ctx providers.CloudProviderContext, account provider
 				Date:                eventDate,
 				EventSource:         "AWS_CloudWatch_Alarm",
 				EventId:             eventId,
-				FindingId:           findingId,
 				EventStatus:         providers.EventStatusFiring,
 				EventSeverity:       providers.EventSeverityHigh,
 				ResourceType:        enrichment.ResourceType,

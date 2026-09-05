@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"nudgebee/collector/cloud/security"
 	"strings"
@@ -313,6 +314,32 @@ type Event struct {
 	Raw                 map[string]any    `json:"raw_event"`
 	AdditionalContext   []EventEvidence   `json:"evidences,omitempty"`
 	Labels              map[string]string `json:"labels,omitempty"`
+}
+
+// FiringFindingID is the per-firing identity of an event: what makes two
+// reports of the same occurrence the same row. events carries a unique index on
+// (tenant, cloud_account_id, finding_id), so agreeing here is what collapses
+// them — there is no separate dedup step to fall back on.
+//
+// It exists because one alarm reached us twice. CloudWatch state changes arrive
+// both by EventBridge push and by the alarm poller, and both already keyed on
+// the same two facts — the alarm ARN and the transition timestamp — but printed
+// them differently:
+//
+//	arn:...:alarm:order-down-1788602696            (push, via this fallback)
+//	arn:...:alarm:order-down/2026-09-05T10:04:56Z  (poll, its own format)
+//
+// Same alarm, same instant, two rows. The index cannot match them, so every
+// alarm was stored twice and every firing advanced its dedup chain by two.
+//
+// A method on Event rather than a loose helper: the three call sites in
+// etl_events.go each had their own copy of this expression, which is how the
+// formats were free to drift in the first place.
+func (e Event) FiringFindingID() string {
+	if e.FindingId != "" {
+		return e.FindingId
+	}
+	return fmt.Sprintf("%s-%d", e.EventId, e.Date.Unix())
 }
 
 type ListResourcesResponse struct {

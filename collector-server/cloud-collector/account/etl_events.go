@@ -395,10 +395,7 @@ func StoreEvents(ctx *security.RequestContext, accountId string) (StoreEventResp
 	// and then filtered out by the dedup check (finding_id already exists),
 	// leaving them stuck as CLOSED.
 	currentFindingIds := lo.Map(events.Items, func(event providers.Event, _ int) string {
-		if event.FindingId != "" {
-			return event.FindingId
-		}
-		return fmt.Sprintf("%s-%d", event.EventId, event.Date.Unix())
+		return event.FiringFindingID()
 	})
 
 	// Collect fingerprints of RESOLVED events so their existing FIRING counterparts
@@ -553,10 +550,7 @@ func insertNewEvents(ctx *security.RequestContext, dbms *common.DatabaseManager,
 
 	// 1. Compute per-firing finding_ids for incoming events.
 	findingIds := lo.Map(events, func(event providers.Event, _ int) string {
-		if event.FindingId != "" {
-			return event.FindingId
-		}
-		return fmt.Sprintf("%s-%d", event.EventId, event.Date.Unix())
+		return event.FiringFindingID()
 	})
 
 	// 2. Find which of these finding_ids already exist (processed firings)
@@ -594,11 +588,7 @@ func insertNewEvents(ctx *security.RequestContext, dbms *common.DatabaseManager,
 		}
 		// finding_id must be unique per firing. Use source-native ID if provided,
 		// otherwise combine fingerprint (EventId) with timestamp.
-		if event.FindingId != "" {
-			eventMap["finding_id"] = event.FindingId
-		} else {
-			eventMap["finding_id"] = fmt.Sprintf("%s-%d", event.EventId, event.Date.Unix())
-		}
+		eventMap["finding_id"] = event.FiringFindingID()
 
 		eventMap["created_at"] = currentTimeForBatch
 		if eventMap["id"] == nil {
