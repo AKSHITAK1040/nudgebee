@@ -168,7 +168,10 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 						ctx.GetLogger().Error("auth: unable to execute llm model for infering tool request type", "error", err, "agent", agent.GetName())
 						return nil, nil, err
 					}
-					requestTypeStr := strings.ToLower(response.Choices[0].Content)
+					requestTypeStr := ""
+					if response != nil && len(response.Choices) > 0 && response.Choices[0] != nil {
+						requestTypeStr = strings.ToLower(response.Choices[0].Content)
+					}
 					if strings.Contains(requestTypeStr, "\n") {
 						requestTypeStr = strings.Split(requestTypeStr, "\n")[0]
 					}
