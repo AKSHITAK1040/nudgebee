@@ -72,7 +72,11 @@ export function capSeries(raw: RawSeries[], max: number): { kept: RawSeries[]; d
   if (raw.length <= max) return { kept: raw, dropped: 0 };
   const ranked = raw
     .map((series, index) => ({ series, index, peak: peak(series) }))
-    .sort((a, b) => b.peak - a.peak || a.index - b.index)
+    // Compared rather than subtracted: `peak` is -Infinity for an all-null
+    // series, and -Infinity - -Infinity is NaN. NaN happens to fall through to
+    // the index tiebreak today, but a comparator is only defined for negative,
+    // zero and positive — engines owe us nothing for NaN.
+    .sort((a, b) => (a.peak === b.peak ? a.index - b.index : b.peak > a.peak ? 1 : -1))
     .slice(0, max)
     .sort((a, b) => a.index - b.index)
     .map((r) => r.series);

@@ -58,6 +58,15 @@ describe('capSeries', () => {
     expect(kept.map((s) => s.label)).toEqual(['one']);
   });
 
+  it('orders two all-null series by provider order, not by NaN', () => {
+    // Both peak at -Infinity. Subtracting them gives NaN, which a comparator is
+    // not defined for — so the tie has to be decided by index explicitly.
+    const raw = [series('gaps-a', [null, null]), series('gaps-b', [null, null]), series('one', [1])];
+    const { kept, dropped } = capSeries(raw, 2);
+    expect(kept.map((s) => s.label)).toEqual(['gaps-a', 'one']);
+    expect(dropped).toBe(1);
+  });
+
   it('default chart cap is small enough to draw and read', () => {
     expect(MAX_CHART_SERIES).toBeLessThanOrEqual(50);
   });

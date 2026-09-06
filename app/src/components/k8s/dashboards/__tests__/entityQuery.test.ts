@@ -392,6 +392,17 @@ describe('renderEntityQuery', () => {
     expect(Object.keys(clauses[0]._binary.subject_namespace)).toEqual(['_eq']);
   });
 
+  it('survives a column whose operators are not an object', () => {
+    // Stored dashboard JSON is hand-editable and predates the current shape, so
+    // a null here is reachable. Object.entries(null) threw and took the whole
+    // dashboard render with it.
+    const malformed = { _and: [{ _binary: { subject_namespace: null } }, { _binary: { priority: 'not-an-object' } }] };
+    const rendered = renderEntityQuery({ where: malformed }, (v) => v);
+    const clauses = (rendered.where as any)._and;
+    expect(clauses[0]._binary.subject_namespace).toEqual({});
+    expect(clauses[1]._binary.priority).toEqual({});
+  });
+
   it('substitutes into HAVING as well as WHERE', () => {
     const grouped = buildEntityQuery({
       ...defaultDraft('event_groupings_v2'),
