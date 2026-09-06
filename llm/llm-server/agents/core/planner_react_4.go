@@ -210,7 +210,7 @@ func resolveReact4Tools(ctx *security.RequestContext, request NBAgentRequest, nb
 	// Default-tool injection (load_skills when the agent has KB mappings, plus
 	// shell / watch tools). SkillListsMenu is appended for the <skill-lists>
 	// detection that gates load_skills — same call react_3 makes.
-	tools = FilterAndInjectDefaultTools(request.AccountId, nbAgent, systemMessage+request.SkillListsMenu, tools, request.Capabilities)
+	tools = FilterAndInjectDefaultTools(request.AccountId, nbAgent, systemMessage+request.SkillListsMenu, tools, request.Capabilities, request.KnowledgePolicy)
 
 	// Capability-based filtering (parity with reActCreatePrompt3's final FilterTools).
 	tools = FilterTools(tools, request.Capabilities)

@@ -120,7 +120,26 @@ type DefaultSkillsInjectOverride interface {
 // `toolList` parameter is intentionally not named `tools` to avoid shadowing
 // the `nudgebee/llm/tools` package import (used by `watchToolNames` at the
 // top of this file). Same convention applied to sibling Has* helpers.
-func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt string, toolList []toolcore.NBTool, capabilities toolcore.AgentCapabilities) []toolcore.NBTool {
+func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt string, toolList []toolcore.NBTool, capabilities toolcore.AgentCapabilities, policies ...KnowledgePolicy) []toolcore.NBTool {
+	if len(policies) > 0 {
+		policy := policies[0]
+		if policy == "" {
+			policy = KnowledgeAuto
+		}
+		if policy == KnowledgeDisabled {
+			capabilities.DisabledTools = append(append([]string(nil), capabilities.DisabledTools...), "search_skills", "load_skills")
+		} else {
+			// An empty/timed-out menu must still leave a dynamic discovery path,
+			// including for declarative agents that opt out of shell/watch defaults.
+			for _, name := range []string{"search_skills", "load_skills"} {
+				if !lo.ContainsBy(toolList, func(t toolcore.NBTool) bool { return t != nil && t.Name() == name }) {
+					if tool, ok := toolcore.GetNBTool(accountId, name); ok && tool != nil {
+						toolList = append(toolList, tool)
+					}
+				}
+			}
+		}
+	}
 	// 1. Initial filtering based on capabilities (e.g. disabled_tools, allowed_tools)
 	toolList = FilterTools(toolList, capabilities)
 

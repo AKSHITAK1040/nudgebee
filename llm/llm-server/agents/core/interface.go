@@ -67,17 +67,19 @@ type ImageAttachment struct {
 
 // DO not use for API calls
 type NBAgentRequest struct {
-	Query                 string                 `json:"query" mapstructure:"required" validate:"required"`
-	AccountId             string                 `json:"account_id" mapstructure:"required" validate:"required"`
-	ConversationId        string                 `json:"conversation_id"`
-	AgentId               string                 `json:"agent_id"`
-	ParentAgentId         string                 `json:"parent_agent_id"`
-	MessageId             string                 `json:"message_id"`
-	UserId                string                 `json:"user_id"`
-	ConversationContext   string                 `json:"conversation_context"`
-	QueryContext          string                 `json:"query_context"`
-	QueryConfig           toolcore.NBQueryConfig `json:"query_config"`
-	EnableQueryRefinement bool                   `json:"enable_query_refinement"`
+	KnowledgePolicy         KnowledgePolicy        `json:"-"`
+	KnowledgePolicyResolved bool                   `json:"-"`
+	Query                   string                 `json:"query" mapstructure:"required" validate:"required"`
+	AccountId               string                 `json:"account_id" mapstructure:"required" validate:"required"`
+	ConversationId          string                 `json:"conversation_id"`
+	AgentId                 string                 `json:"agent_id"`
+	ParentAgentId           string                 `json:"parent_agent_id"`
+	MessageId               string                 `json:"message_id"`
+	UserId                  string                 `json:"user_id"`
+	ConversationContext     string                 `json:"conversation_context"`
+	QueryContext            string                 `json:"query_context"`
+	QueryConfig             toolcore.NBQueryConfig `json:"query_config"`
+	EnableQueryRefinement   bool                   `json:"enable_query_refinement"`
 	// AccountContext is the stable, account-wide GlobalContext. ReAct planners
 	// place it in their account-scoped cacheable system prefix.
 	AccountContext string `json:"account_context,omitempty"`
@@ -114,12 +116,8 @@ type NBAgentRequest struct {
 	// executor entry and propagated unchanged through delegation. Empty means this
 	// is the top-level invocation; non-empty means we are running under a parent.
 	OriginalQuery string `json:"original_query,omitempty"`
-	// SelectedSkillIds is the question-aware short-list computed once at the
-	// top-level invocation when LlmServerSkillSelectionTopK > 0. Both the eager
-	// LoadActiveAgentSkillContents path and the lazy injectKBContext path filter to
-	// these IDs (∪ the sub-agent's own mapped KBs). nil means "no filtering / show
-	// every mapped skill" (selection disabled, or no mapped skills, or top-level
-	// fan-out smaller than K).
+	// SelectedSkillIds is retained for custom code-analysis and compatibility
+	// paths. Account-wide runtime knowledge discovery does not use it.
 	SelectedSkillIds []string `json:"selected_skill_ids,omitempty"`
 	// IsResume marks the request as a resume of an already-active conversation
 	// (client-tool-result, dead-worker recovery). When true, handleConversationRequest
@@ -130,22 +128,16 @@ type NBAgentRequest struct {
 	// #29973). New-turn requests must keep IsResume=false so legitimate races
 	// (user submits while another turn is running) still surface as errors.
 	IsResume bool `json:"is_resume,omitempty"`
-	// KBPrestepContent holds knowledge base content retrieved by the pre-step
-	// (retrieveRelevantKB) before planning. Populated only when
-	// LlmServerKBPrestepEnabled is on. The planner renders it into the human
-	// message — not the cacheable system prefix — so per-request KB content
-	// never thrashes the LLM cache.
+	// KBPrestepContent holds relevant knowledge retrieved before planning. The
+	// planner renders it into the human message, not the cacheable system prefix.
 	KBPrestepContent string `json:"kb_prestep_content,omitempty"`
 	// KBReferences holds references to knowledge base sources retrieved by the pre-step.
 	KBReferences []AgentReference `json:"kb_references,omitempty"`
 	// KBPrestepExecuted indicates whether pre-step RAG retrieval has already been performed
 	// for this turn or propagated from a parent invocation, avoiding redundant embedding and RAG queries.
 	KBPrestepExecuted bool `json:"kb_prestep_executed,omitempty"`
-	// SkillListsMenu holds the `<skill-lists>` discovery block (names +
-	// descriptions, no bodies) when LlmServerKBPrestepEnabled is on. Like
-	// KBPrestepContent it is rendered into the human message instead of the
-	// system prompt. When the flag is off this stays empty and the legacy
-	// injectKBContext path prepends the block to the system prompt instead.
+	// SkillListsMenu holds the compact `<skill-lists>` candidate index. Like
+	// KBPrestepContent, it is rendered into the human message.
 	SkillListsMenu string `json:"skill_lists_menu,omitempty"`
 	// ChannelContext holds conversation observed in a messaging channel the
 	// tenant opted into watching. It is third-party text that nobody addressed
@@ -382,6 +374,10 @@ type MemoryFact struct {
 	// "you decided X because Y" subtitle is populated on auto-extracted
 	// rows.
 	Rationale string `json:"rationale,omitempty"`
+	// EvidenceQuote is the user's own words that justify an inferred fact
+	// (a short verbatim snippet from the turn). Stored as provenance so a
+	// human can verify why the memory was inferred.
+	EvidenceQuote string `json:"evidence_quote,omitempty"`
 	// PatternKind is the snake_case category the extractor assigns to a
 	// pattern record (e.g. frequent_namespace, preferred_diagnostic_flow).
 	// Required when IsPattern is true — without it the projection step
@@ -452,6 +448,27 @@ const (
 	AgentPlannerTypeConversational AgentPlannerType = "conversation"
 	AgentPlannerTypeClassification AgentPlannerType = "classification"
 )
+
+// AgentKnowledgeMode controls how question-relevant account knowledge is
+// presented to an agent. ReAct agents default to a compact candidate index and
+// load individual candidates on demand. Custom agents must opt in because they
+// build their own LLM messages and cannot call load_skills unless their Execute
+// implementation provides a tool loop.
+type AgentKnowledgeMode string
+
+const (
+	AgentKnowledgeDisabled   AgentKnowledgeMode = "disabled"
+	AgentKnowledgeIndexOnly  AgentKnowledgeMode = "index_only"
+	AgentKnowledgeAutoChunks AgentKnowledgeMode = "auto_chunks"
+)
+
+// NBAgentKnowledgeModeProvider is implemented by custom agents that directly
+// consume bounded, question-relevant knowledge chunks in their LLM prompt.
+// Custom delegators should remain disabled and let their underlying ReAct
+// provider agent perform its own discovery for the delegated task.
+type NBAgentKnowledgeModeProvider interface {
+	GetKnowledgeMode() AgentKnowledgeMode
+}
 
 // AgentPlannerTypeReAct3 is the runtime ENGINE, not a declared type: no agent's
 // GetPlannerType() returns it. resolveEffectivePlannerType maps the ReAct and
@@ -647,6 +664,28 @@ type NBAgentIterationProvider interface {
 // latency SLAs (e.g., sub-agents invoked by orchestrators).
 type NBAgentTimeoutProvider interface {
 	GetTimeout() time.Duration
+}
+
+// NBAgentParentTerminalProvider is an explicit opt-in for agents whose terminal
+// result is also the final result of the calling parent. Most ReAct agents mark
+// their own final answer IsTerminal, but that only means the child has finished;
+// ordinary agent-as-tool calls must return that answer as evidence and let the
+// parent synthesize it with sibling results. Specialized agents such as the
+// automation builder opt in because their finalized artifact must bubble through
+// ancestor planners unchanged.
+type NBAgentParentTerminalProvider interface {
+	PropagateTerminalResponseToParent() bool
+}
+
+// ResolveAgentParentTerminal separates child completion from parent
+// finalization. Parent termination is fail-closed: it requires both a terminal
+// child response and an explicit provider opt-in.
+func ResolveAgentParentTerminal(agent NBAgent, childTerminal bool) bool {
+	if !childTerminal {
+		return false
+	}
+	provider, ok := agent.(NBAgentParentTerminalProvider)
+	return ok && provider.PropagateTerminalResponseToParent()
 }
 
 // NBAgentNotebookSectionProvider lets an agent opt out of the planner's

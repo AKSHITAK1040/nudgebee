@@ -523,6 +523,18 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	}
 
 	// setting the parent agent id
+	policy := request.KnowledgePolicy
+	if !request.KnowledgePolicyResolved {
+		var policyErr error
+		policy, policyErr = resolveKnowledgePolicy(ctx, request.AccountId)
+		if policyErr != nil {
+			return NBAgentResponse{}, policyErr
+		}
+	}
+	applyKnowledgePolicy(&request, policy)
+	if err := validateKnowledgePolicyForAgent(policy, agent); err != nil {
+		return NBAgentResponse{}, err
+	}
 	// Get base system prompt (includes GC for k8s_debugger)
 	promptStart := time.Now()
 	basePrompt := agent.GetSystemPrompt(ctx, request)
