@@ -266,6 +266,10 @@ type KgEvidenceNode struct {
 	SpecificType string         `json:"specific_type,omitempty"`
 	UniqueKey    string         `json:"unique_key"`
 	Properties   map[string]any `json:"properties"`
+	// LogoID is the icon identifier the frontend renders for this node, resolved
+	// here rather than in the UI so evidence nodes carry the same logo the
+	// knowledge-graph view already gets from KgNode.LogoID.
+	LogoID string `json:"logo_id,omitempty"`
 }
 
 // evidenceNodeProperties is the property allowlist for KgEvidenceNode: what
@@ -312,6 +316,9 @@ func ToEvidenceNodes(nodes []KgNode) []KgEvidenceNode {
 			SpecificType: nodes[i].SpecificType,
 			UniqueKey:    nodes[i].UniqueKey,
 			Properties:   properties,
+			// Computed from the full property map, not the trimmed allowlist above:
+			// ComputeLogoID reads engine/kind/service_name, which the allowlist drops.
+			LogoID: ComputeLogoID(nodes[i].NodeType, nodes[i].SpecificType, nodes[i].Source, nodes[i].Properties),
 		})
 	}
 	return evidenceNodes
