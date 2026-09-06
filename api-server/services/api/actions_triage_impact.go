@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"time"
@@ -544,7 +545,26 @@ func handleEventGetImpact(h *ActionRequest, c *gin.Context, ctx *security.Reques
 	if topologyLostItsDependents(dependsOnMap, impact) {
 		tenantForRec, accountForRec := tenantID, accountID
 		seedName, seedNs := derefStr(ev.SubjectName), derefStr(ev.SubjectNamespace)
+		// A panic here takes the process down: gin's recovery middleware wraps
+		// the request's own stack, not one spawned off it. This runs on the
+		// investigate path, so a subject that panicked the recorder would crash
+		// services-server every time anyone opened that event.
+		//
+		// The logger is resolved before the goroutine starts. ctx is
+		// request-scoped, and reading it after the handler has returned is
+		// exactly the kind of thing that would panic inside the handler meant to
+		// report a panic.
+		recLogger := ctx.GetLogger()
+		if recLogger == nil {
+			recLogger = slog.Default()
+		}
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					recLogger.Error("panic recording uncertain classification",
+						"recover", r, "stack", string(debug.Stack()), "event_id", eventID)
+				}
+			}()
 			recCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			core.RecordUncertainClassification(recCtx, dbms, core.UncertainClassificationCandidate{

@@ -7,6 +7,7 @@ import (
 	"nudgebee/services/eventrule/playbooks"
 	"nudgebee/services/internal/database"
 	"nudgebee/services/security"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -149,7 +150,27 @@ func (a *knowledgeGraphServiceMapAction) Execute(ctx playbooks.PlaybookActionCon
 			// context cannot race with it.
 			tenantID := ctx.GetTenantId()
 			accountID := ctx.GetAccountId()
+			// A panic in a goroutine takes the whole process down — it is not
+			// caught by the HTTP layer's recovery, which only wraps the
+			// request's own stack. This one runs on every unresolvable event,
+			// so an input that panics the recorder would not be a single failed
+			// request but a crash loop on the busiest path.
+			//
+			// The logger is resolved here rather than inside: ctx is
+			// request-scoped, and reading it after the request has returned is
+			// the kind of thing that would itself panic in the handler meant to
+			// report a panic.
+			recLogger := logger
+			if recLogger == nil {
+				recLogger = slog.Default()
+			}
 			go func() {
+				defer func() {
+					if r := recover(); r != nil {
+						recLogger.Error("panic recording uncertain classification",
+							"recover", r, "stack", string(debug.Stack()))
+					}
+				}()
 				recCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer cancel()
 				RecordUncertainClassification(recCtx, dbManager, UncertainClassificationCandidate{
