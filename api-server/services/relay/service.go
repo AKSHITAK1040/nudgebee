@@ -13,6 +13,7 @@ import (
 	"nudgebee/services/common"
 	"nudgebee/services/config"
 	"nudgebee/services/internal/database"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -135,6 +136,15 @@ func queryNonAgentMetricsProvider(accountId string) string {
 }
 
 func ExecutePrometheus(accountId string, startTime time.Time, endTime time.Time, queriesMap map[string]string, instant bool) (map[string]any, error) {
+	return ExecutePrometheusWithStep(accountId, startTime, endTime, queriesMap, instant, 0)
+}
+
+// ExecutePrometheusWithStep is ExecutePrometheus with the range query's step, in
+// seconds. Zero leaves the agent on its own default (60s), which is what every
+// existing caller gets through ExecutePrometheus. A caller that knows how many
+// points it can use — a dashboard panel a few hundred pixels wide — sends one so
+// a 7-day range is ~200 points per series rather than 10k.
+func ExecutePrometheusWithStep(accountId string, startTime time.Time, endTime time.Time, queriesMap map[string]string, instant bool, stepSeconds int) (map[string]any, error) {
 
 	if provider := nonAgentMetricsProvider(accountId); provider != "" {
 		slog.Warn("relay: skipping prometheus_queries_enricher; account uses a non-agent metrics provider",
@@ -142,36 +152,12 @@ func ExecutePrometheus(accountId string, startTime time.Time, endTime time.Time,
 		return map[string]any{}, fmt.Errorf("relay: metrics provider %q is not the agent Prometheus; prometheus_queries_enricher not applicable", provider)
 	}
 
-	promsqlQueries := make([]map[string]any, 0, len(queriesMap))
-	for key, query := range queriesMap {
-		promsqlQueries = append(promsqlQueries, map[string]any{
-			"key":   key,
-			"query": query,
-		})
-	}
-
-	// The relay/agent interpret these timestamps as actual UTC. time.Now()
-	// returns local time, and Format("...UTC") only appends a literal "UTC"
-	// label — it doesn't convert the value. Without the explicit .UTC()
-	// conversion, a host in IST sends "18:17 UTC" when it means "12:47 UTC",
-	// putting the query 5.5h in the future and causing Prometheus to return
-	// an empty result set. Reproduces locally when api-server runs outside a
-	// UTC container (every flow-source resolver that calls ExecutePrometheus
-	// silently degrades to no resolution).
 	relayResponse, err := Execute(RelayExecuteRequest{
 		Body: ActionExecuteBody{
-			AccountID:  accountId,
-			ActionName: "prometheus_queries_enricher",
-			ActionParams: map[string]any{
-				"duration": map[string]any{
-					"ends_at":   endTime.UTC().Format("2006-01-02 15:04:05 UTC"),
-					"starts_at": startTime.UTC().Format("2006-01-02 15:04:05 UTC"),
-				},
-				"promql_query":   "",
-				"promql_queries": promsqlQueries,
-				"instant":        instant,
-			},
-			Origin: "services-server",
+			AccountID:    accountId,
+			ActionName:   "prometheus_queries_enricher",
+			ActionParams: prometheusActionParams(startTime, endTime, queriesMap, instant, stepSeconds),
+			Origin:       "services-server",
 		},
 		NoSinks: true,
 		Cache:   false,
@@ -292,6 +278,43 @@ func ExecutePrometheus(accountId string, startTime time.Time, endTime time.Time,
 	}
 
 	return dataMap, nil
+}
+
+// prometheusActionParams is the body of a prometheus_queries_enricher call.
+//
+// The relay/agent interpret these timestamps as actual UTC. time.Now()
+// returns local time, and Format("...UTC") only appends a literal "UTC"
+// label — it doesn't convert the value. Without the explicit .UTC()
+// conversion, a host in IST sends "18:17 UTC" when it means "12:47 UTC",
+// putting the query 5.5h in the future and causing Prometheus to return
+// an empty result set. Reproduces locally when api-server runs outside a
+// UTC container (every flow-source resolver that calls ExecutePrometheus
+// silently degrades to no resolution).
+//
+// `steps`, not `step`: the agent's prometheus_queries_enricher reads that key
+// (its sibling prometheus_enricher reads `step`). Omitted at zero so the
+// agent's default applies rather than a literal "0".
+func prometheusActionParams(startTime, endTime time.Time, queriesMap map[string]string, instant bool, stepSeconds int) map[string]any {
+	promsqlQueries := make([]map[string]any, 0, len(queriesMap))
+	for key, query := range queriesMap {
+		promsqlQueries = append(promsqlQueries, map[string]any{
+			"key":   key,
+			"query": query,
+		})
+	}
+	params := map[string]any{
+		"duration": map[string]any{
+			"ends_at":   endTime.UTC().Format("2006-01-02 15:04:05 UTC"),
+			"starts_at": startTime.UTC().Format("2006-01-02 15:04:05 UTC"),
+		},
+		"promql_query":   "",
+		"promql_queries": promsqlQueries,
+		"instant":        instant,
+	}
+	if stepSeconds > 0 {
+		params["steps"] = strconv.Itoa(stepSeconds)
+	}
+	return params
 }
 
 func ExecuteAndExtractResponse(relayRequest RelayExecuteRequest) (map[string]any, map[string]any, error) {

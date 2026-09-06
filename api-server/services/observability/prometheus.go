@@ -480,12 +480,15 @@ func (s *PrometheusMetricSource) FetchMetricsQuery(
 		filteredQueries[k] = injected
 	}
 
-	externalAppMap, err := relay.ExecutePrometheus(
+	// The step travels with the request so a panel can size the answer to what
+	// it can draw; zero keeps the agent's default, as before.
+	externalAppMap, err := relay.ExecutePrometheusWithStep(
 		req.AccountId,
 		time.Unix(req.StartTime/1000, 0).UTC(),
 		time.Unix(req.EndTime/1000, 0).UTC(),
 		filteredQueries,
 		instant,
+		req.StepInterval,
 	)
 	if err != nil {
 		return OutputMetricQuery{}, err
