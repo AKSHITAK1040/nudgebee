@@ -116,6 +116,45 @@ describe('usePanelData gives up on a request that never answers', () => {
     jest.useRealTimers();
   });
 
+  it('does not raise the deadline against a panel that has already answered', async () => {
+    metricsQuery.mockResolvedValue(answerWith(3));
+    const { result } = render(metricsPanel('timeseries'));
+    // Let the resolved promise chain run under fake timers.
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(result.current.data?.series).toHaveLength(3);
+
+    await act(async () => {
+      jest.advanceTimersByTime(PANEL_TIMEOUT_MS + 1);
+    });
+
+    // The clock was not cleared on settle at first, so every panel showed
+    // "No answer after 30s" half a minute after it had drawn.
+    expect(result.current.error).toBeNull();
+    expect(result.current.data?.series).toHaveLength(3);
+    const [, signal] = metricsQuery.mock.calls[0];
+    expect((signal as AbortSignal).aborted).toBe(false);
+  });
+
+  it('does not raise the deadline against a panel that never sent a request', async () => {
+    // Every target renders to an empty expression: the effect settles without
+    // a request. The clock was armed before that check, so it used to replace
+    // the empty answer with "No answer after 30s".
+    const panel = { ...metricsPanel('timeseries'), targets: [{ ref_id: 'A', expr: '   ' }] } as Panel;
+    const { result } = render(panel);
+    expect(result.current.data?.series).toEqual([]);
+    expect(metricsQuery).not.toHaveBeenCalled();
+
+    await act(async () => {
+      jest.advanceTimersByTime(PANEL_TIMEOUT_MS + 1);
+    });
+
+    expect(result.current.error).toBeNull();
+    expect(result.current.data?.series).toEqual([]);
+  });
+
   it('aborts at the deadline and leaves a retryable error, not a skeleton', async () => {
     metricsQuery.mockImplementation(() => new Promise(() => {}));
     const { result } = render(metricsPanel('timeseries'));
