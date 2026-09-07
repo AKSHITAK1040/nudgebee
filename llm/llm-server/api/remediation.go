@@ -19,6 +19,7 @@ import (
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools"
 	toolcore "nudgebee/llm/tools/core"
+	"nudgebee/llm/workspace"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tmc/langchaingo/llms"
@@ -524,12 +525,15 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 	// workspace pod here. kubectl/helm/psql/ssh target hosts that live inside the customer network
 	// and are unreachable from here, so they go down the relay to an agent inside that network.
 	registeredToolName := cloudCliTool
+	ranOnWorkspace := cloudCliTool != ""
 	start := time.Now()
 	var raw string
 	var execErr error
 
 	if cloudCliTool != "" {
-		raw, execErr = tools.ExecuteCloudCli(ctx, cloudCliTool, request.AccountId, command)
+		// A Run click has no conversation behind it, so the workspace gets the per-account
+		// directory rather than "" -- which it rejects with "Conversation ID is empty".
+		raw, execErr = tools.ExecuteCloudCli(ctx, cloudCliTool, request.AccountId, tools.DefaultCloudCliConversationId(request.AccountId), command)
 	} else {
 		var relayJob tools.RelayJob
 		relayJob, registeredToolName = remediationRelayModule(command)
@@ -561,8 +565,19 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 
 	// Whether the executor actually told us how the command exited. False means "ran, outcome
 	// unknown" rather than "ran and succeeded".
+	//
+	// The two substrates report that in different shapes, so reportedness is decided per substrate.
+	// The relay returns a JSON envelope carrying exit_code; the workspace has no exit_code field at
+	// all, so running its output through parseRelayExecResult never parsed and every cloud command
+	// was recorded "outcome unverified" even when the outcome was stated plainly.
 	exitCodeReported := false
-	if execErr != nil {
+	if ranOnWorkspace {
+		response.Stdout, response.Stderr, response.ExitCode, response.Success, exitCodeReported = workspaceOutcome(execErr, raw)
+		if execErr != nil {
+			ctx.GetLogger().Error("remediation_execute: command failed", "error", execErr)
+			response.Error = execErr.Error()
+		}
+	} else if execErr != nil {
 		// Transport failure — the command may not have run at all.
 		ctx.GetLogger().Error("remediation_execute: command failed", "error", execErr)
 		response.Success = false
@@ -842,4 +857,59 @@ func remediationRelayModule(command string) (tools.RelayJob, string) {
 	default:
 		return tools.RelayJobShell, tools.ToolExecuteServerCommand
 	}
+}
+
+// workspaceOutcome interprets a workspace-run command's result: stdout, stderr, exit code, whether
+// it succeeded, and whether the executor actually stated how it exited.
+//
+// The workspace has no exit_code field, and ErrWorkspaceCommandFailed is NOT "ran and exited
+// non-zero": classifyExecuteResponse raises it for any command_status:"failed", which the agent also
+// uses for its own pre-execution rejections — an empty command, a bad workspace path, the security
+// validator refusing an absolute path. Nothing ran in those cases, so their exit code is not ours to
+// state; only "exit status N" proves the command reached cmd.Run(), and it carries the real code.
+// Reporting a flat 1 for all of them replaced a vague caption with a specific wrong number.
+func workspaceOutcome(execErr error, raw string) (stdout, stderr string, exitCode int, success, reported bool) {
+	if execErr == nil {
+		// command_status success, which is as definitive as an exit code. Returned unexamined: all
+		// three cloud tools build the recovery envelope only alongside NBToolResponseStatusError, so
+		// a success never carries one -- and this is the path where the payload is large (a full
+		// describe-instances response), so it is also the one worth not parsing.
+		return raw, "", 0, true, true
+	}
+
+	stdout = unwrapCliRecoveryEnvelope(raw)
+	stderr = execErr.Error()
+	exitCode = 1
+	// Prefer the workspace's own message over Go's wrapping chain, but do not blank the pane if the
+	// failure arrived without one.
+	var failure *workspace.CommandFailure
+	if errors.As(execErr, &failure) && strings.TrimSpace(failure.StdErr) != "" {
+		stderr = failure.StdErr
+	}
+	// Only the workspace knows its agent's stderr format; asking it keeps this from becoming a second
+	// parser that a format change would silently miss.
+	if code, ok := workspace.ExitCodeFromFailure(execErr); ok {
+		return stdout, stderr, code, false, true
+	}
+	// It failed, but nothing told us it ran — do not claim an exit code for it.
+	return stdout, stderr, exitCode, false, false
+}
+
+// unwrapCliRecoveryEnvelope returns the original CLI output from the JSON the cloud tools wrap a
+// failure in. That envelope's error_hint is written to steer the model ("read the error before
+// switching commands"); showing it in an operator's Output pane is showing them someone else's
+// instructions instead of what their command printed.
+func unwrapCliRecoveryEnvelope(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if !strings.HasPrefix(trimmed, "{") {
+		return raw
+	}
+	var envelope struct {
+		ErrorHint     string `json:"error_hint"`
+		OriginalError string `json:"original_error"`
+	}
+	if err := json.Unmarshal([]byte(trimmed), &envelope); err != nil || envelope.ErrorHint == "" {
+		return raw
+	}
+	return envelope.OriginalError
 }

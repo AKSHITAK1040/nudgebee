@@ -8,6 +8,7 @@ import (
 	"nudgebee/llm/common"
 	"nudgebee/llm/security"
 	"nudgebee/llm/tools/core"
+	"regexp"
 	"strings"
 )
 
@@ -154,9 +155,21 @@ func CloudCliToolFor(command string) string {
 	}
 }
 
+// wrapCloudCliErr wraps a cloud CLI execution failure. The %w matters: workspaceOutcome unwraps to
+// *workspace.CommandFailure to recover the process exit code an operator is shown, and %v would
+// break that silently.
+func wrapCloudCliErr(toolName string, err error) error {
+	return fmt.Errorf("cloud cli: %s failed: %w", toolName, err)
+}
+
 // ExecuteCloudCli runs a cloud CLI command through its own NBTool, which resolves the account's
 // credentials and executes in a workspace pod. Returns the command output and any execution error.
-func ExecuteCloudCli(ctx *security.RequestContext, toolName, accountId, command string) (string, error) {
+//
+// conversationId names the working directory the workspace runs the command in. The workspace
+// rejects an empty one outright ("Conversation ID is empty"), so a caller that has no conversation
+// -- the remediation panel's Run button is triggered by a click, not a chat -- must still supply
+// something; DefaultCloudCliConversationId builds a stable per-account value for that case.
+func ExecuteCloudCli(ctx *security.RequestContext, toolName, accountId, conversationId, command string) (string, error) {
 	// Guarded here rather than at the GetUserId call below: ListToolConfigs dereferences the security
 	// context first (for the tenant id), so a nil one panics before that line is ever reached.
 	if ctx == nil || ctx.GetSecurityContext() == nil {
@@ -195,12 +208,18 @@ func ExecuteCloudCli(ctx *security.RequestContext, toolName, accountId, command 
 		return "", fmt.Errorf("cloud cli: this account has no %s credentials configured, so the command cannot be run", toolName)
 	}
 
+	// Empty is not a usable value downstream, so normalize here rather than trusting every caller:
+	// the workspace names its working directory after this and fails the run when it is blank.
+	if strings.TrimSpace(conversationId) == "" {
+		conversationId = DefaultCloudCliConversationId(accountId)
+	}
+
 	queryConfig := core.NBQueryConfig{ToolConfigs: map[string]string{nbTool.Name(): configName}}
-	toolCtx := core.NewNbToolContext(ctx, nbTool, accountId, ctx.GetSecurityContext().GetUserId(), "", "", "", command, nil, "", queryConfig, "")
+	toolCtx := core.NewNbToolContext(ctx, nbTool, accountId, ctx.GetSecurityContext().GetUserId(), conversationId, "", "", command, nil, "", queryConfig, "")
 
 	resp, err := nbTool.Call(toolCtx, core.NBToolCallRequest{Command: command})
 	if err != nil {
-		return resp.Data, fmt.Errorf("cloud cli: %s failed: %w", toolName, err)
+		return resp.Data, wrapCloudCliErr(toolName, err)
 	}
 	// A credential or STS failure comes back as an error status with a nil error (the tool reports it
 	// as data so the model can read it). Without this the caller would record that run as a success.
@@ -208,4 +227,16 @@ func ExecuteCloudCli(ctx *security.RequestContext, toolName, accountId, command 
 		return resp.Data, fmt.Errorf("cloud cli: %s reported an error: %s", toolName, resp.Data)
 	}
 	return resp.Data, nil
+}
+
+// cloudCliConversationIdUnsafe matches every character the workspace's own path check rejects
+// (it accepts ^[a-zA-Z0-9_-]+$), so an id built from an unexpected account id shape still lands
+// inside a directory name the workspace will accept instead of failing the run.
+var cloudCliConversationIdUnsafe = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
+
+// DefaultCloudCliConversationId is the workspace working directory used by a cloud CLI command that
+// did not originate in a conversation. It is per-account so those runs share one directory (and so
+// reuse the account's workspace) while staying clear of the raw conversation ids the agent path uses.
+func DefaultCloudCliConversationId(accountId string) string {
+	return "remediation-" + cloudCliConversationIdUnsafe.ReplaceAllString(strings.TrimSpace(accountId), "-")
 }

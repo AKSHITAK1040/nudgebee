@@ -1,6 +1,9 @@
 package api
 
 import (
+	"errors"
+	"fmt"
+	"nudgebee/llm/workspace"
 	"testing"
 
 	"nudgebee/llm/common"
@@ -512,6 +515,95 @@ func TestCloudGuardRejectsSubstitutionInsideDoubleQuotes(t *testing.T) {
 		t.Run("allowed/"+tc.name, func(t *testing.T) {
 			assert.False(t, containsShellMetacharacters(tools.StripQuotedContentForShellCheck(tc.command)),
 				"a legitimate cloud CLI command must still pass")
+		})
+	}
+}
+
+// workspaceOutcome is where the cloud path's success, exit code and "did the executor tell us"
+// decision actually live, so it is tested directly rather than by re-asserting errors.Is on an error
+// built in the test.
+//
+// The trap it guards: ErrWorkspaceCommandFailed does NOT mean "ran and exited non-zero".
+// classifyExecuteResponse raises it for any command_status:"failed", which the workspace agent also
+// uses for pre-execution rejections — an empty command, a bad workspace path, the security validator
+// refusing an absolute path (reachable from a real command: `aws s3 cp s3://b/k /var/tmp/x`).
+// Nothing ran in those cases, so claiming a verified exit code 1 for them states a specific wrong
+// number where the old caption was merely vague.
+func TestWorkspaceOutcome(t *testing.T) {
+	wsErr := func(stderr string) error {
+		return fmt.Errorf("cloud cli: aws_execute failed: %w",
+			&workspace.CommandFailure{Status: "failed", StdErr: stderr})
+	}
+
+	for _, tc := range []struct {
+		name         string
+		execErr      error
+		raw          string
+		wantStdout   string
+		wantStderr   string
+		wantExitCode int
+		wantSuccess  bool
+		wantReported bool
+	}{
+		{
+			name: "success is definitive", execErr: nil, raw: "i-0abc	running",
+			wantStdout: "i-0abc	running", wantExitCode: 0, wantSuccess: true, wantReported: true,
+		},
+		{
+			name: "a real non-zero exit carries its own code", execErr: wsErr("exit status 254"),
+			wantStderr: "exit status 254", wantExitCode: 254, wantReported: true,
+		},
+		{
+			name: "exit status 1 is still a real run", execErr: wsErr("exit status 1"),
+			wantStderr: "exit status 1", wantExitCode: 1, wantReported: true,
+		},
+		{
+			// The command never reached cmd.Run(), so its exit code is not ours to state.
+			name: "security rejection never ran", execErr: wsErr("Security validation failed: absolute path"),
+			wantStderr: "Security validation failed: absolute path", wantExitCode: 1, wantReported: false,
+		},
+		{
+			name: "empty command never ran", execErr: wsErr("Command is empty"),
+			wantStderr: "Command is empty", wantExitCode: 1, wantReported: false,
+		},
+		{
+			name: "transport failure leaves everything unknown", execErr: errors.New("connection refused"),
+			wantStderr: "connection refused", wantExitCode: 1, wantReported: false,
+		},
+		{
+			// A CommandFailure with no message must not blank the operator's stderr pane.
+			name: "empty workspace message falls back to the chain", execErr: wsErr(""),
+			wantStderr:   "cloud cli: aws_execute failed: workspace command failed: status=\"failed\" error=\"\"",
+			wantExitCode: 1, wantReported: false,
+		},
+		{
+			// error_hint is written to steer the model; the operator wants what their command printed.
+			name: "recovery envelope is unwrapped", execErr: wsErr("exit status 255"),
+			raw:        `{"error_hint":"read the error before switching commands","original_error":"An error occurred (UnauthorizedOperation)"}`,
+			wantStdout: "An error occurred (UnauthorizedOperation)",
+			wantStderr: "exit status 255", wantExitCode: 255, wantReported: true,
+		},
+		{
+			// A success is returned unexamined -- large describe-* payloads are never parsed.
+			name: "plain json output is not mistaken for an envelope", execErr: nil,
+			raw:        `{"Reservations":[]}`,
+			wantStdout: `{"Reservations":[]}`, wantExitCode: 0, wantSuccess: true, wantReported: true,
+		},
+		{
+			// Even a success whose payload happens to carry the envelope's keys is left alone, since
+			// only a failure can be one.
+			name: "success carrying envelope-like keys is left alone", execErr: nil,
+			raw:        `{"error_hint":"h","original_error":"e"}`,
+			wantStdout: `{"error_hint":"h","original_error":"e"}`, wantExitCode: 0, wantSuccess: true, wantReported: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stdout, stderr, exitCode, success, reported := workspaceOutcome(tc.execErr, tc.raw)
+			assert.Equal(t, tc.wantStdout, stdout, "stdout")
+			assert.Equal(t, tc.wantStderr, stderr, "stderr")
+			assert.Equal(t, tc.wantExitCode, exitCode, "exit code")
+			assert.Equal(t, tc.wantSuccess, success, "success")
+			assert.Equal(t, tc.wantReported, reported, "exitCodeReported")
 		})
 	}
 }

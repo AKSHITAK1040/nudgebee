@@ -997,11 +997,48 @@ func (e *CommandFailure) Is(target error) bool {
 // single update site.
 const stderrExitStatus1 = "exit status 1"
 
+// exitStatusRe matches the agent's report of a process that actually
+// ran. It is the only failure shape the agent produces from cmd.Run();
+// every other command_status:"failed" is a pre-execution rejection
+// (empty command, bad workspace path, security validation), where
+// nothing ran and there is no exit code to speak of. The trailing
+// remainder is optional because "exit status 1: something" is a shape
+// callers already treat as reachable.
+var exitStatusRe = regexp.MustCompile(`^exit status (\d+)(?::.*)?$`)
+
+// ExitCodeFromFailure returns the process exit code the agent reported,
+// and whether err carried one at all. A false second return means the
+// command did not run (or did not fail through the agent), so callers
+// must not present an exit code for it -- reporting a flat 1 there
+// states a specific wrong number instead of an honest unknown.
+//
+// Lives here beside stderrExitStatus1 for the reason that constant
+// gives: one update site if the agent's format ever changes.
+func ExitCodeFromFailure(err error) (int, bool) {
+	var cf *CommandFailure
+	if !stderrors.As(err, &cf) {
+		return 0, false
+	}
+	m := exitStatusRe.FindStringSubmatch(strings.TrimSpace(cf.StdErr))
+	if m == nil {
+		return 0, false
+	}
+	code, convErr := strconv.Atoi(m[1])
+	if convErr != nil {
+		return 0, false
+	}
+	return code, true
+}
+
 // IsExitStatus1Failure reports whether err is a *CommandFailure whose
 // stderr is exactly "exit status 1" (after trimming surrounding
 // whitespace). Used by the shell tool to distinguish the grep-family
 // no-match exit from richer command failures without exposing the
 // literal string to every caller.
+//
+// Deliberately stricter than ExitCodeFromFailure: it stays an exact
+// match on stderrExitStatus1, because "exit status 1: something" is a
+// richer failure that must NOT be reclassified as a grep no-match.
 func IsExitStatus1Failure(err error) bool {
 	var cf *CommandFailure
 	if !stderrors.As(err, &cf) {

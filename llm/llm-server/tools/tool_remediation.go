@@ -305,7 +305,7 @@ func (r RemediationExecuteTool) Call(nbRequestContext core.NbToolContext, input 
 	// and it executes unauthenticated, prints its auth-required hint to stdout, exits 0, and gets
 	// recorded as a successful remediation for an action that never happened (#28804).
 	if cloudCliTool := CloudCliToolFor(command); cloudCliTool != "" {
-		stdout, execErr := ExecuteCloudCli(nbRequestContext.Ctx, cloudCliTool, nbRequestContext.AccountId, command)
+		stdout, execErr := ExecuteCloudCli(nbRequestContext.Ctx, cloudCliTool, nbRequestContext.AccountId, nbRequestContext.ConversationId, command)
 		result.Duration = time.Since(startTime).String()
 		result.Stdout = stdout
 		if execErr != nil {
