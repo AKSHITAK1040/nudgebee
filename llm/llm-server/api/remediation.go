@@ -489,7 +489,7 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 	// risk — and those the stripped check still catches.
 	metaCheckTarget := command
 	if cloudCliTool != "" {
-		metaCheckTarget = tools.StripQuotedContent(command)
+		metaCheckTarget = tools.StripQuotedContentForShellCheck(command)
 	}
 	if containsShellMetacharacters(metaCheckTarget) {
 		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: command contains shell metacharacters (; & | < > ( ) ` $ or newlines) and was rejected; run a single command"}}))

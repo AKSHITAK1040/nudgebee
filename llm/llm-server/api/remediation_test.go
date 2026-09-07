@@ -480,3 +480,38 @@ func TestCloudCliMetacharacterGuard_StillBlocksUnquotedInjection(t *testing.T) {
 		"precondition: the stripper does swallow this, so the truncation check must be what rejects it")
 	assert.True(t, isStructurallyTruncated(sneaky), "unbalanced quote must be rejected")
 }
+
+// A double-quoted span is not inert. The workspace runs the command under `sh -c`, where $ and a
+// backtick still begin a substitution inside double quotes, so stripping such a span wholesale let a
+// substitution reach the shell with every guard reporting the command clean. Single quotes really do
+// suppress expansion, and the operators that are literal inside double quotes must stay allowed --
+// that is what keeps a quoted JMESPath filter usable.
+func TestCloudGuardRejectsSubstitutionInsideDoubleQuotes(t *testing.T) {
+	rejected := []struct{ name, command string }{
+		{"command substitution in double quotes", `aws s3 ls "$(id)"`},
+		{"backtick substitution in double quotes", "aws ec2 describe-instances --filters \"`id`\""},
+		{"variable expansion in double quotes", `aws s3 ls "$HOME"`},
+		{"substitution unquoted", `aws s3 ls $(id)`},
+		{"chaining unquoted", `aws s3 ls; id`},
+	}
+	for _, tc := range rejected {
+		t.Run("rejected/"+tc.name, func(t *testing.T) {
+			assert.True(t, containsShellMetacharacters(tools.StripQuotedContentForShellCheck(tc.command)),
+				"a live substitution must remain visible to the guard")
+		})
+	}
+
+	allowed := []struct{ name, command string }{
+		{"jmespath filter keeps working", `aws ec2 describe-instances --query "Reservations[].Instances[?State.Name=='running']"`},
+		{"operators are literal inside double quotes", `aws s3 ls "a;b&c|d<e>f"`},
+		{"single quotes suppress substitution", `aws s3 ls '$(id)'`},
+		{"escaped dollar is a literal dollar", `aws s3 ls "\$HOME"`},
+		{"plain command", `aws ec2 describe-instance-status --instance-ids i-0abc`},
+	}
+	for _, tc := range allowed {
+		t.Run("allowed/"+tc.name, func(t *testing.T) {
+			assert.False(t, containsShellMetacharacters(tools.StripQuotedContentForShellCheck(tc.command)),
+				"a legitimate cloud CLI command must still pass")
+		})
+	}
+}
