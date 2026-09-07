@@ -1107,20 +1107,10 @@ func (m EventSummaryTool) InputSchema() toolcore.ToolSchema {
 	}
 }
 
+// GetCloudProviderForAccount is retained for its existing callers; the implementation moved to
+// tools so the remediation dispatch (which cannot import agents) can share it.
 func GetCloudProviderForAccount(accountId string) string {
-	if accountId == "" {
-		return ""
-	}
-	dbms, err := common.GetDatabaseManager(common.Metastore)
-	if err != nil {
-		return ""
-	}
-	var cloudProvider string
-	err = dbms.Db.Get(&cloudProvider, "SELECT cloud_provider FROM cloud_accounts WHERE id = $1", accountId)
-	if err != nil {
-		return ""
-	}
-	return cloudProvider
+	return tools.GetCloudProviderForAccount(accountId)
 }
 
 func parseEventLabels(labelsStr string) map[string]any {

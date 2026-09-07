@@ -47,24 +47,69 @@ func TestContainsShellMetacharacters_AllowsPlainCommands(t *testing.T) {
 	}
 }
 
-// TestRemediationRelayModule_Routing verifies the command is dispatched to the relay job and tool that
-// carry the right credentials, case-insensitively.
-func TestRemediationRelayModule_Routing(t *testing.T) {
+// TestRemediationSubstrate_Routing verifies the executor is chosen from the ACCOUNT'S PROVIDER and
+// then narrowed by the command, rather than from the command's first word alone. The old
+// prefix-only dispatch sent kubectl from an AWS account down a relay to an agent that cannot exist
+// there, and dropped GCP's `bq` into an uncredentialed shell.
+func TestRemediationSubstrate_Routing(t *testing.T) {
 	cases := []struct {
-		command  string
-		wantJob  tools.RelayJob
-		wantTool string
+		name       string
+		provider   string
+		command    string
+		wantCloud  string
+		wantJob    tools.RelayJob
+		wantTool   string
+		wantReject bool
 	}{
-		{"kubectl get pods -n prod", tools.RelayJobKubectl, tools.ToolExecuteKubectlCommand},
-		{"KUBECTL get pods -n prod", tools.RelayJobKubectl, tools.ToolExecuteKubectlCommand},
-		{"helm status api -n prod", tools.RelayJobHelm, tools.ToolExecuteHelmCommand},
-		{"argocd app get my-app", tools.RelayJobArgoCD, tools.ToolExecuteArgoCDCommand},
-		{"systemctl restart kubelet", tools.RelayJobShell, tools.ToolExecuteServerCommand},
+		// A Kubernetes account is not kubectl-only -- helm and argocd are ordinary remediations on one.
+		{name: "k8s kubectl", provider: "K8s", command: "kubectl get pods -n prod", wantJob: tools.RelayJobKubectl, wantTool: tools.ToolExecuteKubectlCommand},
+		{name: "k8s kubectl uppercase", provider: "K8s", command: "KUBECTL get pods -n prod", wantJob: tools.RelayJobKubectl, wantTool: tools.ToolExecuteKubectlCommand},
+		{name: "k8s helm", provider: "K8s", command: "helm status api -n prod", wantJob: tools.RelayJobHelm, wantTool: tools.ToolExecuteHelmCommand},
+		{name: "k8s argocd", provider: "K8s", command: "argocd app get my-app", wantJob: tools.RelayJobArgoCD, wantTool: tools.ToolExecuteArgoCDCommand},
+		{name: "k8s shell", provider: "K8s", command: "systemctl restart kubelet", wantJob: tools.RelayJobShell, wantTool: tools.ToolExecuteServerCommand},
+
+		// Each cloud provider reaches its own CLI, and only its own.
+		{name: "aws cli on aws", provider: "AWS", command: "aws ec2 describe-instances", wantCloud: tools.ToolExecuteAwsCliCommand},
+		{name: "azure cli on azure", provider: "Azure", command: "az vm list", wantCloud: tools.ToolExecuteAzureCliCommand},
+		{name: "gcloud on gcp", provider: "GCP", command: "gcloud compute instances list", wantCloud: tools.ToolExecuteGcpCliCommand},
+		{name: "gsutil on gcp", provider: "GCP", command: "gsutil ls gs://bucket", wantCloud: tools.ToolExecuteGcpCliCommand},
+		// bq is a GCP CLI the prefix table never listed, so it used to run uncredentialed and exit 0.
+		{name: "bq on gcp", provider: "GCP", command: "bq query --nouse_legacy_sql SELECT 1", wantCloud: tools.ToolExecuteGcpCliCommand},
+
+		// Cross-provider commands are refused with a reason, not dispatched somewhere that fails opaquely.
+		{name: "kubectl on aws", provider: "AWS", command: "kubectl get pods", wantReject: true},
+		{name: "helm on gcp", provider: "GCP", command: "helm upgrade api ./chart", wantReject: true},
+		{name: "aws cli on azure", provider: "Azure", command: "aws s3 ls", wantReject: true},
+		{name: "gcloud on k8s", provider: "K8s", command: "gcloud compute instances list", wantReject: true},
+
+		// A shell command still has somewhere to go on a cloud account: its workspace pod.
+		{name: "shell on aws", provider: "AWS", command: "df -h", wantJob: tools.RelayJobShell, wantTool: tools.ToolExecuteServerCommand},
+
+		// An unreadable or unmodelled provider must not take remediation offline -- fall back to the
+		// old command-shaped dispatch.
+		{name: "unknown provider keeps cloud dispatch", provider: "", command: "aws ec2 describe-instances", wantCloud: tools.ToolExecuteAwsCliCommand},
+		// Splitting before lowercasing means every whitespace form still yields the binary.
+		{name: "tab separated", provider: "AWS", command: "aws\tec2 describe-instances", wantCloud: tools.ToolExecuteAwsCliCommand},
+		{name: "leading whitespace", provider: "GCP", command: "   gcloud compute instances list", wantCloud: tools.ToolExecuteGcpCliCommand},
+		{name: "empty command falls back to shell", provider: "AWS", command: "   ", wantJob: tools.RelayJobShell, wantTool: tools.ToolExecuteServerCommand},
+		{name: "cloudfoundry falls back to shell", provider: "CloudFoundry", command: "cf apps", wantJob: tools.RelayJobShell, wantTool: tools.ToolExecuteServerCommand},
 	}
 	for _, tc := range cases {
-		job, tool := remediationRelayModule(tc.command)
-		assert.Equal(t, tc.wantJob, job, "job for %q", tc.command)
-		assert.Equal(t, tc.wantTool, tool, "tool for %q", tc.command)
+		t.Run(tc.name, func(t *testing.T) {
+			got := tools.RemediationSubstrateFor(tc.provider, tc.command)
+			if tc.wantReject {
+				assert.NotEmpty(t, got.Reject, "expected a refusal naming the account's provider")
+				assert.Empty(t, got.CloudCliTool)
+				assert.Empty(t, got.RelayTool)
+				return
+			}
+			assert.Empty(t, got.Reject)
+			assert.Equal(t, tc.wantCloud, got.CloudCliTool, "cloud tool for %q", tc.command)
+			assert.Equal(t, tc.wantTool, got.RelayTool, "relay tool for %q", tc.command)
+			if tc.wantTool != "" {
+				assert.Equal(t, tc.wantJob, got.RelayJob, "relay job for %q", tc.command)
+			}
+		})
 	}
 }
 
@@ -606,4 +651,29 @@ func TestWorkspaceOutcome(t *testing.T) {
 			assert.Equal(t, tc.wantReported, reported, "exitCodeReported")
 		})
 	}
+}
+
+// describeRemediationAccount states the facts a runnable command needs and the investigation prose
+// does not reliably carry. Both are optional, and neither known must leave the context untouched
+// rather than prepending an empty heading.
+func TestDescribeRemediationAccountShape(t *testing.T) {
+	// The DB is not available in unit tests, so provider/region both resolve empty here. That is the
+	// case worth pinning: a lookup failure must degrade the prompt, never fail generation.
+	assert.Equal(t, "", describeRemediationAccount("", ""),
+		"nothing known must produce no heading at all")
+	assert.Equal(t, "", describeRemediationAccount("883efbbc-bb2c-404b-9ed9-6b7ecbf6f509", "1653f230-5e49-4351-b1f0-9b2bf5d72475"),
+		"an unreachable metastore must degrade silently, not panic or emit a half-filled heading")
+}
+
+// subject_node holds the REGION on a cloud event and a real node name on a Kubernetes one, so the
+// provider decides whether it may be presented as a region at all.
+func TestEventRegionOnlyForCloudAccounts(t *testing.T) {
+	const acct, evt = "883efbbc-bb2c-404b-9ed9-6b7ecbf6f509", "1653f230-5e49-4351-b1f0-9b2bf5d72475"
+
+	assert.Equal(t, "", eventRegion("K8s", acct, evt),
+		"a Kubernetes node name is not a region and must never be offered as one")
+	assert.Equal(t, "", eventRegion("k8s", acct, evt), "the provider match is case-insensitive")
+	assert.Equal(t, "", eventRegion("", acct, evt), "an unknown provider must not be treated as cloud")
+	assert.Equal(t, "", eventRegion("AWS", "", evt), "no account, no lookup")
+	assert.Equal(t, "", eventRegion("AWS", acct, ""), "no event, no lookup")
 }

@@ -240,3 +240,111 @@ var cloudCliConversationIdUnsafe = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 func DefaultCloudCliConversationId(accountId string) string {
 	return "remediation-" + cloudCliConversationIdUnsafe.ReplaceAllString(strings.TrimSpace(accountId), "-")
 }
+
+// RemediationSubstrate says how one remediation command should be run.
+// Exactly one of CloudCliTool, RelayTool or Reject is set.
+type RemediationSubstrate struct {
+	// CloudCliTool is the credentialed cloud CLI tool to run this through (workspace pod).
+	CloudCliTool string
+	// RelayJob / RelayTool address the customer's own network through the relay.
+	RelayJob  RelayJob
+	RelayTool string
+	// Reject, when set, is an operator-facing reason this command cannot run on this account.
+	Reject string
+}
+
+// RemediationSubstrateFor picks the executor from the ACCOUNT'S PROVIDER first, falling back to the
+// command's shape only within what that provider can actually run.
+//
+// Dispatching on the command's first word alone (CloudCliToolFor) had two failure modes that a
+// provider check removes outright. It missed cloud CLIs it did not enumerate -- `bq` is a GCP CLI
+// that GcpCliTool advertises but the prefix table never listed, so it fell through to the shell path
+// and ran with no GCP credentials, printing its auth hint and exiting 0: a remediation recorded as
+// applied that never happened. And it happily sent `kubectl` from a cloud account down the relay to
+// an agent that cannot exist there, which surfaced as `agent not connected` -- a connectivity error
+// for what is really a category error, telling the operator nothing about why.
+//
+// An unknown or unreadable provider falls back to the old prefix dispatch rather than refusing to
+// run: a metastore hiccup must not take every remediation offline.
+func RemediationSubstrateFor(provider, command string) RemediationSubstrate {
+	var binary string
+	if fields := strings.Fields(command); len(fields) > 0 {
+		binary = strings.ToLower(fields[0])
+	}
+
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "k8s":
+		// A Kubernetes account is not kubectl-only: helm and argocd carry their own credentials and
+		// are ordinary remediations on one. All three need the customer's cluster, so all three go
+		// down the relay; anything else is a plain shell command.
+		switch binary {
+		case "kubectl":
+			return RemediationSubstrate{RelayJob: RelayJobKubectl, RelayTool: ToolExecuteKubectlCommand}
+		case "helm":
+			return RemediationSubstrate{RelayJob: RelayJobHelm, RelayTool: ToolExecuteHelmCommand}
+		case "argocd":
+			return RemediationSubstrate{RelayJob: RelayJobArgoCD, RelayTool: ToolExecuteArgoCDCommand}
+		case "aws", "az", "gcloud", "gsutil", "bq":
+			return RemediationSubstrate{Reject: rejectWrongProvider(binary, "Kubernetes")}
+		default:
+			return RemediationSubstrate{RelayJob: RelayJobShell, RelayTool: ToolExecuteServerCommand}
+		}
+	case "aws":
+		return cloudSubstrate(binary, "AWS", map[string]bool{"aws": true}, ToolExecuteAwsCliCommand)
+	case "azure":
+		return cloudSubstrate(binary, "Azure", map[string]bool{"az": true}, ToolExecuteAzureCliCommand)
+	case "gcp":
+		return cloudSubstrate(binary, "GCP", map[string]bool{"gcloud": true, "gsutil": true, "bq": true}, ToolExecuteGcpCliCommand)
+	}
+
+	// Unknown provider (CloudFoundry, a new one, or the lookup failed): behave exactly as before.
+	if tool := CloudCliToolFor(command); tool != "" {
+		return RemediationSubstrate{CloudCliTool: tool}
+	}
+	return RemediationSubstrate{RelayJob: RelayJobShell, RelayTool: ToolExecuteServerCommand}
+}
+
+// cloudSubstrate resolves one cloud provider's arm of RemediationSubstrateFor.
+func cloudSubstrate(binary, label string, own map[string]bool, tool string) RemediationSubstrate {
+	if own[binary] {
+		return RemediationSubstrate{CloudCliTool: tool}
+	}
+	switch binary {
+	case "kubectl", "helm", "argocd":
+		// There is no cluster and no relay agent behind a cloud account, so this can only ever fail.
+		// Saying which account this is beats the `agent not connected` the relay would have returned.
+		return RemediationSubstrate{Reject: fmt.Sprintf(
+			"this is a %s account, so %q cannot run here — there is no Kubernetes cluster attached to it. Regenerate the plan to get a %s CLI command.",
+			label, binary, label)}
+	case "aws", "az", "gcloud", "gsutil", "bq":
+		return RemediationSubstrate{Reject: rejectWrongProvider(binary, label)}
+	default:
+		// A shell command still has somewhere to go: the account's workspace pod.
+		return RemediationSubstrate{RelayJob: RelayJobShell, RelayTool: ToolExecuteServerCommand}
+	}
+}
+
+func rejectWrongProvider(binary, label string) string {
+	return fmt.Sprintf("this is a %s account, so the %q CLI has no credentials here. Regenerate the plan to get a command for %s.", label, binary, label)
+}
+
+// GetCloudProviderForAccount returns the account's cloud_provider ("AWS", "Azure", "GCP", "K8s",
+// "CloudFoundry"), or "" when it cannot be read. It lives here rather than in agents because both
+// remediation callers dispatch on it and tools cannot import agents.
+//
+// An empty return is deliberately not an error: callers fall back to command-shaped dispatch, so a
+// metastore hiccup degrades routing instead of taking remediation offline.
+func GetCloudProviderForAccount(accountId string) string {
+	if strings.TrimSpace(accountId) == "" {
+		return ""
+	}
+	dbms, err := common.GetDatabaseManager(common.Metastore)
+	if err != nil {
+		return ""
+	}
+	var cloudProvider string
+	if err := dbms.Db.Get(&cloudProvider, "SELECT cloud_provider FROM cloud_accounts WHERE id = $1", accountId); err != nil {
+		return ""
+	}
+	return cloudProvider
+}

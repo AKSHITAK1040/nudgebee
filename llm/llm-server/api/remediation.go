@@ -324,9 +324,20 @@ func processRemediationGenerate(c *gin.Context, tracer trace.Tracer, meter metri
 		c.JSON(500, buildApiResponse(nil, []error{common.Error{Message: "failed to load remediation prompt"}}))
 		return
 	}
+	// The prompt asks the model to match the CLI to what the action targets and to put the event's
+	// region on every cloud command, but the only thing it can infer either from is the investigation
+	// prose — which names the provider rarely and the region inconsistently. Stating both outright
+	// makes them facts rather than guesses: it is what stops a kubectl command being proposed against
+	// an EC2 instance, and what stops an `aws` command going out without --region and failing with
+	// "You must specify a region" having done nothing.
+	humanContent := investigationContext
+	if account := describeRemediationAccount(request.AccountId, request.EventId); account != "" {
+		humanContent = account + "\n\n" + investigationContext
+	}
+
 	resp, err := agentcore.GenerateAndTrackLLMContent(ctx, sc.GetUserId(), request.AccountId, "", "", "", false, []llms.MessageContent{
 		{Role: llms.ChatMessageTypeSystem, Parts: []llms.ContentPart{llms.TextContent{Text: systemPrompt}}},
-		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextContent{Text: investigationContext}}},
+		{Role: llms.ChatMessageTypeHuman, Parts: []llms.ContentPart{llms.TextContent{Text: humanContent}}},
 	}, true)
 	if err != nil {
 		ctx.GetLogger().Error("remediation_generate: llm generation failed", "error", err)
@@ -520,23 +531,34 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 		return
 	}
 
-	// Two execution substrates, picked by what the command targets rather than by account type.
-	// A cloud CLI talks to a public API endpoint and only needs credentials, so it runs in a
-	// workspace pod here. kubectl/helm/psql/ssh target hosts that live inside the customer network
-	// and are unreachable from here, so they go down the relay to an agent inside that network.
-	registeredToolName := cloudCliTool
-	ranOnWorkspace := cloudCliTool != ""
+	// The executor is chosen from the ACCOUNT'S PROVIDER, then narrowed by the command. A cloud CLI
+	// talks to a public API endpoint and only needs credentials, so it runs in a workspace pod here;
+	// kubectl/helm/argocd/shell target hosts inside the customer network and go down the relay.
+	//
+	// Reading the command's first word alone used to decide this, which sent kubectl from an AWS
+	// account to a relay agent that cannot exist there ("agent not connected", a connectivity error
+	// for what is really a category error) and dropped GCP's `bq` through to an uncredentialed shell.
+	substrate := tools.RemediationSubstrateFor(tools.GetCloudProviderForAccount(request.AccountId), command)
+	if substrate.Reject != "" {
+		ctx.GetLogger().Warn("remediation_execute: command does not match the account's provider",
+			"command", command, "reason", substrate.Reject)
+		c.JSON(400, buildApiResponse(nil, []error{common.Error{Message: "remediation: " + substrate.Reject}}))
+		return
+	}
+
+	registeredToolName := substrate.CloudCliTool
+	ranOnWorkspace := substrate.CloudCliTool != ""
 	start := time.Now()
 	var raw string
 	var execErr error
 
-	if cloudCliTool != "" {
+	if substrate.CloudCliTool != "" {
 		// A Run click has no conversation behind it, so the workspace gets the per-account
 		// directory rather than "" -- which it rejects with "Conversation ID is empty".
-		raw, execErr = tools.ExecuteCloudCli(ctx, cloudCliTool, request.AccountId, tools.DefaultCloudCliConversationId(request.AccountId), command)
+		raw, execErr = tools.ExecuteCloudCli(ctx, substrate.CloudCliTool, request.AccountId, tools.DefaultCloudCliConversationId(request.AccountId), command)
 	} else {
-		var relayJob tools.RelayJob
-		relayJob, registeredToolName = remediationRelayModule(command)
+		registeredToolName = substrate.RelayTool
+		relayJob := substrate.RelayJob
 		nbTool, found := toolcore.GetNBTool(request.AccountId, registeredToolName)
 		if !found {
 			c.JSON(404, buildApiResponse(nil, []error{common.Error{Message: "execution tool is not configured for this account"}}))
@@ -842,23 +864,6 @@ func isStructurallyTruncated(command string) bool {
 		strings.Count(command, "[") != strings.Count(command, "]")
 }
 
-// remediationRelayModule maps a command to its relay job type and the registered tool that carries
-// the account's cluster credentials. Mirrors the prefix dispatch in tools/tool_remediation.go. The
-// match is case-insensitive so routing agrees with the rest of the command handling.
-func remediationRelayModule(command string) (tools.RelayJob, string) {
-	lower := strings.ToLower(strings.TrimSpace(command))
-	switch {
-	case strings.HasPrefix(lower, "kubectl"):
-		return tools.RelayJobKubectl, tools.ToolExecuteKubectlCommand
-	case strings.HasPrefix(lower, "helm"):
-		return tools.RelayJobHelm, tools.ToolExecuteHelmCommand
-	case strings.HasPrefix(lower, "argocd"):
-		return tools.RelayJobArgoCD, tools.ToolExecuteArgoCDCommand
-	default:
-		return tools.RelayJobShell, tools.ToolExecuteServerCommand
-	}
-}
-
 // workspaceOutcome interprets a workspace-run command's result: stdout, stderr, exit code, whether
 // it succeeded, and whether the executor actually stated how it exited.
 //
@@ -912,4 +917,50 @@ func unwrapCliRecoveryEnvelope(raw string) string {
 		return raw
 	}
 	return envelope.OriginalError
+}
+
+// describeRemediationAccount states the facts a runnable command needs and the investigation prose
+// does not reliably carry: which cloud the account is on, and which region the event happened in.
+// Returns "" when neither is known, leaving the context exactly as it was.
+//
+// Written as labelled values rather than sentences: the values are substituted in, and any phrasing
+// with an article reads as "a AWS account" for some of them.
+func describeRemediationAccount(accountId, eventId string) string {
+	lines := []string{}
+	provider := strings.TrimSpace(tools.GetCloudProviderForAccount(accountId))
+	if provider != "" {
+		lines = append(lines, fmt.Sprintf("Account provider: %s. Act on this event using the CLI for this provider.", provider))
+	}
+	if region := eventRegion(provider, accountId, eventId); region != "" {
+		lines = append(lines, fmt.Sprintf("Region: %s. Every command that acts on a regional resource must carry this region.", region))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return "## Account\n" + strings.Join(lines, "\n")
+}
+
+// eventRegion returns the region a cloud event happened in. On a cloud account subject_node holds
+// the region rather than a node -- it is what the event page shows as "Node", and agent_workflow_builder
+// documents it in the same words -- so it is the region the remediation must target.
+//
+// Empty for a Kubernetes event, where subject_node really is a node name and offering it as a region
+// would produce commands that fail in a new way, and empty on any lookup failure: a missing region
+// degrades the prompt, it must not fail generation.
+func eventRegion(provider, accountId, eventId string) string {
+	if strings.TrimSpace(eventId) == "" || strings.TrimSpace(accountId) == "" {
+		return ""
+	}
+	if provider == "" || strings.EqualFold(provider, "k8s") {
+		return ""
+	}
+	dbms, err := common.GetDatabaseManager(common.Metastore)
+	if err != nil {
+		return ""
+	}
+	var node string
+	if err := dbms.Db.Get(&node, "SELECT COALESCE(subject_node, '') FROM events WHERE id = $1 AND cloud_account_id = $2", eventId, accountId); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(node)
 }
