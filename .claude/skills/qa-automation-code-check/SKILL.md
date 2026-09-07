@@ -398,7 +398,7 @@ grep -n 'catch(() =>' $T
 grep -hoE 'test\(\s*[`"][^`"]+[`"]' $T | sed -E 's/^test\(\s*[`"]//'
 
 # P5 — titles with no outcome verb, or a generic one
-grep -hoE 'test\(\s*[`"][^`"]+[`"]' $T | grep -viE 'verify|assert|expect' 
+grep -hoE 'test\(\s*[`"][^`"]+[`"]' $T | grep -viE 'verify|assert|expect'
 grep -hoE 'test\(\s*[`"][^`"]+[`"]' $T | grep -iE 'verify (it works|success|the result|the response|no error)'
 ```
 
