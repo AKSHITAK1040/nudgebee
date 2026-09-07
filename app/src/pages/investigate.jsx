@@ -2807,7 +2807,11 @@ const Investigate = () => {
                             {(() => {
                               const askAi = matchedOptions.find((option) => option?.id === 'AskAiCard');
                               const remediationEventId = row?.id || router.query.id;
-                              return isK8s && askAi && !askAi.errorMessage && askAi.isCompleted?.() ? (
+                              // Not gated on isK8s: the panel shipped K8s-only, but generate is
+                              // provider-agnostic (it reuses the investigation text, which cloud events
+                              // have too) and #35503 gave execute a credentialed path for aws/az/gcloud.
+                              // The gate was the only thing keeping cloud accounts off the feature.
+                              return askAi && !askAi.errorMessage && askAi.isCompleted?.() ? (
                                 <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[2] }}>
                                   <Text value='Suggested by Nubi' sx={remediationSectionSx} />
                                   <RemediationPanel
