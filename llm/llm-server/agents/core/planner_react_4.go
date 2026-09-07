@@ -967,16 +967,6 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 			// answer) so the executor retries / summarizes, matching react_3.
 			return nil, nil, fmt.Errorf("react4: empty completion with no tool calls (stop_reason=%q): %w", choice.StopReason, ErrParseFailure)
 		}
-		// Defensive XML unwrap. react_4's prompt carries no XML answer grammar, but
-		// the model still emits react_3's <final_answer><thought>…</thought>
-		// <content>…</content></final_answer> shape in practice — residual pattern
-		// from training, prior-turn history, or account/memory-injected examples.
-		// react_3 always parsed it (processFinalAnswer: <content> -> Data,
-		// <thought> -> Log), so users never saw the wrapper. Taking choice.Content
-		// raw leaked the tags AND the internal monologue into the answer, which
-		// surfaced in the UI as replies opening with "The user is asking for…".
-		// Parsing it here restores react_3's behavior; plain-text answers (the
-		// expected react_4 shape) fall through untouched.
 		// Action grammar with no native tool call means the model tried to invoke a
 		// tool via react_3's TEXT protocol. Nothing was dispatched, so returning this
 		// as the final answer would ship raw XML to the user AND silently skip the
@@ -993,11 +983,17 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 		// Defensive XML unwrap. react_4's prompt carries no XML answer grammar, but
 		// the model still emits react_3's <final_answer><thought>…</thought>
 		// <content>…</content></final_answer> shape in practice — residual pattern
-		// from prior turns or fine-tuning. If present, unwrap so the user receives
-		// clean content and the thought remains hidden, matching react_3.
+		// from training, prior-turn history, or account/memory-injected examples.
+		// react_3 always parsed it (processFinalAnswer: <content> -> Data,
+		// <thought> -> Log), so users never saw the wrapper. Taking choice.Content
+		// raw leaked the tags AND the internal monologue into the answer, which
+		// surfaced in the UI as replies opening with "The user is asking for…".
+		// Parsing it here restores react_3's behavior; plain-text answers (the
+		// expected react_4 shape) fall through untouched.
 		if finish := extractXMLFinalAnswer(choice.Content); finish != nil {
 			return nil, finish, nil
 		}
+
 		return nil, &NBAgentPlannerFinishAction{
 			Data:       choice.Content,
 			Log:        choice.Content,
