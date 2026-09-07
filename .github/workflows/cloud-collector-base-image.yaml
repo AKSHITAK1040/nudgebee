@@ -17,6 +17,9 @@ env:
   IMAGE_REPO: ${{ secrets.DEV_AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/nudgebee-cloud-collector-base
   ECR_REGISTRY: ${{ secrets.DEV_AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com
 
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
