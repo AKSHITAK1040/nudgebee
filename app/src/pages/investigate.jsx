@@ -2730,41 +2730,48 @@ const Investigate = () => {
                                       </Box>
                                     );
                                   })}
-                                  {/* Automations are remediation too: running one changes the system and
-                                      writes a WorkflowExecution resolution, so it appears in History
-                                      alongside everything else. It sat in the toolbar, away from every
-                                      other way of acting on the event. */}
-                                  {row?.id && (
-                                    <Box
-                                      sx={{
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        justifyContent: 'space-between',
-                                        gap: ds.space[4],
-                                        flexWrap: 'wrap',
-                                        p: ds.space[4],
-                                        borderTop: `1px solid ${ds.gray[200]}`,
-                                      }}
-                                    >
-                                      <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[1], minWidth: 0 }}>
-                                        <Text value='Run an automation' sx={{ fontSize: ds.text.bodyLg, fontWeight: ds.weight.medium }} />
-                                        <Text
-                                          value='Your saved workflows, run against this event'
-                                          sx={{ fontSize: ds.text.caption, color: ds.gray[600] }}
-                                        />
-                                      </Box>
-                                      <Box sx={{ flexShrink: 0 }}>
-                                        <RunAutomationMenu
-                                          accountId={row?.cloud_account_id || router.query.accountId}
-                                          eventId={row.id}
-                                          canView={hasReadAccess(row?.cloud_account_id || router.query.accountId)}
-                                          canRun={hasWriteAccess(row?.cloud_account_id || router.query.accountId)}
-                                          onCreateAutomation={() => setShowTemplatesModal(true)}
-                                          onTriggered={handleAutomationTriggered}
-                                        />
-                                      </Box>
+                                </Box>
+                              </Box>
+                            )}
+
+                            {/* Automations are remediation too: running one changes the system and
+                                writes a WorkflowExecution resolution, so it appears in History
+                                alongside everything else. Its own section, not a row inside the card
+                                fixes: gating it on remediationActionCount hid every saved workflow on
+                                events that have no card fix, which the toolbar entry point it replaced
+                                never did. */}
+                            {row?.id && (
+                              <Box sx={{ display: 'flex', flexDirection: 'column', gap: ds.space[2] }}>
+                                <Text value='Run an automation' sx={remediationSectionSx} />
+                                <Box
+                                  sx={{
+                                    border: `1px solid ${ds.gray[200]}`,
+                                    borderRadius: ds.radius.sm,
+                                    overflow: 'hidden',
+                                  }}
+                                >
+                                  <Box
+                                    sx={{
+                                      display: 'flex',
+                                      alignItems: 'center',
+                                      justifyContent: 'space-between',
+                                      gap: ds.space[4],
+                                      flexWrap: 'wrap',
+                                      p: ds.space[4],
+                                    }}
+                                  >
+                                    <Text value='Your saved workflows, run against this event' sx={{ fontSize: ds.text.body, color: ds.gray[600] }} />
+                                    <Box sx={{ flexShrink: 0 }}>
+                                      <RunAutomationMenu
+                                        accountId={row?.cloud_account_id || router.query.accountId}
+                                        eventId={row.id}
+                                        canView={hasReadAccess(row?.cloud_account_id || router.query.accountId)}
+                                        canRun={hasWriteAccess(row?.cloud_account_id || router.query.accountId)}
+                                        onCreateAutomation={() => setShowTemplatesModal(true)}
+                                        onTriggered={handleAutomationTriggered}
+                                      />
                                     </Box>
-                                  )}
+                                  </Box>
                                 </Box>
                               </Box>
                             )}
