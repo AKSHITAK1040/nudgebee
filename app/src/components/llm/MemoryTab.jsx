@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, memo, useMemo } from 'react';
 import PropTypes from 'prop-types';
-import { Box, Typography, Alert } from '@mui/material';
+import { Box, Typography } from '@mui/material';
+import { Banner } from '@ui/Banner';
 import WidgetCard from '@ui/WidgetCard';
 import PushPinIcon from '@mui/icons-material/PushPin';
 import PushPinOutlinedIcon from '@mui/icons-material/PushPinOutlined';
@@ -450,7 +451,7 @@ const MemoryTab = ({ accountId }) => {
   } else if (error) {
     memoryContent = (
       <Box sx={{ p: ds.space[5] }}>
-        <Alert severity='error'>{error}</Alert>
+        <Banner tone='critical' message={error} />
       </Box>
     );
   } else {
