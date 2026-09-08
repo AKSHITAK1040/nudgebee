@@ -8,7 +8,7 @@ import Text from '@shared/format/Text';
 import ConversationCollapsableCard from '@components/llm/common/ConversationCollapsableCardV2';
 import KubernetesLLMRequestResponse from './KubernetesLLMRequestResponseV2';
 import { AskNudgebeeErrorIcon, AskNudgebeeInProgressIcon, AskNudgebeeSkipIcon, AskNudgebeeSuccessIcon, RunningIcon } from '@assets';
-import { capitalize } from '@utils/common';
+import capitalize from 'lodash/capitalize';
 import { ds } from '@utils/colors';
 import { Button } from '@ui/Button';
 import ReferencesPopover from './common/ReferencesModal';
