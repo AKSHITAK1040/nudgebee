@@ -138,6 +138,20 @@ func TestIsCloudObservabilityProvider(t *testing.T) {
 // The seeded provider is deliberately NOT "k8s": on a cache miss the uncached
 // resolver returns the "k8s" default for a non-UUID account, so getting "loki"
 // back is unambiguous proof the cached value was served.
+func TestEffectiveLogProvider(t *testing.T) {
+	resolved := services_server.ObservabilityProvider{Provider: "loki", DefaultIndex: "logs-*"}
+
+	if got := EffectiveLogProvider(resolved, "  "); got.Provider != resolved.Provider || got.DefaultIndex != resolved.DefaultIndex {
+		t.Fatalf("empty override changed resolved provider: %#v", got)
+	}
+	if got := EffectiveLogProvider(resolved, "LOKI"); got.Provider != resolved.Provider || got.DefaultIndex != resolved.DefaultIndex {
+		t.Fatalf("equivalent override discarded resolved config: %#v", got)
+	}
+	if got := EffectiveLogProvider(resolved, " datadog "); got.Provider != "datadog" || got.DefaultIndex != "" {
+		t.Fatalf("override was not isolated to provider name: %#v", got)
+	}
+}
+
 func TestGetLogProvider_ServesCachedEntry(t *testing.T) {
 	acct := "cached-provider-" + t.Name()
 	seeded := services_server.ObservabilityProvider{

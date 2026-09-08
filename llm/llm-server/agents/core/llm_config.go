@@ -2777,7 +2777,9 @@ func GetAllConfiguredModels(accountId string) ([]ModelConfig, error) {
 // IsOpenAIModelWithoutStopSupport checks if the model doesn't support the 'stop' parameter
 // OpenAI's reasoning models (o1, o3) and newer GPT-5 series don't support stop words
 func IsOpenAIModelWithoutStopSupport(provider, model string) bool {
-	if provider != "openai" {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "openai", "custom":
+	default:
 		return false
 	}
 
