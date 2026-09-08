@@ -64,6 +64,7 @@ dependencies = [
     # --- Document processing ---
     "tiktoken==0.13.0",
     "beautifulsoup4==4.15.0",
+    "markdownify==1.2.0",
     "unstructured==0.18.32",
     "pymupdf==1.28.2",
     "jq==1.12.0",

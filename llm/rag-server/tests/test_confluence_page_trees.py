@@ -22,7 +22,8 @@ def fake_confluence(pages, children):
             raise RuntimeError(f"HTTP 404 for {page_id}")
         return {
             "id": page_id,
-            "body": {"storage": {"value": pages[page_id]}},
+            "title": f"Runbook {page_id}",
+            "body": {"view": {"value": pages[page_id]}},
             "_links": {"base": "https://wiki.example.com", "webui": f"/pages/{page_id}"},
         }
 
@@ -49,7 +50,10 @@ def test_tree_walk_descends_through_empty_container_pages():
 
     documents = collect_confluence_tree_documents(confluence, "root", stats)
 
-    assert sorted(d.page_content for d in documents) == ["restart the pods", "rotate keys"]
+    assert sorted(d.page_content for d in documents) == [
+        "Title: Runbook deep\n\nrotate keys",
+        "Title: Runbook runbook\n\nrestart the pods",
+    ]
     assert all(d.metadata["tree_root"] == "root" for d in documents)
     assert stats == {"failed_pages": 0, "empty_spaces": 0, "failed_roots": 0}
 
@@ -113,3 +117,37 @@ def test_integration_with_unreadable_tree_ends_in_error(monkeypatch):
     args, kwargs = results[-1]
     assert args[:2] == ("int-1", "error")
     assert "1 of 2 configured Confluence page trees could not be read" in kwargs["error_message"]
+
+
+def test_page_title_reaches_the_document():
+    # body.view is the body only — Confluence keeps the title as its own field.
+    # It is the strongest retrieval token a runbook has ("SOP - ... Queue
+    # Backlog"), and a page that does not repeat its title as a body heading had
+    # none of it in the index.
+    confluence = fake_confluence(pages={"root": "<p>restart the pods</p>"}, children={})
+    stats = {"failed_pages": 0, "empty_spaces": 0, "failed_roots": 0}
+
+    documents = collect_confluence_tree_documents(confluence, "root", stats)
+
+    assert documents[0].metadata["title"] == "Runbook root"
+    assert documents[0].page_content.startswith("Title: Runbook root\n\n")
+    assert "restart the pods" in documents[0].page_content
+
+
+def test_a_page_whose_body_did_not_render_is_counted_as_failed():
+    # An unrendered body (errored macro, Forge app, DC under load) must not pass
+    # as a healthy sync. A container page with an empty body still must not
+    # count — holding children is its job.
+    confluence = fake_confluence(pages={"root": "<p>ok</p>", "container": ""}, children={"root": ["container"]})
+    stats = {"failed_pages": 0, "empty_spaces": 0, "failed_roots": 0}
+    collect_confluence_tree_documents(confluence, "root", stats)
+    assert stats["failed_pages"] == 0, "an intentionally empty container page is not a failure"
+
+    def no_body(page_id, expand=None):
+        return {"id": page_id, "title": "T", "body": {}, "_links": {"base": "https://w", "webui": "/p"}}
+
+    solo = fake_confluence(pages={"root": "<p>ok</p>"}, children={})
+    solo.get_page_by_id = no_body
+    stats = {"failed_pages": 0, "empty_spaces": 0, "failed_roots": 0}
+    collect_confluence_tree_documents(solo, "root", stats)
+    assert stats["failed_pages"] == 1, "a body that never rendered must be counted"
