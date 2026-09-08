@@ -162,3 +162,32 @@ def test_verify_doc_false_skips_the_probe_entirely(qdrant, monkeypatch):
     _run(docs, emb, "kb_cold", verify_doc=False)
     assert retrieves["n"] == 0, "no probe should fire on a cold build"
     assert emb.documents == 10
+
+
+def test_skip_survives_qdrant_hyphenating_point_ids(qdrant, monkeypatch):
+    """Regression: the probe must match ids regardless of hyphenation.
+
+    A real Qdrant accepts a bare 32-char hex id on write but stores and returns
+    it in canonical hyphenated UUID form. The in-memory client used by the other
+    tests echoes the plain hex back, so it cannot reproduce this — the first
+    version of the skip shipped to prod comparing plain hex against hyphenated
+    ids, matched nothing, and logged "Skipping 0" on every batch.
+    """
+    emb = CountingEmbeddings()
+    docs = _docs(20)
+    _run(docs, emb, "kb_hyphen", verify_doc=False)
+    assert emb.documents == 20
+
+    real_retrieve = qdrant.retrieve
+
+    def hyphenating_retrieve(*a, **kw):
+        points = real_retrieve(*a, **kw)
+        for p in points:  # mimic a real server's canonical UUID form
+            raw = str(p.id).replace("-", "")
+            p.id = f"{raw[0:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:32]}"
+        return points
+
+    monkeypatch.setattr(qdrant, "retrieve", hyphenating_retrieve)
+    _run(docs, emb, "kb_hyphen", verify_doc=True)
+
+    assert emb.documents == 20, "hyphenated ids from Qdrant must still match and skip"
