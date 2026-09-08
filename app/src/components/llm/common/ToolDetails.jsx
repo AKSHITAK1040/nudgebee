@@ -522,7 +522,7 @@ const renderResponseText = (responseText, toolCall) => {
         if (/^#{1,6}\s|(\*\*|__).+(\*\*|__)|^[*-]\s|^\d+\.\s|```/m.test(output)) {
           return (
             <MarkDowns
-              data={prettifyJsonFencesInMarkdown(output).replace(/~/g, '\\~')}
+              data={prettifyJsonFencesInMarkdown(output)}
               sx={{ width: '100%', overflowX: 'auto', p: 0, fontSize: 'var(--ds-text-small)' }}
             />
           );
@@ -559,10 +559,7 @@ const renderResponseText = (responseText, toolCall) => {
   const rawText = responseText.replace(/\\n/g, '\n');
   if (/^#{1,6}\s|(\*\*|__).+(\*\*|__)|^[*-]\s|^\d+\.\s|```/m.test(rawText)) {
     return (
-      <MarkDowns
-        data={prettifyJsonFencesInMarkdown(rawText).replace(/~/g, '\\~')}
-        sx={{ width: '100%', overflowX: 'auto', p: 0, fontSize: 'var(--ds-text-small)' }}
-      />
+      <MarkDowns data={prettifyJsonFencesInMarkdown(rawText)} sx={{ width: '100%', overflowX: 'auto', p: 0, fontSize: 'var(--ds-text-small)' }} />
     );
   }
 
