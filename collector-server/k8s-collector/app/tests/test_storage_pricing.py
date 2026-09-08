@@ -110,6 +110,12 @@ class TestResolveStoragePricing(unittest.TestCase):
         self.assertEqual(pricing["source"], "fallback")
         self.assertEqual(pricing["price_per_gb"], sp.FALLBACK_STORAGE_RATE_PER_GB_MONTH)
 
+    def test_provisioner_domain_must_match_exactly(self):
+        pv = {"spec": {"storage_class_name": "standard"}}
+        classes = {"standard": {"provisioner": "attacker.example/ebs.csi.aws.com"}}
+        pricing = sp.resolve_storage_pricing(pv, storage_classes=classes)
+        self.assertEqual(pricing["source"], "fallback")
+
 
 class TestRateMapsConsistent(unittest.TestCase):
     def test_every_emittable_disk_type_has_a_rate(self):

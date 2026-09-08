@@ -66,6 +66,12 @@ def test_on_prem_class_name_never_prices_as_cloud():
     assert pricing["price_per_gb"] == sp.FALLBACK_STORAGE_RATE_PER_GB_MONTH
 
 
+def test_provisioner_domain_must_match_exactly():
+    classes = {"standard": {"provisioner": "attacker.example/gke.io"}}
+    pricing = sp.resolve_storage_pricing(_pv("standard"), storage_classes=classes)
+    assert pricing["source"] == "fallback"
+
+
 def test_every_emittable_disk_type_has_a_rate():
     for provider, classes in sp.WELL_KNOWN_CLASS_DISK_TYPE.items():
         for class_name, disk_type in classes.items():

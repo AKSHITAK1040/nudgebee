@@ -80,13 +80,16 @@ def _get(m, *keys):
 
 def _provider_from_provisioner(s) -> str:
     s = (s or "").lower()
-    if not s:
-        return ""
-    if "gke.io" in s or "gce-pd" in s:
+    if s in {"pd.csi.storage.gke.io", "kubernetes.io/gce-pd"}:
         return "gcp"
-    if "ebs.csi.aws.com" in s or "aws-ebs" in s:
+    if s in {"ebs.csi.aws.com", "kubernetes.io/aws-ebs"}:
         return "aws"
-    if "azure" in s:
+    if s in {
+        "disk.csi.azure.com",
+        "file.csi.azure.com",
+        "kubernetes.io/azure-disk",
+        "kubernetes.io/azure-file",
+    }:
         return "azure"
     return ""
 

@@ -596,12 +596,12 @@ func processRemediationExecute(c *gin.Context, tracer trace.Tracer, meter metric
 	if ranOnWorkspace {
 		response.Stdout, response.Stderr, response.ExitCode, response.Success, exitCodeReported = workspaceOutcome(execErr, raw)
 		if execErr != nil {
-			ctx.GetLogger().Error("remediation_execute: command failed", "error", execErr)
+			ctx.GetLogger().Error("remediation_execute: command failed")
 			response.Error = execErr.Error()
 		}
 	} else if execErr != nil {
 		// Transport failure — the command may not have run at all.
-		ctx.GetLogger().Error("remediation_execute: command failed", "error", execErr)
+		ctx.GetLogger().Error("remediation_execute: command failed")
 		response.Success = false
 		response.ExitCode = 1
 		response.Error = execErr.Error()

@@ -903,10 +903,7 @@ const FormattedToolResponse = ({ responseText, toolName, toolCall, accountId }) 
         <Box>
           {results.map((r, i) => (
             <React.Fragment key={i}>
-              <MarkDowns
-                data={prettifyJsonFencesInMarkdown(r.content).replace(/~/g, '\\~')}
-                sx={{ width: '100%', p: 0, fontSize: 'var(--ds-text-small)' }}
-              />
+              <MarkDowns data={prettifyJsonFencesInMarkdown(r.content)} sx={{ width: '100%', p: 0, fontSize: 'var(--ds-text-small)' }} />
               {i < results.length - 1 && <Divider style='dashed' thickness={0.75} color='var(--ds-gray-300)' sx={{ my: ds.space[2], mx: 0 }} />}
             </React.Fragment>
           ))}
