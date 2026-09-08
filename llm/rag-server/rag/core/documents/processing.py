@@ -141,8 +141,19 @@ def _get_document_id(doc):
 # computed before Qdrant is ever contacted, so unchanged pages were still being
 # re-embedded on every sync. This is the batched form: one retrieve per batch instead
 # of N, ids only, no payload or vectors.
+def _normalize_point_id(point_id):
+    """Hyphen-stripped form of a point id, for comparison only.
+
+    Qdrant accepts a bare 32-char hex id on write but stores and returns it in
+    canonical hyphenated UUID form, so `_generate_document_ids`' plain hex never
+    equals a returned `point.id` by string compare. Same normalisation as
+    `_get_missing_doc_ids`.
+    """
+    return str(point_id).replace("-", "")
+
+
 def _existing_point_ids(collection_name, ids):
-    """Return the subset of `ids` already present in the collection.
+    """Return the normalised subset of `ids` already present in the collection.
 
     Chunked because Qdrant takes the id list in the request body and a whole
     embedding batch can be large. Ids only — no payload, no vectors — so this
@@ -158,7 +169,7 @@ def _existing_point_ids(collection_name, ids):
             with_payload=False,
             with_vectors=False,
         )
-        existing.update(point.id for point in found)
+        existing.update(_normalize_point_id(point.id) for point in found)
     return existing
 
 
@@ -256,9 +267,12 @@ async def generate_embeddings_batch(
     docs_to_process = documents
     if verify_doc and documents:
         try:
-            existing = _existing_point_ids(collection_name, [_get_document_id(d) for d in documents])
+            batch_ids = [_get_document_id(d) for d in documents]
+            existing = _existing_point_ids(collection_name, batch_ids)
             if existing:
-                docs_to_process = [d for d in documents if _get_document_id(d) not in existing]
+                docs_to_process = [
+                    d for d, doc_id in zip(documents, batch_ids) if _normalize_point_id(doc_id) not in existing
+                ]
                 logger.info(
                     f"Skipping {len(documents) - len(docs_to_process)} already-embedded "
                     f"documents of {len(documents)} in batch"
