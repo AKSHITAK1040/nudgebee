@@ -228,8 +228,8 @@ api-server/migrations/migrations/app/1785846046269_V845_confirmed_inferred_prefe
 #   app/src/api1/memory/                 — thin GraphQL/RPC wrappers.
 #      OSS installs don't mount the /rpc/ai_memory_* routes (see the
 #      handleMemoryV2ApisFn seam), so calls resolve to 404 which the
-#      few OSS consumers (KubernetesLLMRequestResponseV2,
-#      AutoOptimizeVerticalRightSizing form) handle silently.
+#      retained consumers are either hidden behind the disabled feature flag
+#      or explicitly skip memory writes in OSS mode.
 #
 # SettingsModal's three static imports from memory2/ become dynamic
 # imports with a null-render fallback in OSS. NubiBrainNav already
