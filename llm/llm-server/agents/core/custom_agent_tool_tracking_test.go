@@ -2,8 +2,10 @@ package core
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
+	"nudgebee/llm/config"
 	"nudgebee/llm/security"
 	toolcore "nudgebee/llm/tools/core"
 
@@ -166,4 +168,86 @@ func TestCallToolRecordsArgumentsOnlyRequests(t *testing.T) {
 
 	require.NotEmpty(t, dao.calls)
 	assert.Contains(t, dao.calls[0].args, "graph TD;")
+}
+
+// TestCallToolTruncatesLargePersistedResponse verifies an oversized response is
+// middle-truncated before it's persisted, while the caller's own copy stays intact.
+func TestCallToolTruncatesLargePersistedResponse(t *testing.T) {
+	previous := config.Config.LlmServerToolCallResponsePersistMaxChars
+	config.Config.LlmServerToolCallResponsePersistMaxChars = 100
+	t.Cleanup(func() { config.Config.LlmServerToolCallResponsePersistMaxChars = previous })
+
+	dao := installTrackingDao(t)
+	big := strings.Repeat("x", 1000)
+
+	resp, err := CallTool(trackingToolCtx(),
+		trackingStubTool{resp: toolcore.NBToolResponse{Data: big}},
+		toolcore.NBToolCallRequest{Command: "{}"})
+
+	require.NoError(t, err)
+	assert.Equal(t, big, resp.Data, "the caller's return value must never be truncated")
+
+	require.Len(t, dao.calls, 2)
+	persisted := dao.calls[1].result
+	assert.Less(t, len(persisted), len(big), "persisted response must be capped")
+	assert.Contains(t, persisted, "truncated", "capped response should carry a truncation marker")
+	assert.True(t, strings.HasPrefix(persisted, "xxxx"), "head of the response should survive truncation")
+	assert.True(t, strings.HasSuffix(persisted, "xxxx"), "tail of the response should survive truncation")
+}
+
+// TestCallToolPersistsResponseUnderCapUnchanged guards against an off-by-one
+// that truncates responses that were already within budget.
+func TestCallToolPersistsResponseUnderCapUnchanged(t *testing.T) {
+	previous := config.Config.LlmServerToolCallResponsePersistMaxChars
+	config.Config.LlmServerToolCallResponsePersistMaxChars = 100
+	t.Cleanup(func() { config.Config.LlmServerToolCallResponsePersistMaxChars = previous })
+
+	dao := installTrackingDao(t)
+
+	_, err := CallTool(trackingToolCtx(),
+		trackingStubTool{resp: toolcore.NBToolResponse{Data: "small response"}},
+		toolcore.NBToolCallRequest{Command: "{}"})
+
+	require.NoError(t, err)
+	require.Len(t, dao.calls, 2)
+	assert.Equal(t, "small response", dao.calls[1].result)
+}
+
+// TestCallToolCapDisabledWhenZero verifies the escape hatch: setting the cap
+// to 0 persists the full response regardless of size.
+func TestCallToolCapDisabledWhenZero(t *testing.T) {
+	previous := config.Config.LlmServerToolCallResponsePersistMaxChars
+	config.Config.LlmServerToolCallResponsePersistMaxChars = 0
+	t.Cleanup(func() { config.Config.LlmServerToolCallResponsePersistMaxChars = previous })
+
+	dao := installTrackingDao(t)
+	big := strings.Repeat("y", 1000)
+
+	_, err := CallTool(trackingToolCtx(),
+		trackingStubTool{resp: toolcore.NBToolResponse{Data: big}},
+		toolcore.NBToolCallRequest{Command: "{}"})
+
+	require.NoError(t, err)
+	require.Len(t, dao.calls, 2)
+	assert.Equal(t, big, dao.calls[1].result)
+}
+
+// TestCallToolSkipsTruncationWhenMarkerWouldGrowResponse verifies a response
+// just over the cap falls back to the original instead of a "truncated" copy
+// that's actually longer, once TruncateMiddle's marker text is added.
+func TestCallToolSkipsTruncationWhenMarkerWouldGrowResponse(t *testing.T) {
+	previous := config.Config.LlmServerToolCallResponsePersistMaxChars
+	config.Config.LlmServerToolCallResponsePersistMaxChars = 100
+	t.Cleanup(func() { config.Config.LlmServerToolCallResponsePersistMaxChars = previous })
+
+	dao := installTrackingDao(t)
+	justOverCap := strings.Repeat("z", 101)
+
+	_, err := CallTool(trackingToolCtx(),
+		trackingStubTool{resp: toolcore.NBToolResponse{Data: justOverCap}},
+		toolcore.NBToolCallRequest{Command: "{}"})
+
+	require.NoError(t, err)
+	require.Len(t, dao.calls, 2)
+	assert.Equal(t, justOverCap, dao.calls[1].result, "should fall back to the untruncated response rather than persist a longer one")
 }

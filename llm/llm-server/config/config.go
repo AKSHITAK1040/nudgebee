@@ -843,6 +843,11 @@ type appConfig struct {
 	// which governs the lightweight config auto-selection heuristic (default 500) and must not
 	// double as the scratchpad cap. Default 65536; clamped to a 4096 minimum.
 	LlmServerScratchpadMaxObservationChars int `mapstructure:"llm_server_scratchpad_max_observation_chars"`
+	// LlmServerToolCallResponsePersistMaxChars caps how much of a tool's response
+	// core.CallTool writes to llm_conversation_tool_calls.response — that row is
+	// telemetry only, nothing reads it back, so oversized outputs (e.g. logs_execute_v2's
+	// full log payload) don't need persisting at full size. 0 disables it. Default 65536.
+	LlmServerToolCallResponsePersistMaxChars int `mapstructure:"llm_server_tool_call_response_persist_max_chars"`
 	// LlmServerScratchpadCompressionActivationFraction is the fraction of the resolved model
 	// context window at which scratchpad compression activates. Below this the scratchpad is
 	// left uncompressed (subject only to the per-observation hard cap); compression of older
@@ -1647,6 +1652,7 @@ func init() {
 
 	viper.SetDefault("llm_server_scratchpad_summarization_enabled", true)
 	viper.SetDefault("llm_server_scratchpad_max_observation_chars", 65536)
+	viper.SetDefault("llm_server_tool_call_response_persist_max_chars", 65536)
 	viper.SetDefault("llm_server_sub_agent_evidence_enabled", true)
 	viper.SetDefault("llm_server_sub_agent_evidence_max_chars", 2048)
 	viper.SetDefault("llm_server_scratchpad_compression_activation_fraction", 0.75)
