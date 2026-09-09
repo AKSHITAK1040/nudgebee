@@ -278,6 +278,8 @@ func getLogSource(provider, integrationSource string) (LogSource, error) {
 		return &HiveSaasSource{}, nil
 	case provider == "openobserve" && integrationSource == "user":
 		return &OpenObserveLogSource{}, nil
+	case provider == "cubeapm" && integrationSource == "user":
+		return &CubeAPMLogSource{}, nil
 		// hive:agent is intentionally NOT wired here yet — the relay-mode
 		// `HiveSource` is implemented but the matching `hive_query` /
 		// `hive_schema` actions don't exist in nudgebee-agent yet. Returning
@@ -388,6 +390,8 @@ func getTraceSource(provider, integrationSource string) (TraceSource, error) {
 		return &NewRelicTraceSource{}, nil
 	case provider == "splunk_observability_platform" && integrationSource == "user":
 		return &SplunkTraceSource{}, nil
+	case provider == "cubeapm" && integrationSource == "user":
+		return &CubeAPMTraceSource{}, nil
 	case provider == "ES" && integrationSource == "user":
 		return &ElasticSaasTraceSource{}, nil
 	case provider == "dynatrace" && integrationSource == "user":
@@ -464,6 +468,8 @@ func getMetricsSource(provider, integrationSource string) (MetricSource, error) 
 		return &NewRelicMetricSource{}, nil
 	case provider == "splunk_observability_platform" && integrationSource == "user":
 		return &SplunkMetricSource{}, nil
+	case provider == "cubeapm" && integrationSource == "user":
+		return &CubeAPMMetricSource{}, nil
 	case provider == "ES" && integrationSource == "user":
 		return &ElasticSaasMetricSource{}, nil
 	case provider == "dynatrace" && integrationSource == "user":
@@ -1633,6 +1639,16 @@ var allProviderCaps = map[string]providerStaticCaps{
 	"prometheus": {
 		SupportsServiceMap: true,
 		SupportsRawQuery:   true,
+	},
+	"cubeapm": {
+		SupportsServiceMap: true,
+		// Grouping and the trace waterfall are both implemented; CubeAPM has no
+		// server-side trace aggregation, so QueryGroupedTraces rolls up the
+		// fetched page (see aggregateCubeAPMTraceGroups).
+		SupportsTraceGrouping: true,
+		SupportsHeatmap:       true,
+		// LogsQL for logs, PromQL for metrics — both are user-writable in Code mode.
+		SupportsRawQuery: true,
 	},
 	"openobserve": {
 		SupportsServiceMap: true,

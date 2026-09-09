@@ -889,6 +889,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
                     metricsProvider === 'solarwinds' ||
                     metricsProvider === 'victoria-metrics' ||
                     metricsProvider === 'splunk_observability_platform' ||
+                    metricsProvider === 'cubeapm' ||
                     metricsProvider === 'ES') && (
                     <>
                       <Button
