@@ -912,7 +912,8 @@ const LogQueryBuilderAutocomplete = ({
             logProvider == 'pinot' ||
             logProvider == 'hive' ||
             logProvider == 'openobserve' ||
-            logProvider == 'cubeapm') &&
+            logProvider == 'cubeapm' ||
+            logProvider == 'splunk_enterprise') &&
           providerType == 'logs'
         ) {
           response = await observability.fetchLogLabelValues({

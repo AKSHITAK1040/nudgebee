@@ -491,6 +491,7 @@ const apiAccount = {
         'mssql',
         'oracle',
         'splunk_observability_platform',
+        'splunk_enterprise',
         'splunk_webhook',
         'cubeapm',
         'cubeapm_webhook',
