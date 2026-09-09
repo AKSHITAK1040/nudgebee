@@ -1,5 +1,6 @@
 import logging
 import time
+from typing import Any
 
 import tiktoken
 from google import genai
@@ -30,7 +31,8 @@ def persist_search_embedding_usage(account_id: str, embedding_model, query: str)
             try:
                 client = genai.Client(api_key=Config.embeddings_api_key)
                 token_count = client.models.count_tokens(model=str(model_id), contents=query)
-                tokens = token_count.total_tokens
+                if token_count.total_tokens is not None:
+                    tokens = token_count.total_tokens
             except Exception:
                 pass  # fall back to char estimation
 
@@ -239,7 +241,7 @@ class EmbeddingTracker:
                     try:
                         from transformers import AutoTokenizer
 
-                        self._hf_tokenizer = AutoTokenizer.from_pretrained(model_name, use_fast=True)
+                        self._hf_tokenizer: Any = AutoTokenizer.from_pretrained(model_name, use_fast=True)
                     except Exception as e:
                         logger.warning(f"[EmbeddingTracker] Failed to load tokenizer {model_name}: {e}")
                         self._hf_tokenizer = None
