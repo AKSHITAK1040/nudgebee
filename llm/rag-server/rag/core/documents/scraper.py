@@ -11,6 +11,7 @@ import requests
 from atlassian import Confluence
 from bs4 import BeautifulSoup, NavigableString
 from filelock import FileLock, Timeout
+from markdownify import MarkdownConverter  # type: ignore[import-untyped]
 from rag.core.documents.processing import (
     handle_updated_documents,
     process_documents,
@@ -101,25 +102,111 @@ def fetch_all_pages(confluence, space_key):
 
 
 def fetch_page(confluence, p_id):
-    """Fetch a page with its body and links, or None if it cannot be read."""
+    """Fetch a page with its body and links, or None if it cannot be read.
+
+    ``body.view`` — the server-rendered HTML — not ``body.storage``. Storage
+    format wraps every code block in ``<ac:structured-macro><![CDATA[...]]>``,
+    which no HTML parse surfaces as a ``pre``/``code`` element, so a storage-based
+    extraction drops 100% of the commands in a runbook no matter which tags it
+    asks for. View renders those macros to ordinary ``<pre>``. ``runbook_resolver``
+    on the llm-server side already reads ``body.view`` for the same reason.
+    """
     try:
-        return confluence.get_page_by_id(p_id, expand="body.storage")
+        return confluence.get_page_by_id(p_id, expand="body.view")
     except Exception as e:
         logger.warning(f"Failed to fetch page {p_id}: {e}")
         return None
 
 
 def page_body_html(page):
+    # The isinstance guard is about blast radius, not tidiness: this runs outside
+    # fetch_page's try, and the per-integration loop below has a finally but no
+    # except. One page that comes back as something other than a dict would raise
+    # here and take every remaining tenant in the sync run with it.
+    if not isinstance(page, dict):
+        return None
     body = page.get("body") or {}
-    storage = body.get("storage") or {}
-    return storage.get("value")
+    view = body.get("view") or {}
+    return view.get("value")
+
+
+class _IndexMarkdownConverter(MarkdownConverter):
+    """The markdown flavour we index.
+
+    Escaping off: this text is embedded and read by a model, never rendered by a
+    markdown parser, so escaping only turns ``cloud_collector_aws_eventbridge_sqs``
+    into ``cloud\\_collector\\_...`` and stops the identifier matching the term
+    someone searches for.
+    """
+
+    class Options(MarkdownConverter.Options):
+        heading_style = "ATX"
+        escape_underscores = False
+        escape_asterisks = False
+        escape_misc = False
+
+    def convert_img(self, el, text, parent_tags=None):
+        # Alt text can carry meaning ("architecture diagram"); the src never
+        # can. Confluence attachment and emoticon URLs are relative, so nothing
+        # downstream resolves them — they are tokens spent on a dead link.
+        return (el.attrs.get("alt") or "").strip()
+
+
+_MARKDOWN = _IndexMarkdownConverter()
+
+
+def collapse_blank_lines(text):
+    """Collapse 3+ newlines to 2, leaving fenced blocks byte-for-byte alone.
+
+    Whitespace inside a fence is content: an ASCII diagram or a heredoc means
+    something different after it has been reflowed. Rewriting it would be the
+    same silent mutation this module exists to stop, just smaller.
+    """
+    parts = re.split(r"(```.*?```)", text, flags=re.S)
+    return "".join(p if p.startswith("```") else re.sub(r"\n{3,}", "\n\n", p) for p in parts)
+
+
+def html_to_markdown(node, drop_page_furniture=False):
+    """Convert a parsed HTML node to the markdown we index.
+
+    Markdown rather than flat text because the structure IS content for the
+    agents reading this: a fenced block marks a command as runnable, and a table
+    that keeps its rows is a decision matrix instead of a column of loose cells.
+
+    Shared by every HTML source we ingest. The bug this replaced came from each
+    source growing its own tag whitelist, and each whitelist quietly deciding
+    which parts of a document an agent would never see.
+
+    ``drop_page_furniture`` is for callers handed a whole rendered page, where
+    ``nav``/``footer``/``aside`` are the site's chrome. It stays off for callers
+    handed a content fragment: there, an ``aside`` is a sidebar the author wrote
+    ("IMPORTANT: rotate the key first"), and deleting it is exactly the silent
+    loss this function replaced.
+    """
+    if drop_page_furniture:
+        for tag in node(["nav", "header", "footer", "aside"]):
+            tag.decompose()
+    for tag in node(["script", "style"]):
+        tag.decompose()
+    # Keep the link text, drop same-page anchors. A page is indexed as one
+    # document, so "[Architecture](#architecture)" points at itself: the target
+    # is already in the text being embedded. Confluence puts one per heading,
+    # which is 3% of the tokens on a typical runbook and buys nothing.
+    for anchor in node.find_all("a", href=True):
+        if anchor["href"].startswith("#"):
+            anchor.unwrap()
+    # Escaping off: this text is embedded and read by a model, never rendered by
+    # a markdown parser, so the only thing escaping achieves is turning
+    # ``cloud_collector_aws_eventbridge_sqs`` into ``cloud\_collector\_...`` —
+    # which stops the identifier matching the term someone searches for. That is
+    # the same class of defect as the concatenation this function replaced.
+    text = _MARKDOWN.convert_soup(node)
+    return collapse_blank_lines(text).strip()
 
 
 def extract_content(content_html):
-    soup = BeautifulSoup(content_html, "html.parser")
-    # Only unpack two values: text and soup
-    text = "\n".join([elem.get_text(strip=True) for elem in soup.find_all(["h1", "h2", "p", "li"])])
-    return text, soup
+    """Convert a rendered Confluence page to markdown."""
+    return html_to_markdown(BeautifulSoup(content_html, "html.parser"))
 
 
 def confluence_page_url(confluence, page):
@@ -170,13 +257,33 @@ def process_page_batch(page_queue, visited_pages, confluence, space_key, stats, 
                 page_queue.append(child_id)
 
         html_content = page_body_html(page)
+        if html_content is None:
+            # Counted, not just logged: body.view is rendered server-side, so
+            # "the body did not render" (errored macro, Forge app, DC under
+            # load) is a real new failure mode. Left uncounted it would sink the
+            # page while the integration still reported a healthy sync.
+            #
+            # Absent, not empty. A container page whose body is "" is a normal
+            # part of a page tree — its job is to hold children — and counting
+            # those would report a failure on every tree that has one.
+            logger.warning(f"Confluence page {page_id} returned no rendered body; not indexed")
+            stats["failed_pages"] += 1
+            continue
         if not html_content:
             continue
 
-        content, _ = extract_content(html_content)
+        content = extract_content(html_content)
         if content:
             page_url = confluence_page_url(confluence, page)
+            title = (page.get("title") or "").strip()
             metadata = {"page_id": page_id, "url": page_url}
+            if title:
+                # The page title is the strongest retrieval token a runbook has
+                # and body.view does not contain it — Confluence keeps it as a
+                # separate field. Prepended and stamped, matching what the
+                # ServiceNow and product-docs loaders already do.
+                metadata["title"] = title
+                content = f"Title: {title}\n\n{content}"
             if tree_root:
                 metadata["tree_root"] = tree_root
             batch.append(Document(page_content=content, metadata=metadata))
@@ -825,10 +932,7 @@ def _extract_nudgebee_doc_content(html_content: str) -> tuple:
     if not article or isinstance(article, NavigableString):
         return "", title
 
-    text = "\n".join(
-        [elem.get_text(strip=True) for elem in article.find_all(["h1", "h2", "h3", "p", "li", "code", "pre"])]
-    )
-    return text, title
+    return html_to_markdown(article, drop_page_furniture=True), title
 
 
 def _get_section_from_url(page_url: str, base_url: str) -> str:
