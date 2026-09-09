@@ -79,6 +79,17 @@ func sanitizeErrorForUser(err error) string {
 		return ""
 	}
 	errStr := err.Error()
+
+	// "no LLM configuration found" (see selectAccountLLMIntegration,
+	// llm_common.go) means the account has enabled LLM integrations but none
+	// flagged as the default — a real, actionable account misconfiguration,
+	// not an internal fault. Left unhandled, this fell through to the raw
+	// `errStr` return below and leaked an internal account UUID and agent
+	// name to the end user with no indication of what to actually do.
+	if strings.Contains(strings.ToLower(errStr), "no llm configuration found") {
+		return "This account has no default AI provider configured, so requests can't be processed. Ask an account admin to open Integrations → LLM Providers and mark one as the default."
+	}
+
 	// Check for common DB connection/timeout errors
 	// This list can be expanded based on observed errors
 	sensitivePatterns := []string{
