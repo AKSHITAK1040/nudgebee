@@ -77,10 +77,16 @@ kubectl get secret nudgebee -n {{ .Release.Namespace }} -o jsonpath='{.data.NEXT
 ℹ️  This cluster has the Prometheus Operator, but the bundled Postgres and
    RabbitMQ exporters are not being scraped: their ServiceMonitor and
    PrometheusRule objects are off by default so the chart installs on clusters
-   without the operator CRDs. Turn them on with the overlay shipped in the
-   chart:
+   without the operator CRDs. Turn them on with:
 
-     helm upgrade {{ .Release.Name }} ... -f values-monitoring.yaml
+     helm upgrade {{ .Release.Name }} ... \
+       --set postgresql.metrics.serviceMonitor.enabled=true \
+       --set postgresql.metrics.prometheusRule.enabled=true \
+       --set rabbitmq.metrics.serviceMonitor.enabled=true \
+       --set rabbitmq.metrics.prometheusRule.enabled=true
+
+   The same four values ship as values-monitoring.yaml inside the chart, if you
+   install from a checkout or keep your own values file.
 
 {{- end }}
 {{- end }}

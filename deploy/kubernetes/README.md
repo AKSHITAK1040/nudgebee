@@ -128,10 +128,27 @@ If your cluster runs the operator:
 kubectl get crd servicemonitors.monitoring.coreos.com   # confirms it's installed
 
 helm upgrade --install nudgebee oci://ghcr.io/nudgebee/charts/nudgebee \
-  -n nudgebee -f values-monitoring.yaml
+  -n nudgebee \
+  --set postgresql.metrics.serviceMonitor.enabled=true \
+  --set postgresql.metrics.prometheusRule.enabled=true \
+  --set rabbitmq.metrics.serviceMonitor.enabled=true \
+  --set rabbitmq.metrics.prometheusRule.enabled=true
 ```
 
-[`values-monitoring.yaml`](./nudgebee/values-monitoring.yaml) ships with the chart and turns on the ServiceMonitor + PrometheusRule for both bundled datastores. On an operator-equipped cluster the install notes point this out, so it isn't easy to miss.
+Those same four values ship as [`values-monitoring.yaml`](./nudgebee/values-monitoring.yaml) inside the chart — use `-f values-monitoring.yaml` when you install from a checkout, or copy the block into your own values file:
+
+```yaml
+postgresql:
+  metrics:
+    serviceMonitor: { enabled: true }
+    prometheusRule: { enabled: true }
+rabbitmq:
+  metrics:
+    serviceMonitor: { enabled: true }
+    prometheusRule: { enabled: true }
+```
+
+On an operator-equipped cluster the install notes print the same command, so it isn't easy to miss.
 
 Charts Nudgebee owns (currently `k8s-collector`) go further: their ServiceMonitor is also gated on `.Capabilities`, so it is skipped rather than fatal even if you enable metrics on a cluster without the CRDs. For offline rendering — `helm template`, Argo CD, Flux — capabilities are not detectable, so pass `--api-versions monitoring.coreos.com/v1` to get those resources.
 
