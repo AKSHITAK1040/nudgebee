@@ -46,12 +46,32 @@ kubectl get secret nudgebee -n {{ .Release.Namespace }} -o jsonpath='{.data.NEXT
        clusters without the CRDs) is the wrong choice. Silence for everyone
        else. */}}
 {{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" }}
-{{- $pg := .Values.postgresql | default dict }}
-{{- $mq := .Values.rabbitmq | default dict }}
 {{- /* Per datastore: bundled here AND not being scraped. A release pointed at an
-       external Postgres has nothing for this chart to monitor. */}}
-{{- $pgUnmonitored := and (dig "enabled" false $pg) (not (dig "metrics" "serviceMonitor" "enabled" false $pg)) }}
-{{- $mqUnmonitored := and (dig "enabled" false $mq) (not (dig "metrics" "serviceMonitor" "enabled" false $mq)) }}
+       external Postgres has nothing for this chart to monitor.
+
+       Nested `with` rather than `dig`: Helm stores a subchart's values as
+       chartutil.Values, and dig's internal map[string]interface{} assertion
+       panics on that type - it took down every install with the clickhouse
+       subchart present once already (afdf7757). `with` is nil-safe on a partial
+       override and type-agnostic. */}}
+{{- $pgUnmonitored := false }}
+{{- with .Values.postgresql }}
+  {{- if .enabled }}
+    {{- $pgUnmonitored = true }}
+    {{- with .metrics }}{{- with .serviceMonitor }}{{- if .enabled }}
+    {{- $pgUnmonitored = false }}
+    {{- end }}{{- end }}{{- end }}
+  {{- end }}
+{{- end }}
+{{- $mqUnmonitored := false }}
+{{- with .Values.rabbitmq }}
+  {{- if .enabled }}
+    {{- $mqUnmonitored = true }}
+    {{- with .metrics }}{{- with .serviceMonitor }}{{- if .enabled }}
+    {{- $mqUnmonitored = false }}
+    {{- end }}{{- end }}{{- end }}
+  {{- end }}
+{{- end }}
 {{- if or $pgUnmonitored $mqUnmonitored }}
 
 ℹ️  This cluster has the Prometheus Operator, but the bundled Postgres and
