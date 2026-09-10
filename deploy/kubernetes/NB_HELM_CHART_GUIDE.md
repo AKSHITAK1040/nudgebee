@@ -678,6 +678,10 @@ helm show values {chart}
 - [ ] Create values.yaml with image, resources, service config
 - [ ] Create environment values (values-dev.yaml, values-test.yaml, values-prod.yaml)
 - [ ] Create templates (deployment, service, helpers)
+- [ ] If the chart creates a PVC: honour `global.storageClass` (it wins; the chart's own
+      `persistence.storageClass` is the fallback, and `"-"` renders `storageClassName: ""`)
+      so operators set the class once for the whole stack — same precedence as the bitnami
+      subcharts. Copy the snippet in `nudgebee-qdrant-server/templates/statefulset.yaml`
 - [ ] Add dependency to `/deploy/kubernetes/nudgebee/Chart.yaml`
 - [ ] Add config to `/deploy/kubernetes/nudgebee/values.yaml`
 - [ ] Update nudgebee-build-dev.yaml: image fetch + cleanup + package
