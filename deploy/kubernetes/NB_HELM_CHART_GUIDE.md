@@ -678,6 +678,10 @@ helm show values {chart}
 - [ ] Create values.yaml with image, resources, service config
 - [ ] Create environment values (values-dev.yaml, values-test.yaml, values-prod.yaml)
 - [ ] Create templates (deployment, service, helpers)
+- [ ] If the chart creates a `ServiceMonitor` / `PrometheusRule` / any CRD-backed kind:
+      gate it on `.Capabilities.APIVersions.Has "<group>/<version>"` as well as its value
+      flag, so a cluster without that operator installs instead of failing with
+      `no matches for kind` (see `k8s-collector/templates/servicemonitor.yaml`)
 - [ ] Add dependency to `/deploy/kubernetes/nudgebee/Chart.yaml`
 - [ ] Add config to `/deploy/kubernetes/nudgebee/values.yaml`
 - [ ] Update nudgebee-build-dev.yaml: image fetch + cleanup + package

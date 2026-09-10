@@ -41,6 +41,30 @@ kubectl get secret nudgebee -n {{ .Release.Namespace }} -o jsonpath='{.data.NEXT
    bootstrap experience; production overlays should disable it explicitly.
 {{- end }}
 
+{{- /* Only fires on clusters that DO run the Prometheus Operator: there the
+       monitors are worth having, and the default (off, so the chart installs on
+       clusters without the CRDs) is the wrong choice. Silence for everyone
+       else. */}}
+{{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" }}
+{{- $pg := .Values.postgresql | default dict }}
+{{- $mq := .Values.rabbitmq | default dict }}
+{{- /* Per datastore: bundled here AND not being scraped. A release pointed at an
+       external Postgres has nothing for this chart to monitor. */}}
+{{- $pgUnmonitored := and (dig "enabled" false $pg) (not (dig "metrics" "serviceMonitor" "enabled" false $pg)) }}
+{{- $mqUnmonitored := and (dig "enabled" false $mq) (not (dig "metrics" "serviceMonitor" "enabled" false $mq)) }}
+{{- if or $pgUnmonitored $mqUnmonitored }}
+
+ℹ️  This cluster has the Prometheus Operator, but the bundled Postgres and
+   RabbitMQ exporters are not being scraped: their ServiceMonitor and
+   PrometheusRule objects are off by default so the chart installs on clusters
+   without the operator CRDs. Turn them on with the overlay shipped in the
+   chart:
+
+     helm upgrade {{ .Release.Name }} ... -f values-monitoring.yaml
+
+{{- end }}
+{{- end }}
+
 {{- $existing := lookup "v1" "Secret" .Release.Namespace "nudgebee" }}
 {{- if $existing }}
 {{- $existingKey := "" }}

@@ -14,6 +14,7 @@ deploy/kubernetes/
 │   ├── Chart.yaml                  # Declares all subchart dependencies
 │   ├── values.yaml                 # Default values across the platform
 │   ├── values-enterprise.yaml      # Enterprise overrides
+│   ├── values-monitoring.yaml      # Opt-in overlay: ServiceMonitor + PrometheusRule (needs Prometheus Operator)
 │   └── templates/                  # Cross-cutting templates (secrets, migrations)
 │
 ├── app/                            # Frontend (Next.js)
@@ -114,6 +115,25 @@ Equivalents for the other bundled subcharts:
 | Redis     | `REDIS_SERVER_HOST` / `_PORT` / `REDIS_USER_NAME` / `REDIS_USER_PASSWORD` |
 | ClickHouse | `CLICKHOUSE_HOST` / `CLICKHOUSE_USER` / `CLICKHOUSE_PASSWORD`          |
 | Qdrant    | (set the Qdrant client URL via the relevant service's env)              |
+
+## Monitoring (Prometheus Operator)
+
+`ServiceMonitor` and `PrometheusRule` are Prometheus Operator CRDs. A cluster without the operator has no such kinds, and installing them there fails the release with `no matches for kind "ServiceMonitor" in version "monitoring.coreos.com/v1"` — so **the chart creates none of them by default** and installs anywhere.
+
+The exporters are unaffected: the Postgres and RabbitMQ metrics sidecars still run and still serve `/metrics`. What's off is the automatic discovery and the shipped alert rules.
+
+If your cluster runs the operator:
+
+```bash
+kubectl get crd servicemonitors.monitoring.coreos.com   # confirms it's installed
+
+helm upgrade --install nudgebee oci://ghcr.io/nudgebee/charts/nudgebee \
+  -n nudgebee -f values-monitoring.yaml
+```
+
+[`values-monitoring.yaml`](./nudgebee/values-monitoring.yaml) ships with the chart and turns on the ServiceMonitor + PrometheusRule for both bundled datastores. On an operator-equipped cluster the install notes point this out, so it isn't easy to miss.
+
+Charts Nudgebee owns (currently `k8s-collector`) go further: their ServiceMonitor is also gated on `.Capabilities`, so it is skipped rather than fatal even if you enable metrics on a cluster without the CRDs. For offline rendering — `helm template`, Argo CD, Flux — capabilities are not detectable, so pass `--api-versions monitoring.coreos.com/v1` to get those resources.
 
 ## Ingress + TLS
 
