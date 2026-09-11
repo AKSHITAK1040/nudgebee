@@ -64,16 +64,24 @@ func TestParallelPreflightDoesNotBorrowConfigFromUnrelatedTool(t *testing.T) {
 		MockContextCapturingTool: MockContextCapturingTool{NameVal: "unrelated_integration"},
 	}
 
-	name, unresolved := unresolvedConfigForActionTool(actionTool, nil)
+	name, unresolved := unresolvedConfigForActionTool(actionTool, nil, 2)
 	assert.False(t, unresolved, "the action must not inherit a sibling tool's config requirement")
 	assert.Empty(t, name)
 
-	name, unresolved = unresolvedConfigForActionTool(unrelatedConfigTool, nil)
+	name, unresolved = unresolvedConfigForActionTool(unrelatedConfigTool, nil, 2)
 	assert.True(t, unresolved, "a configurable action tool must still force sequential preflight")
 	assert.Equal(t, "unrelated_integration", name)
 
-	name, unresolved = unresolvedConfigForActionTool(unrelatedConfigTool, map[string]string{"unrelated_integration": "config-1"})
+	name, unresolved = unresolvedConfigForActionTool(unrelatedConfigTool, map[string]string{"unrelated_integration": "config-1"}, 2)
 	assert.False(t, unresolved, "a resolved configurable action remains parallel-safe")
+	assert.Equal(t, "unrelated_integration", name)
+
+	name, unresolved = unresolvedConfigForActionTool(unrelatedConfigTool, nil, 1)
+	assert.False(t, unresolved, "a single available config cannot require a selection followup")
+	assert.Equal(t, "unrelated_integration", name)
+
+	name, unresolved = unresolvedConfigForActionTool(unrelatedConfigTool, nil, 0)
+	assert.False(t, unresolved, "missing config is a tool failure, not a selection followup")
 	assert.Equal(t, "unrelated_integration", name)
 }
 

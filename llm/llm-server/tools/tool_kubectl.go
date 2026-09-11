@@ -930,25 +930,23 @@ func (m KubectlExecuteTool) Call(nbRequestContext core.NbToolContext, input core
 		}
 	}
 
-	// Extract accountId from tool config (selected cluster account)
-	configAccountId := ""
-	for _, v := range nbRequestContext.ToolConfig.Values {
-		if v.Name == "id" {
-			configAccountId = v.Value
-			break
+	// The shim routes the selected cluster via NB_TOOL_CONFIG_NAME. Keep files
+	// in the original conversation workspace even for cross-environment calls.
+	wm := workspace.NewWorkspaceManager()
+	requestType, classifyErr := m.InferToolRequestType(nbRequestContext.Ctx, m.Name(), command)
+	if classifyErr != nil {
+		return core.NBToolResponse{}, classifyErr
+	}
+	if requestType != core.ToolRequestTypeRead {
+		if accessErr := CheckShellTargetWriteAccess(nbRequestContext.Ctx, nbRequestContext.ToolConfig); accessErr != nil {
+			return core.NBToolResponse{}, accessErr
 		}
 	}
-
-	// Use config-selected account if available, otherwise fall back to request account
-	effectiveAccountId := nbRequestContext.AccountId
-	if configAccountId != "" {
-		effectiveAccountId = configAccountId
+	env, err := KubernetesTargetEnv(nbRequestContext, nbRequestContext.ToolConfig)
+	if err != nil {
+		return core.NBToolResponse{}, err
 	}
-
-	wm := workspace.NewWorkspaceManager()
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, effectiveAccountId, nbRequestContext.ConversationId, command, map[string]string{
-		workspace.ENV_NB_TOOL_CONFIG_NAME: nbRequestContext.ToolConfig.Name,
-	})
+	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
 	if err != nil {
 		// Pipeline-tail no-match reclassification (issue #32240).
 		// The LLM regularly uses kubectl with `| grep` / `| awk` /

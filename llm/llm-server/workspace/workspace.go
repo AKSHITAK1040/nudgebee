@@ -59,8 +59,9 @@ func init() {
 }
 
 type WorkspaceTokenClaims struct {
-	AccountId string `json:"account_id"`
-	TenantId  string `json:"tenant_id"`
+	AccountId       string `json:"account_id"`
+	TenantId        string `json:"tenant_id"`
+	TargetAccountId string `json:"target_account_id,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -1876,4 +1877,15 @@ func getKubeClient(qps float32, burst int) (*kubernetes.Clientset, error) {
 		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 	}
 	return clientset, nil
+}
+
+// KubernetesTargetToken permits the shim to route only to this selected cluster.
+// It authenticates the original workspace and cannot choose a different target.
+func KubernetesTargetToken(ctx *security.RequestContext, workspaceAccount, targetAccount string) (string, error) {
+	if !ctx.GetSecurityContext().HasAccountAccess(targetAccount, security.SecurityAccessTypeRead) {
+		return "", fmt.Errorf("target cluster access denied")
+	}
+	claims := WorkspaceTokenClaims{AccountId: workspaceAccount, TenantId: ctx.GetSecurityContext().GetTenantId(), TargetAccountId: targetAccount,
+		RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(10 * time.Minute)), IssuedAt: jwt.NewNumericDate(time.Now()), Issuer: "llm-server"}}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(config.Config.LlmServerJwtSecret))
 }

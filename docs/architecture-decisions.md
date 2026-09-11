@@ -6,6 +6,8 @@
 
 ## Architecture Decisions
 
+- **[2026-09] Shell target selection preserves workspace identity**: Resolve recognizable cloud/Kubernetes shell commands through their existing tool configuration owner while retaining the original shell action and conversation workspace. Kubernetes carries the selected config through its shim and resolves the target at the relay boundary; account selection is separate from write authorization. Reconsider if opaque scripts or multiple targets require the explicit target metadata planned in the follow-up detection PR.
+
 <!-- Format:
 - **[YYYY-MM] {title}**: Chose {approach} over {alternative}. Why: {reason}. Counterarguments considered: {brief summary}. Reconsider if: {condition}.
 -->

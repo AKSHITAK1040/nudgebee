@@ -162,9 +162,22 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 	// This allows the shell tool to run cloud CLI commands (aws, gcloud, az) without requiring
 	// the planner to route through specialized cloud tools.
 	env := map[string]string{}
+	if ShellConfigToolName(originalCommand) == ToolExecuteKubectlCommand {
+		selected, err := ResolveShellTarget(nbRequestContext, ToolExecuteKubectlCommand)
+		if err != nil {
+			return core.NBToolResponse{}, err
+		}
+		env, err = KubernetesTargetEnv(nbRequestContext, selected)
+		if err != nil {
+			return core.NBToolResponse{}, err
+		}
+	}
 	cloudAuth, err := m.buildCloudAuthEnv(nbRequestContext, command)
 	if err != nil {
-		// Non-fatal: log the warning and proceed without cloud auth.
+		if ShellConfigToolName(originalCommand) != "" {
+			return core.NBToolResponse{}, fmt.Errorf("shell: target credentials unavailable: %w", err)
+		}
+		// Non-fatal for local commands only.
 		// The account may not be a cloud account (e.g. K8s-only), or creds may be missing.
 		slog.Warn("shell: cloud auth injection skipped", "account_id", m.AccountId, "error", err)
 	} else if cloudAuth != nil {
@@ -500,6 +513,22 @@ func (m ShellTool) buildCloudAuthEnv(nbRequestContext core.NbToolContext, comman
 	if m.AccountId == "" {
 		return nil, nil
 	}
+	if owner := ShellConfigToolName(command); owner != "" {
+		if owner == ToolExecuteKubectlCommand {
+			return nil, nil
+		}
+		selected, err := ResolveShellTarget(nbRequestContext, owner)
+		if err != nil {
+			return nil, err
+		}
+		provider, _ := detectCloudCLI(command)
+		for _, value := range selected.Values {
+			if value.Name == "id" {
+				return buildAuthForAccount(nbRequestContext, provider, value.Value)
+			}
+		}
+		return nil, fmt.Errorf("shell: selected target has no account id")
+	}
 
 	creds, err := GetCloudAccountCredentials(m.AccountId)
 	if err != nil {
@@ -534,6 +563,7 @@ var cloudCLIMapping = []struct {
 	{keywords: []string{"gcloud", "gsutil", "bq"}, provider: "gcp", toolName: ToolExecuteGcpCliCommand},
 	{keywords: []string{"aws"}, provider: "aws", toolName: ToolExecuteAwsCliCommand},
 	{keywords: []string{"az"}, provider: "azure", toolName: ToolExecuteAzureCliCommand},
+	{keywords: []string{"kubectl"}, provider: "k8s", toolName: ToolExecuteKubectlCommand},
 }
 
 // detectCloudCLI checks if the command invokes a cloud CLI and returns the

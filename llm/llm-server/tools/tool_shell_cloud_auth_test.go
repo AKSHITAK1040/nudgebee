@@ -508,7 +508,6 @@ func TestDetectCloudCLI_NonCloudCommands(t *testing.T) {
 	commands := []string{
 		"ls -la /tmp",
 		"curl https://example.com",
-		"kubectl get pods",
 		"helm list",
 		"cat /etc/hosts",
 		"echo gcloud",            // word "gcloud" but not a CLI invocation? — actually this matches
@@ -591,4 +590,10 @@ func TestShellCloudAuth_WrapCommandWithAndOperator(t *testing.T) {
 	chainedCmd := "cd /app && ls -la"
 	wrapped := WrapCommandWithAuth(chainedCmd, auth)
 	assert.Contains(t, wrapped, chainedCmd, "&&-chained command must be preserved")
+}
+
+func TestDetectCloudCLI_KubernetesTarget(t *testing.T) {
+	provider, owner := detectCloudCLI("kubectl get pods | head")
+	assert.Equal(t, "k8s", provider)
+	assert.Equal(t, ToolExecuteKubectlCommand, owner)
 }
