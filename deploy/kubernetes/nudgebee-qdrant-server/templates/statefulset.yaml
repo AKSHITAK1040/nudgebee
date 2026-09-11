@@ -93,6 +93,12 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
   {{- if .Values.persistence.enabled }}
+  {{- /* One setting covers postgres/redis/rabbitmq/qdrant. Precedence and the "-"
+         (= no dynamic provisioning) convention match bitnami's common.storage.class,
+         which the postgres/redis/rabbitmq subcharts under the same umbrella use:
+         global.storageClass wins when set, persistence.storageClass is the fallback.
+         global may be absent on a standalone install. */}}
+  {{- $storageClass := (.Values.global | default dict).storageClass | default .Values.persistence.storageClass }}
   volumeClaimTemplates:
     - metadata:
         name: storage
@@ -104,7 +110,7 @@ spec:
         resources:
           requests:
             storage: {{ .Values.persistence.size }}
-        {{- if .Values.persistence.storageClass }}
-        storageClassName: {{ .Values.persistence.storageClass }}
+        {{- if $storageClass }}
+        storageClassName: {{ if eq $storageClass "-" }}""{{ else }}{{ $storageClass | quote }}{{ end }}
         {{- end }}
   {{- end }}

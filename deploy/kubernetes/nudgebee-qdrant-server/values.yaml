@@ -77,7 +77,11 @@ readinessProbe:
 persistence:
   enabled: true
   size: 50Gi
-  # storageClass: "" # Use default storage class
+  # Consulted only when global.storageClass is empty (that global, set once in the
+  # umbrella values.yaml, wins — bitnami's precedence, which this chart matches).
+  # Both empty means no storageClassName, i.e. the cluster's default StorageClass.
+  # "-" disables dynamic provisioning (renders storageClassName: "").
+  storageClass: ''
   accessMode: ReadWriteOnce
   mountPath: /qdrant/storage
 
