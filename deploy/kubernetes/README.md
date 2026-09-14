@@ -64,6 +64,7 @@ The chart's `$knownKeys` validator (in `nudgebee/templates/secrets-nudgebee.yaml
 | `nudgebee_secret.LICENSE_PUBLIC_KEY`        | RSA public key for verifying the license JWT. Empty for OSS.              |
 | `nudgebee_secret.EMAIL_*`                   | SMTP host / port / user / password / from-address for outbound email     |
 | `global.imagePullSecrets`                   | If pulling images from a private registry                                 |
+| `global.storageClass`                       | StorageClass for every PVC in the stack (postgresql, redis, rabbitmq, clickhouse, qdrant). Empty uses the cluster's default StorageClass; `"-"` binds pre-created PVs. When set it wins over per-component settings (bitnami precedence) — to give one store its own class, leave this empty and set e.g. `nudgebee-qdrant-server.persistence.storageClass` per component. Set it before the first install: a bound PVC's storage class can't be changed later. |
 
 For the full set of values + their defaults, see [`nudgebee/values.yaml`](./nudgebee/values.yaml).
 

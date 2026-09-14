@@ -12,6 +12,25 @@ global:
   # third-party image, so a private-registry install has to mirror it under
   # whatever name that registry uses.
   testImage: 'ghcr.io/nudgebee/busybox:1.37.0'
+  # StorageClass for every PVC the stack creates: postgresql, redis, rabbitmq,
+  # clickhouse (bitnami subcharts read this global directly) and qdrant. Empty
+  # means each PVC is left without a storageClassName, so the cluster's default
+  # StorageClass is used. "-" disables dynamic provisioning (binds a pre-created
+  # PV).
+  #
+  # Set here it WINS over every per-component setting — bitnami's
+  # common.storage.class precedence, which our own charts follow so one release
+  # can't end up with two behaviours. To give one store a different class, leave
+  # this empty and set each component individually:
+  #   nudgebee-qdrant-server.persistence.storageClass
+  #   postgresql.primary.persistence.storageClass
+  #   redis.master.persistence.storageClass / redis.replica.persistence.storageClass
+  #   rabbitmq.persistence.storageClass
+  #
+  # Changing this after install does not move existing PVCs — a bound PVC's
+  # storageClassName is immutable. Re-point an installed stack by backing up,
+  # deleting the old PVCs, and letting the StatefulSets recreate them.
+  storageClass: ''
   existingNudgebeeSecretName: ''
 nudgebee_registry_secret:
   enabled: false

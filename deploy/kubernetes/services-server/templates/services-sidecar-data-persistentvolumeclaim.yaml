@@ -1,4 +1,8 @@
 {{- if .Values.allowSideCar }}
+{{- /* global.storageClass wins, sidecar.storageClass is the fallback — same
+       precedence as bitnami's common.storage.class, so every PVC in the umbrella
+       release behaves alike. "-" renders storageClassName: "". */}}
+{{- $storageClass := (.Values.global | default dict).storageClass | default (.Values.sidecar | default dict).storageClass }}
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -9,4 +13,7 @@ spec:
   resources:
     requests:
       storage: 500Mi
+  {{- if $storageClass }}
+  storageClassName: {{ if eq $storageClass "-" }}""{{ else }}{{ $storageClass | quote }}{{ end }}
+  {{- end }}
 {{- end }}
