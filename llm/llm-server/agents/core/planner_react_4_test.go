@@ -896,3 +896,51 @@ func TestReAct4_ClarificationContinuationInputRestoresOriginalTask(t *testing.T)
 	assert.Equal(t, "selected-pod", clarificationContinuationInput("", "selected-pod"))
 	assert.Equal(t, "same", clarificationContinuationInput("same", "same"))
 }
+
+type mockScopedAgent struct {
+	notebookOptOutAgent
+	scope CacheScope
+}
+
+func (m mockScopedAgent) GetCacheScope() CacheScope {
+	return m.scope
+}
+
+func TestReAct4_ResolveAgentContext_HonorsDeclaredScope(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	caps := toolcore.AgentCapabilities{AllowedTools: []string{"kubectl_execute"}}
+	planner := &NBReActPlanner4{
+		ctx:     ctx,
+		nbAgent: mockScopedAgent{scope: CacheScopeAccount},
+		request: NBAgentRequest{Capabilities: caps},
+	}
+	agentCtx := planner.resolveAgentContext()
+	assert.NotNil(t, agentCtx)
+	assert.Equal(t, CacheScopeAccount, agentCtx.GetContext().Value(ContextKeyCacheScope))
+	assert.Equal(t, caps, agentCtx.GetContext().Value(ContextKeyCapabilities))
+}
+
+func TestReAct4_ResolveAgentContext_DowngradesOnClientTools(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	clientTool := toolcore.NBToolCommand{Name: "custom_client_tool"}
+	planner := &NBReActPlanner4{
+		ctx:     ctx,
+		nbAgent: mockScopedAgent{scope: CacheScopeAccount},
+		request: NBAgentRequest{ClientTools: []toolcore.NBToolCommand{clientTool}},
+	}
+	agentCtx := planner.resolveAgentContext()
+	assert.NotNil(t, agentCtx)
+	assert.Equal(t, CacheScopeConversation, agentCtx.GetContext().Value(ContextKeyCacheScope))
+}
+
+func TestReAct4_ResolveAgentContext_DefaultsWithoutCacheProvider(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	planner := &NBReActPlanner4{
+		ctx:     ctx,
+		nbAgent: notebookOptOutAgent{},
+		request: NBAgentRequest{},
+	}
+	agentCtx := planner.resolveAgentContext()
+	assert.NotNil(t, agentCtx)
+	assert.Equal(t, CacheScopeConversation, agentCtx.GetContext().Value(ContextKeyCacheScope))
+}

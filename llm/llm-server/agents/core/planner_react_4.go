@@ -485,8 +485,9 @@ func (o *NBReActPlanner4) Plan(
 		if sigOpt := thoughtSignatureOption(intermediateSteps); sigOpt != nil {
 			opts = append(opts, sigOpt)
 		}
+		agentCtx := o.resolveAgentContext()
 		result, err := GenerateAndTrackLLMContent(
-			o.ctx, o.request.UserId, o.request.AccountId, o.request.ConversationId,
+			agentCtx, o.request.UserId, o.request.AccountId, o.request.ConversationId,
 			o.request.MessageId, o.request.AgentId, false, messages, true,
 			opts...,
 		)
@@ -555,6 +556,48 @@ func (o *NBReActPlanner4) Plan(
 		o.ctx.GetLogger().Info("react4: critique requested refinement", "attempt", len(o.refinementData))
 		messages = append(messages, o.refinementMessages(finish.Data, feedback)...)
 	}
+}
+
+// resolveAgentContext derives a RequestContext carrying the agent's declared
+// CacheScope and Capabilities. It mirrors reActCreatePrompt3's cache-scope
+// resolution: if ClientTools are present (per-chat dynamic tools injected into
+// the prompt), the scope is downgraded to Conversation so they cannot share an
+// Account-scope cache across sessions.
+func (o *NBReActPlanner4) resolveAgentContext() *security.RequestContext {
+	cacheScope := CacheScopeConversation
+	if cacheProvider, ok := o.nbAgent.(NBAgentCacheScopeProvider); ok {
+		cacheScope = cacheProvider.GetCacheScope()
+	}
+	if len(o.request.ClientTools) > 0 && cacheScope != CacheScopeConversation {
+		if o.ctx != nil && o.ctx.GetLogger() != nil {
+			o.ctx.GetLogger().Debug("react4: downgrading cache scope to conversation due to client tools",
+				"agent", o.nbAgent.GetName(), "from", cacheScope)
+		}
+		cacheScope = CacheScopeConversation
+	}
+	baseCtx := context.Background()
+	if o.ctx != nil && o.ctx.GetContext() != nil {
+		baseCtx = o.ctx.GetContext()
+	}
+	if o.ctx == nil {
+		return security.NewRequestContext(
+			context.WithValue(
+				context.WithValue(baseCtx, ContextKeyCacheScope, cacheScope),
+				ContextKeyCapabilities, o.request.Capabilities,
+			),
+			nil, nil, nil, nil,
+		)
+	}
+	return security.NewRequestContext(
+		context.WithValue(
+			context.WithValue(baseCtx, ContextKeyCacheScope, cacheScope),
+			ContextKeyCapabilities, o.request.Capabilities,
+		),
+		o.ctx.GetSecurityContext(),
+		o.ctx.GetLogger(),
+		o.ctx.GetTracer(),
+		o.ctx.GetMeter(),
+	)
 }
 
 // needsClarificationContinuation reports whether the latest substantive step is
