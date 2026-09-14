@@ -416,7 +416,10 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
           ];
         }
 
-        const labels = [...new Set(g.payload?.flatMap((e: any) => e.timestamps) ?? [])];
+        // Typed as number[] rather than inferred: the payload is `any`, so the Set
+        // widened to unknown[] and every consumer of these labels had to be `any`
+        // to compile. They are Result.timestamps — Unix epoch milliseconds.
+        const labels: number[] = [...new Set<number>(g.payload?.flatMap((e: any) => e.timestamps as number[]) ?? [])];
         labels.sort();
 
         // Track original counts for truncation warning
@@ -491,7 +494,11 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
           : g.payload[0]?.timestamps?.map((item: any, indx: any) => {
               return [
                 {
-                  text: new Date(item * 1000).toString(),
+                  // Result.timestamps is already Unix epoch MILLISECONDS (see the
+                  // Result struct in api-server observability/entity.go); every
+                  // provider converts to ms before marshalling. Scaling by 1000
+                  // again pushed dates ~56,000 years into the future.
+                  text: new Date(item).toString(),
                 },
                 {
                   text: g.payload[0]?.values[indx] || '-',
@@ -515,7 +522,8 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
         graphData.push({
           ...getQueryByKey(g.query_key),
           data: {
-            labels: decimatedLabels.map((e: any) => convertNumberToTimestamp(e * 1000)),
+            // Already milliseconds — see the note on the table branch above.
+            labels: decimatedLabels.map((e: number) => convertNumberToTimestamp(e)),
             data: fromMetric
               ? chartDataDataset
               : [{ label: 'Value', data: decimateData(g.payload[0]?.values?.map((e: string) => parseFloat(e)) || [], MAX_CHART_DATA_POINTS) }],
@@ -1267,7 +1275,7 @@ const QueryMetrics: React.FC<QueryMetricsProps> = ({
                                               ? query?.value?.[0] != null
                                                 ? [convertNumberToTimestamp(query.value[0] * 1000)]
                                                 : []
-                                              : query?.timestamps?.map((e: number) => convertNumberToTimestamp(e * 1000)) || []
+                                              : query?.timestamps?.map((e: number) => convertNumberToTimestamp(e)) || []
                                           }
                                           chartLabel={'Count'}
                                         />
