@@ -1536,7 +1536,12 @@ func nbToolsToLlmTools(tools []toolcore.NBTool) []llms.Tool {
 			// that assertion even though its underlying kind is string, producing
 			// "tool [N], property [X]: expected string for type" and failing the whole
 			// GenerateContent call before any tool runs.
-			prop["type"] = string(p.Type)
+			propType := string(p.Type)
+			if propType == "" {
+				// Default untyped properties (e.g. from client/MCP tools) to string.
+				propType = "string"
+			}
+			prop["type"] = propType
 			if p.Description != "" {
 				prop["description"] = p.Description
 			}
@@ -1545,7 +1550,7 @@ func nbToolsToLlmTools(tools []toolcore.NBTool) []llms.Tool {
 			}
 			if len(p.Items) > 0 {
 				prop["items"] = p.Items
-			} else if p.Type == toolcore.ToolSchemaTypeArray {
+			} else if propType == "array" || p.Type == toolcore.ToolSchemaTypeArray {
 				// Providers REQUIRE `items` on an array schema — Gemini rejects the
 				// whole request with "properties[x].items: missing field" (400
 				// INVALID_ARGUMENT). Because a native tool-calling planner advertises
@@ -1559,9 +1564,21 @@ func nbToolsToLlmTools(tools []toolcore.NBTool) []llms.Tool {
 			properties[k] = prop
 		}
 
+		rawRequired := t.InputSchema().Required
+		// Providers like OpenAI and Python-based LLM validators reject "required": null
+		// with "400: Invalid schema for function '...': None is not of type 'array'",
+		// and reject any required property not declared in properties.
+		// Allocate an empty slice and prune any dangling/undeclared required fields.
+		required := make([]string, 0, len(rawRequired))
+		for _, r := range rawRequired {
+			if _, exists := properties[r]; exists {
+				required = append(required, r)
+			}
+		}
+
 		parameters := map[string]any{
 			"type":       "object",
-			"required":   t.InputSchema().Required,
+			"required":   required,
 			"properties": properties,
 		}
 

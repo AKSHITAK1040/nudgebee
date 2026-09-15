@@ -1,11 +1,13 @@
 package core
 
 import (
+	"encoding/json"
 	"testing"
 
 	toolcore "nudgebee/llm/tools/core"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestNbToolsToLlmTools_RendersSchema locks the ToolSchema -> llms.Tool
@@ -59,4 +61,73 @@ func TestNbToolsToLlmTools_RendersSchema(t *testing.T) {
 	namespace, ok := properties["namespace"].(map[string]any)
 	assert.True(t, ok)
 	assert.Equal(t, []any{"default", "kube-system"}, namespace["enum"])
+}
+
+// TestNbToolsToLlmTools_NilRequiredRendersEmptySlice verifies that when a tool's
+// InputSchema has a nil Required slice, nbToolsToLlmTools defensively normalizes it
+// to an empty slice ([]string{}) rather than serializing as "required": null in JSON.
+// OpenAI and OpenAI-compatible endpoints reject "required": null with:
+// "400: Invalid schema for function '...': None is not of type 'array'".
+func TestNbToolsToLlmTools_NilRequiredRendersEmptySlice(t *testing.T) {
+	tool := &stubTool{
+		name:     "cloud_resource_search_execute",
+		required: nil,
+		props: map[string]toolcore.ToolSchemaProperty{
+			"query": {Type: toolcore.ToolSchemaTypeString, Description: "resource search query"},
+		},
+	}
+
+	llmTools := nbToolsToLlmTools([]toolcore.NBTool{tool})
+	require.Len(t, llmTools, 1)
+
+	params, ok := llmTools[0].Function.Parameters.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, []string{}, params["required"])
+
+	rawJSON, err := json.Marshal(params)
+	require.NoError(t, err)
+	assert.Contains(t, string(rawJSON), `"required":[]`)
+	assert.NotContains(t, string(rawJSON), `"required":null`)
+}
+
+// TestNbToolsToLlmTools_PrunesUndeclaredRequiredAndDefaultsEmptyType verifies that
+// when a custom or client tool sends an undeclared required property or an empty
+// property type, nbToolsToLlmTools prunes the dangling required field and defaults
+// the empty type to "string". Strict JSON schema validators reject required fields
+// that are not defined in properties with:
+// "400: Invalid schema for function '...': required property '...' is not defined in properties".
+func TestNbToolsToLlmTools_PrunesUndeclaredRequiredAndDefaultsEmptyType(t *testing.T) {
+	tool := &stubTool{
+		name:     "custom_client_tool",
+		required: []string{"command", "deleted_or_dangling_param"},
+		props: map[string]toolcore.ToolSchemaProperty{
+			"command": {Type: "", Description: "command with empty type"},
+			"options": {Type: toolcore.ToolSchemaTypeArray, Description: "array without items"},
+		},
+	}
+
+	llmTools := nbToolsToLlmTools([]toolcore.NBTool{tool})
+	require.Len(t, llmTools, 1)
+
+	params, ok := llmTools[0].Function.Parameters.(map[string]any)
+	require.True(t, ok)
+
+	// Dangling parameter was pruned from required
+	assert.Equal(t, []string{"command"}, params["required"])
+
+	props, ok := params["properties"].(map[string]any)
+	require.True(t, ok)
+
+	// Empty type was defaulted to string
+	cmdProp, ok := props["command"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "string", cmdProp["type"])
+
+	// Array without items was defaulted to string items
+	optionsProp, ok := props["options"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "array", optionsProp["type"])
+	items, ok := optionsProp["items"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "string", items["type"])
 }
