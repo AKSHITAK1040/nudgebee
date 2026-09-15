@@ -53,8 +53,9 @@ func (m CubeAPM) ConfigSchema() core.IntegrationSchema {
 		Properties: map[string]core.IntegrationSchemaProperty{
 			"cubeapm_url": {
 				Type: core.ToolSchemaTypeString,
-				Description: "Base URL of the CubeAPM query API, including its port " +
-					"(e.g. http://cubeapm.observability.svc:3140).",
+				Description: "Base URL of the CubeAPM query API " +
+					"(e.g. http://cubeapm.observability.svc:3140). An http:// URL without a port uses " +
+					CubeAPMDefaultQueryPort + ".",
 				Priority:   85,
 				IsTestable: true,
 			},
@@ -71,7 +72,7 @@ func (m CubeAPM) ConfigSchema() core.IntegrationSchema {
 				Description: "Base URL of the CubeAPM admin API, used to create and manage alert " +
 					"rules (e.g. http://cubeapm.observability.svc:3199). Leave empty to derive it " +
 					"from the query URL by swapping port " + CubeAPMDefaultQueryPort + " for " +
-					CubeAPMDefaultAdminPort + ".",
+					CubeAPMDefaultAdminPort + ". An http:// URL without a port uses " + CubeAPMDefaultAdminPort + ".",
 				Priority: 75,
 			},
 			"cubeapm_admin_token": {
@@ -171,7 +172,7 @@ func validateCubeAPMBaseURL(field, raw string, required bool) error {
 	}
 	if parsed.Path != "" && parsed.Path != "/" {
 		return fmt.Errorf("%s must be the base URL only — remove the path after the host (use %q, not %q)",
-			field, normalizeCubeAPMURL(raw), raw)
+			field, normalizeCubeAPMURL(raw, ""), raw)
 	}
 	return nil
 }
@@ -191,7 +192,7 @@ func (m CubeAPM) TestConnection(sc *security.RequestContext, config []core.Integ
 		}
 	}
 
-	url = normalizeCubeAPMURL(url)
+	url = normalizeCubeAPMURL(url, CubeAPMDefaultQueryPort)
 	if url == "" {
 		return fmt.Errorf("cubeapm_url is required")
 	}
@@ -232,7 +233,13 @@ func (m CubeAPM) TestConnection(sc *security.RequestContext, config []core.Integ
 // normalizeCubeAPMURL trims whitespace and strips any path/query/fragment so a URL
 // copied out of the browser still resolves. The port is deliberately preserved —
 // unlike most integrations here, CubeAPM's port is load-bearing.
-func normalizeCubeAPMURL(raw string) string {
+//
+// An http:// URL with no port gets defaultPort, because CubeAPM serves plain HTTP
+// on its own ports and never on 80: "http://cubeapm.cubeapm.svc.cluster.local"
+// otherwise targets a port the Service does not expose. https:// is left alone —
+// CubeAPM does not terminate TLS, so an https URL without a port is a reverse
+// proxy on 443, and appending the CubeAPM port would break it.
+func normalizeCubeAPMURL(raw, defaultPort string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return ""
@@ -241,7 +248,11 @@ func normalizeCubeAPMURL(raw string) string {
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return strings.TrimRight(raw, "/")
 	}
-	return parsed.Scheme + "://" + parsed.Host
+	host := parsed.Host
+	if parsed.Scheme == "http" && parsed.Port() == "" && defaultPort != "" {
+		host = net.JoinHostPort(parsed.Hostname(), defaultPort)
+	}
+	return parsed.Scheme + "://" + host
 }
 
 // CubeAPMRequestHeaders builds the header set for a CubeAPM call. The Authorization
@@ -337,12 +348,12 @@ func GetCubeAPMConfigs(sc *security.RequestContext, accountId string) (CubeAPMCo
 		}
 	}
 
-	cfg.URL = normalizeCubeAPMURL(cfg.URL)
+	cfg.URL = normalizeCubeAPMURL(cfg.URL, CubeAPMDefaultQueryPort)
 	if cfg.URL == "" {
 		return cfg, fmt.Errorf("cubeapm integration for account %s has no cubeapm_url", accountId)
 	}
 
-	cfg.AdminURL = normalizeCubeAPMURL(cfg.AdminURL)
+	cfg.AdminURL = normalizeCubeAPMURL(cfg.AdminURL, CubeAPMDefaultAdminPort)
 	if cfg.AdminURL == "" {
 		cfg.AdminURL = deriveCubeAPMAdminURL(cfg.URL)
 	}

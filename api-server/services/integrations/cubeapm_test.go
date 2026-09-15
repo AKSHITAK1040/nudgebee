@@ -20,14 +20,43 @@ func TestNormalizeCubeAPMURL(t *testing.T) {
 		{"port preserved", "https://cube.example.com:8443", "https://cube.example.com:8443"},
 		{"empty", "", ""},
 		{"no scheme falls through", "cube:3140", "cube:3140"},
+		{"http without port gets the default", "http://cubeapm.cubeapm.svc.cluster.local", "http://cubeapm.cubeapm.svc.cluster.local:3140"},
+		{"http without port, with path", "http://cube/logs/explorer", "http://cube:3140"},
+		{"explicit port 80 is kept", "http://cube:80", "http://cube:80"},
+		{"ipv6 without port", "http://[::1]", "http://[::1]:3140"},
+		// CubeAPM does not terminate TLS, so https without a port is a proxy on 443.
+		{"https without port is left alone", "https://cube.example.com", "https://cube.example.com"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := normalizeCubeAPMURL(tt.in); got != tt.want {
+			if got := normalizeCubeAPMURL(tt.in, CubeAPMDefaultQueryPort); got != tt.want {
 				t.Errorf("normalizeCubeAPMURL(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+
+	t.Run("no default port leaves the host untouched", func(t *testing.T) {
+		if got := normalizeCubeAPMURL("http://cube/logs", ""); got != "http://cube" {
+			t.Errorf("normalizeCubeAPMURL without a default = %q, want http://cube", got)
+		}
+	})
+}
+
+// A port-less query URL must still yield an admin URL: GetCubeAPMConfigs derives
+// it from the normalized URL, so the default port has to be applied first.
+func TestCubeAPMAdminURLFromPortlessQueryURL(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{"http://cubeapm.cubeapm.svc.cluster.local", "http://cubeapm.cubeapm.svc.cluster.local:3199"},
+		{"https://cube.example.com", ""},
+	}
+	for _, tt := range tests {
+		if got := deriveCubeAPMAdminURL(normalizeCubeAPMURL(tt.in, CubeAPMDefaultQueryPort)); got != tt.want {
+			t.Errorf("admin URL for %q = %q, want %q", tt.in, got, tt.want)
+		}
 	}
 }
 
