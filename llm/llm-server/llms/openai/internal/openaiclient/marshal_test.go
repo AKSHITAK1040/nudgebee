@@ -231,3 +231,59 @@ func TestIsReasoningModel(t *testing.T) {
 		})
 	}
 }
+
+func TestChatRequest_ToolReasoningEffort(t *testing.T) {
+	models := []struct {
+		model   string
+		disable bool
+	}{
+		{"gpt-5.6", true}, {"gpt-5.6-sol", true},
+		{"openai/gpt-5.6-terra", true}, {"azure:gpt-5.6-luna", true},
+		{"GPT-5.6-SOL", true}, {"gpt-5.6-sol-2026-09-01", true},
+		{"gpt-5", false}, {"gpt-5-mini", false}, {"gpt-5-pro", false},
+		{"gpt-5.1", false}, {"gpt-5.5", false}, {"gpt-50", false},
+		{"gpt-5.60-sol", false}, {"gpt-5.6-pro", false}, {"gpt-5.6-solstice", false},
+		{"gpt-6-astra", false}, {"astra", false}, {"gpt-4o", false},
+		{"o1", false}, {"openai/o3", false}, {"o4-mini", false},
+	}
+	for _, model := range models {
+		for _, kind := range []string{"no tools", "empty tools", "tools", "functions"} {
+			for _, effort := range []string{"", "high", "none"} {
+				t.Run(model.model+"/"+kind+"/"+effort, func(t *testing.T) {
+					req := ChatRequest{Model: model.model, ReasoningEffort: effort}
+					switch kind {
+					case "empty tools":
+						req.Tools = []Tool{}
+						req.Functions = []FunctionDefinition{}
+					case "tools":
+						req.Tools = []Tool{{Type: ToolTypeFunction, Function: FunctionDefinition{Name: "lookup"}}}
+					case "functions":
+						req.Functions = []FunctionDefinition{{Name: "lookup"}}
+					}
+					want := effort
+					if model.disable && (kind == "tools" || kind == "functions") {
+						want = "none"
+					}
+					data, err := json.Marshal(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					var got map[string]any
+					if err := json.Unmarshal(data, &got); err != nil {
+						t.Fatal(err)
+					}
+					if want == "" {
+						if _, exists := got["reasoning_effort"]; exists {
+							t.Errorf("reasoning_effort should be omitted: %s", data)
+						}
+					} else if got["reasoning_effort"] != want {
+						t.Errorf("reasoning_effort = %v, want %q", got["reasoning_effort"], want)
+					}
+					if req.ReasoningEffort != effort {
+						t.Fatal("marshal mutated request")
+					}
+				})
+			}
+		}
+	}
+}

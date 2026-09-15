@@ -86,6 +86,7 @@ func (r CloudResourceSearchTool) InputSchema() core.ToolSchema {
 				Description: "Region to search in",
 			},
 		},
+		Required: []string{},
 	}
 }
 

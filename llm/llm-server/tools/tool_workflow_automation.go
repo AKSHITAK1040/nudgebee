@@ -386,10 +386,16 @@ func (t *automationTool) InputSchema() core.ToolSchema {
 		if in.ID == "" {
 			continue
 		}
+		schemaType := automationInputSchemaType(in.Type)
+		var items map[string]any
+		if schemaType == core.ToolSchemaTypeArray {
+			items = map[string]any{"type": "string"}
+		}
 		props[in.ID] = core.ToolSchemaProperty{
-			Type:        automationInputSchemaType(in.Type),
+			Type:        schemaType,
 			Description: in.Description,
 			Default:     in.Default,
+			Items:       items,
 		}
 		// An input with no default is required of the AI whether or not the author
 		// ticked "required". Unticked-and-undefaulted is optional only in the sense

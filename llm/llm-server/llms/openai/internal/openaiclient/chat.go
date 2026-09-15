@@ -70,7 +70,7 @@ type ChatRequest struct {
 	StreamOptions *StreamOptions `json:"stream_options,omitempty"`
 
 	// ReasoningEffort controls thinking effort for reasoning models (o1, o3, GPT-5).
-	// Valid values: "minimal" (GPT-5 only), "low", "medium", "high"
+	// Supported values depend on the model, including "none" on GPT-5.6.
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 
 	// StreamingFunc is a function to be called for each chunk of a streaming response.
@@ -94,6 +94,14 @@ type ChatRequest struct {
 // OpenAI's API returns an error if both fields are present.
 // Also omits temperature for reasoning models (GPT-5, o1, o3) that only accept default temperature.
 func (r ChatRequest) MarshalJSON() ([]byte, error) {
+	// GPT-5.6 Chat Completions rejects function tools with active reasoning,
+	// including its default effort. Restrict this override to known variants:
+	// original GPT-5 and GPT-6 Astra do not support "none". The value receiver
+	// keeps this wire compatibility adjustment from mutating the caller.
+	if chatToolsRequireNoReasoningRx.MatchString(r.Model) && (len(r.Tools) > 0 || len(r.Functions) > 0) {
+		r.ReasoningEffort = "none"
+	}
+
 	type Alias ChatRequest
 	aux := struct {
 		*Alias
@@ -154,8 +162,9 @@ func isReasoningModel(model string) bool {
 // reasoningFamilyRx is kept identical to the one in the parent openai package.
 // The two matchers disagreeing is the defect class this fork exists to fix.
 var (
-	oSeriesReasoningRx = regexp.MustCompile(`(?i)(^|/)o[13](-|$)`)
-	reasoningFamilyRx  = regexp.MustCompile(`(?i)(^|[/:._-])(gpt-5|o[45])($|[/:._-])`)
+	chatToolsRequireNoReasoningRx = regexp.MustCompile(`(?i)(^|[/:._-])gpt-5\.6(-(sol|terra|luna))?(-[0-9]{4}-[0-9]{2}-[0-9]{2})?$`)
+	oSeriesReasoningRx            = regexp.MustCompile(`(?i)(^|/)o[13](-|$)`)
+	reasoningFamilyRx             = regexp.MustCompile(`(?i)(^|[/:._-])(gpt-5|o[45])($|[/:._-])`)
 )
 
 // ToolType is the type of a tool.
