@@ -13,15 +13,33 @@ import (
 
 func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent NBAgent, request NBAgentRequest, action NBAgentPlannerToolAction) (*NBAgentPlannerFinishAction, *toolcore.ToolRequestType, error) {
 	toolName := action.Tool
+	canonicalToolName := toolcore.ResolveNBToolAlias(toolName)
 	var tool toolcore.NBTool
 	found := false
+	supported := SupportedToolsForRequest(ctx, agent, request)
+	if strings.EqualFold(canonicalToolName, "search_skills") || strings.EqualFold(canonicalToolName, "load_skills") {
+		// Knowledge tools can be injected into the planner without being declared
+		// by the agent. Apply that same injection at dispatch, while enforcing
+		// restrictions before any legacy or discovered-tool fallback can accept it.
+		caps := request.Capabilities.Merge(request.QueryConfig.Capabilities)
+		knowledgeTool, registered := toolcore.GetNBTool(request.AccountId, strings.ToLower(canonicalToolName))
+		policy := request.KnowledgePolicy
+		if policy == "" {
+			policy = KnowledgeAuto
+		}
+		if policy == KnowledgeDisabled || !registered || knowledgeTool == nil || len(FilterTools([]toolcore.NBTool{knowledgeTool}, caps)) == 0 {
+			return nil, nil, fmt.Errorf("auth: knowledge tool %s is disabled or unavailable for agent %s", toolName, agent.GetName())
+		}
+		supported = FilterAndInjectDefaultTools(request.AccountId, agent, request.SkillListsMenu, supported, caps, policy)
+	}
 	// Resolve request-aware so a mode-restricted tool (absent from this
 	// request's set) is rejected here even though the agent's canonical
 	// toolset contains it.
-	for _, tool1 := range SupportedToolsForRequest(ctx, agent, request) {
-		if strings.EqualFold(tool1.Name(), toolName) {
+	for _, tool1 := range supported {
+		if matchesToolName(tool1, []string{toolName}) {
 			found = true
 			tool = tool1
+			toolName = tool1.Name()
 			break
 		}
 	}

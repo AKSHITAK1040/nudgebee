@@ -54,6 +54,10 @@ func (t AwsCliTool) Name() string {
 	return ToolExecuteAwsCliCommand
 }
 
+func (t AwsCliTool) GetNameAliases() []string {
+	return []string{"aws"}
+}
+
 func (t AwsCliTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }

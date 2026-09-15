@@ -316,7 +316,7 @@ func normalizeToolInputByName(tools []toolcore.NBTool, toolName, input string) s
 		return input
 	}
 	for _, t := range tools {
-		if t.Name() == toolName {
+		if matchesToolName(t, []string{toolName}) {
 			return normalizeToolInputForTool(t, input)
 		}
 	}
@@ -2115,7 +2115,7 @@ func (e *plannerExecutor) doAction(nameToTool map[string]toolcore.NBTool, action
 
 	// Handle common aliases and prioritize system tools over custom agents/tools
 	if !ok {
-		resolvedToolName := action.Tool
+		resolvedToolName := toolcore.ResolveNBToolAlias(action.Tool)
 		if strings.EqualFold(resolvedToolName, "shell") {
 			resolvedToolName = toolcore.ToolExecuteShellCommand
 		}
@@ -3111,6 +3111,16 @@ func isToolConfigResolved(toolConfigs map[string]string, toolName string) bool {
 // answered affirmatively (ok/yes/true), mirroring the doAction gate; "no" returns false.
 func isToolConfirmationApproved(confirmations map[string]string, toolName string) bool {
 	v, ok := confirmations[toolName]
+	if !ok {
+		canonicalToolName := toolcore.ResolveNBToolAlias(toolName)
+		for k, val := range confirmations {
+			if strings.EqualFold(toolcore.ResolveNBToolAlias(k), canonicalToolName) {
+				v = val
+				ok = true
+				break
+			}
+		}
+	}
 	if !ok {
 		return false
 	}

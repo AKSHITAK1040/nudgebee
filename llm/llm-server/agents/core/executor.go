@@ -1488,6 +1488,12 @@ func getNameToTool(t []toolcore.NBTool) map[string]toolcore.NBTool {
 				nameToTool[strings.ToUpper(alias)] = tool
 			}
 		}
+		for _, alias := range toolcore.GetNBToolAliases(tool.Name()) {
+			if alias == "" {
+				continue
+			}
+			nameToTool[strings.ToUpper(alias)] = tool
+		}
 	}
 	return nameToTool
 }

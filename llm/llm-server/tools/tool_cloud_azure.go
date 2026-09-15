@@ -43,6 +43,10 @@ func (t AzureCliTool) Name() string {
 	return ToolExecuteAzureCliCommand
 }
 
+func (t AzureCliTool) GetNameAliases() []string {
+	return []string{"azure"}
+}
+
 func (t AzureCliTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }

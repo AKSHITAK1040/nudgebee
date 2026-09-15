@@ -44,6 +44,10 @@ func (t GcpCliTool) Name() string {
 	return ToolExecuteGcpCliCommand
 }
 
+func (t GcpCliTool) GetNameAliases() []string {
+	return []string{"gcp"}
+}
+
 func (t GcpCliTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }

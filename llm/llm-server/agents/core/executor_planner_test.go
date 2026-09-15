@@ -1218,6 +1218,8 @@ func TestIsToolConfirmationApproved(t *testing.T) {
 		{"no", map[string]string{"github_execute": "no"}, "github_execute", false},
 		{"absent key", map[string]string{}, "github_execute", false},
 		{"nil map", nil, "github_execute", false},
+		{"alias in map, canonical requested", map[string]string{"aws": "yes"}, "aws_execute", true},
+		{"canonical in map, alias requested", map[string]string{"aws_execute": "yes"}, "AWS", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

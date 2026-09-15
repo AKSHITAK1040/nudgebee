@@ -293,18 +293,15 @@ func matchesToolName(t toolcore.NBTool, names []string) bool {
 	if len(names) == 0 {
 		return false
 	}
-	tName := t.Name()
-	var aliases []string
+	possibleNames := []string{t.Name()}
 	if aliased, ok := t.(interface{ GetNameAliases() []string }); ok {
-		aliases = aliased.GetNameAliases()
+		possibleNames = append(possibleNames, aliased.GetNameAliases()...)
 	}
 
 	for _, name := range names {
-		if strings.EqualFold(tName, name) {
-			return true
-		}
-		for _, alias := range aliases {
-			if strings.EqualFold(alias, name) {
+		canonicalName := toolcore.ResolveNBToolAlias(name)
+		for _, possible := range possibleNames {
+			if strings.EqualFold(possible, name) || strings.EqualFold(possible, canonicalName) {
 				return true
 			}
 		}

@@ -186,8 +186,10 @@ func (h *plannerExecutorCallbackHandler) findTool(toolName string) (toolcore.NBT
 		return tool, true
 	}
 
+	canonicalToolName := toolcore.ResolveNBToolAlias(toolName)
+
 	// Handle common aliases and prioritize system tools over custom agents/tools
-	resolvedToolName := toolName
+	resolvedToolName := canonicalToolName
 	if strings.EqualFold(resolvedToolName, "shell") {
 		resolvedToolName = toolcore.ToolExecuteShellCommand
 	}
