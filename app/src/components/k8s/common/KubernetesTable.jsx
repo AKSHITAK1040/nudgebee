@@ -14,10 +14,10 @@ const KubernetesEventsTable = dynamic(() => import('@components/events/Kubernete
 import ListingLayout from '@ui/ListingLayout';
 import { Button as DsButton } from '@ui/Button';
 import zlib from 'zlib';
-import Datetime from '@shared/format/Datetime';
+import Datetime, { parseDateValue } from '@shared/format/Datetime';
 import SafeIcon from '@shared/icons/SafeIcon';
 import Loader from '@shared/Loader';
-import { getDateString, getLast30Days, getSpecificTime, getTimeString, timeFormatIn24HoursCompact } from '@lib/datetime';
+import { getDateString, getLast30Days, getSpecificTime, getTimeString, parseEpochTimestamp, timeFormatIn24HoursCompact } from '@lib/datetime';
 import KubernetesPodYaml from '@components/k8s/details/KubernetesPodYaml';
 import {
   convertNumberToTimestamp,
@@ -1004,6 +1004,19 @@ const KubernetesLogDetails = ({ query }) => {
     return result;
   }
 
+  // Providers disagree on how the `timestamp` label is encoded: the OTel backends
+  // send epoch nanoseconds, others epoch millis or seconds, and some pass an
+  // ISO-8601 string straight through. Dividing every shape by 1e6 turned the ISO
+  // string into an Invalid Date, whose tooltip threw `RangeError: Invalid time
+  // value` and took the whole log screen down with it.
+  const renderTimestampValue = (value) => {
+    const millis = parseEpochTimestamp(value);
+    if (!Number.isNaN(millis)) return <Datetime value={new Date(millis)} />;
+    const parsed = parseDateValue(value);
+    if (Number.isNaN(parsed.getTime())) return <span style={{ fontFamily: 'monospace' }}>{value}</span>;
+    return <Datetime value={parsed} />;
+  };
+
   const renderLabelRow = (key, value, index) => (
     <Grid item xs={6} key={key} sx={{ backgroundColor: 'white', paddingX: ds.space.mul(0, 7), paddingY: ds.space.mul(0, 3) }}>
       <Typography variant='subtitle1' style={{ overflowY: 'overlay', display: 'flex', alignItems: 'baseline', wordBreak: 'break-all' }}>
@@ -1043,7 +1056,7 @@ const KubernetesLogDetails = ({ query }) => {
         )}
         {key === 'timestamp' && query.callback && <Typography style={{ fontWeight: 'bold', minWidth: ds.space.mul(0, 40) }} />}
         <Typography style={{ fontWeight: 'bold', minWidth: ds.space.mul(0, 65) }}>{key}:</Typography>
-        {key === 'timestamp' ? <Datetime value={new Date(value / 1000000)} /> : <span style={{ fontFamily: 'monospace' }}>{value}</span>}
+        {key === 'timestamp' ? renderTimestampValue(value) : <span style={{ fontFamily: 'monospace' }}>{value}</span>}
       </Typography>
     </Grid>
   );

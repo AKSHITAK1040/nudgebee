@@ -10,7 +10,7 @@ const ONE_DAY = 24 * ONE_HOUR;
 const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 const pad2 = (n) => String(n).padStart(2, '0');
 
-function parseDateValue(value) {
+export function parseDateValue(value) {
   if (value instanceof Date) return value;
   if (typeof value === 'string') {
     const timezoneRegex = /([Zz]|[+-]\d{2}:?\d{2})$/;
@@ -90,7 +90,14 @@ export default function Datetime({
   sxSecondary = false,
   sxPrefixSecondary = true,
 }) {
-  if (!value) {
+  const dateValue = parseDateValue(value);
+
+  // An unparseable timestamp used to reach formatTooltip, where
+  // Intl.DateTimeFormat#formatToParts throws `RangeError: Invalid time value` on an
+  // Invalid Date — killing the whole screen through the error boundary rather than
+  // just this one cell. Providers encode timestamps every which way, so render the
+  // empty placeholder instead of trusting the caller to have normalized it.
+  if (!value || Number.isNaN(dateValue.getTime())) {
     return (
       <Typography
         key='empty'
@@ -108,7 +115,6 @@ export default function Datetime({
     );
   }
 
-  const dateValue = parseDateValue(value);
   const ref = baseDate || new Date();
   const deltaMs = Math.abs(ref.getTime() - dateValue.getTime());
   const isFuture = dateValue > ref;

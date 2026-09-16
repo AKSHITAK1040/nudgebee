@@ -405,21 +405,40 @@ export const isWithinTimeFrame = (startDateMs: number, endDateMs: number, durati
   return difference < maxDifference && difference >= 0;
 };
 
+// Normalizes an epoch timestamp of unknown precision to milliseconds. Observability
+// providers each pick their own unit — seconds, millis, micros or nanos — and the
+// magnitude is the only thing that tells them apart.
+// Example: epochToMillis(1673784000000000000) -> 1673784000000
+export const epochToMillis = (inputValue: number): number => {
+  const nowInSeconds = Math.floor(Date.now() / 1000);
+  if (inputValue < nowInSeconds * 10) {
+    return inputValue * 1000;
+  } else if (inputValue < 1e14) {
+    return inputValue;
+  } else if (inputValue < 1e17) {
+    return inputValue / 1000;
+  }
+  return inputValue / 1e6;
+};
+
+// Parses an epoch timestamp that may arrive as a number or as a numeric string
+// (Loki and the OTel backends send nanoseconds as a string to keep the low digits)
+// into epoch millis. Returns NaN for anything that is not a bare epoch value —
+// an ISO-8601 string, say — so callers can fall back instead of building an
+// Invalid Date out of it.
+export const parseEpochTimestamp = (value: number | string): number => {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? epochToMillis(value) : NaN;
+  }
+  const trimmed = String(value ?? '').trim();
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) return NaN;
+  return epochToMillis(Number(trimmed));
+};
+
 // Formats a timestamp to MM/DD/YY HH:MM:SS AM/PM format
 // Example: formatDateTime(1673784000000) -> "01/15/23 12:00:00 PM"
 export const formatDateTime = (inputValue: number) => {
-  let totalMilliseconds;
-  const nowInSeconds = Math.floor(Date.now() / 1000);
-  if (inputValue < nowInSeconds * 10) {
-    totalMilliseconds = inputValue * 1000;
-  } else if (inputValue < 1e14) {
-    totalMilliseconds = inputValue;
-  } else if (inputValue < 1e17) {
-    totalMilliseconds = inputValue / 1000;
-  } else {
-    totalMilliseconds = inputValue / 1e6;
-  }
-  const date = new Date(totalMilliseconds);
+  const date = new Date(epochToMillis(inputValue));
   const formattedDate = date.toLocaleDateString('en-US', {
     year: '2-digit',
     month: '2-digit',
