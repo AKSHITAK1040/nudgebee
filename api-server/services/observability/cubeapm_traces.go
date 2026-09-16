@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 	neturl "net/url"
 	"nudgebee/services/common"
 	"nudgebee/services/integrations"
@@ -476,6 +477,19 @@ func cubeAPMInt(v any) int64 {
 	return 0
 }
 
+// cubeAPMCount reads a count column into an int. A count is never negative, and it
+// saturates rather than wrapping when the platform int cannot hold the value.
+func cubeAPMCount(v any) int {
+	n := cubeAPMInt(v)
+	if n < 0 {
+		return 0
+	}
+	if n > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	return int(n)
+}
+
 // cubeAPMTraceRowToSpan projects one LogsQL span record onto the shared span model.
 func cubeAPMTraceRowToSpan(row map[string]any) common.OpenTelemetryTrace {
 	spanAttrs := map[string]string{}
@@ -538,8 +552,8 @@ func cubeAPMTraceRowToSpan(row map[string]any) common.OpenTelemetryTrace {
 // cubeAPMTraceGroupRowToValues projects one grouped-view stats row.
 func cubeAPMTraceGroupRowToValues(row map[string]any) TraceGroupingValues {
 	return TraceGroupingValues{
-		Count:             int(cubeAPMInt(row["count"])),
-		ErrorCount:        int(cubeAPMInt(row["error_count"])),
+		Count:             cubeAPMCount(row["count"]),
+		ErrorCount:        cubeAPMCount(row["error_count"]),
 		P95Latency:        cubeAPMInt(row["p95"]),
 		P99Latency:        cubeAPMInt(row["p99"]),
 		MaxLatency:        cubeAPMInt(row["max_duration"]),
@@ -569,7 +583,7 @@ func cubeAPMTraceCount(cfg integrations.CubeAPMConfig, req TracesV3Request, expr
 	if len(rows) == 0 {
 		return 0, nil
 	}
-	return int(cubeAPMInt(rows[0]["count"])), nil
+	return cubeAPMCount(rows[0]["count"]), nil
 }
 
 func (s *CubeAPMTraceSource) GetQuery(ctx *security.RequestContext, req TracesV3Request) (string, error) {

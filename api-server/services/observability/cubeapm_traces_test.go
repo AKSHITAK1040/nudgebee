@@ -3,6 +3,7 @@ package observability
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -977,3 +978,21 @@ func TestCubeAPMSpanStartNanos(t *testing.T) {
 // bisection against a live instance (100 -> 200, 101 -> 400). This is a server
 // constraint, not a policy choice, and exceeding it fails the request outright
 // rather than degrading it, so it needs a guard CI can see: the live test that
+
+func TestCubeAPMCount(t *testing.T) {
+	tests := []struct {
+		in   any
+		want int
+	}{
+		{"5071", 5071},
+		{"-3", 0},
+		{"99999999999", math.MaxInt32},
+		{"12.9", 12},
+		{nil, 0},
+	}
+	for _, tt := range tests {
+		if got := cubeAPMCount(tt.in); got != tt.want {
+			t.Errorf("cubeAPMCount(%v) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
+}
