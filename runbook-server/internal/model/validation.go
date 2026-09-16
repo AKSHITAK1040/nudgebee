@@ -205,13 +205,10 @@ func validateWorkflowDefinitionStructLevel(sl validator.StructLevel) {
 		}
 
 		if t.ExpectedOutput != nil && t.ExpectedOutput.Type != "" {
-			validTypes := map[string]bool{
-				"json":   true,
-				"object": true,
-				"array":  true,
-				"string": true,
-			}
-			if !validTypes[strings.ToLower(strings.TrimSpace(t.ExpectedOutput.Type))] {
+			switch strings.ToLower(strings.TrimSpace(t.ExpectedOutput.Type)) {
+			case "json", "object", "array", "string":
+				// valid type
+			default:
 				sl.ReportError(t.ExpectedOutput.Type, "tasks["+strconv.Itoa(i)+"].expected_output.type", "ExpectedOutput", "expected_output_invalid_type", t.ExpectedOutput.Type)
 			}
 		}

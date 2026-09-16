@@ -425,6 +425,235 @@ func TestValidationContractMatrix_18Scenarios(t *testing.T) {
 	}
 }
 
+type TestItem struct {
+	Name string `json:"name"`
+}
+
+type TestResult struct {
+	Items []TestItem `json:"items"`
+	ID    string     `json:"id"`
+}
+
+type TestCustomMap map[string]string
+type TestCustomSlice []string
+
+func TestValidateTaskOutput_CustomTypesAndRequiredFields(t *testing.T) {
+	// A. map[string]any
+	t.Run("map[string]any with required fields", func(t *testing.T) {
+		input := map[string]any{
+			"id":    "item-123",
+			"items": []any{"a", "b"},
+		}
+		expected := &model.TaskExpectedOutput{
+			Type:     "object",
+			Required: []string{"id", "items"},
+		}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		m, ok := out.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "item-123", m["id"])
+	})
+
+	// B. map[string]string
+	t.Run("map[string]string normalized to map[string]any with required fields", func(t *testing.T) {
+		input := map[string]string{
+			"id":   "str-456",
+			"name": "cluster-prod",
+		}
+		expected := &model.TaskExpectedOutput{
+			Type:     "object",
+			Required: []string{"id", "name"},
+		}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		m, ok := out.(map[string]any)
+		require.True(t, ok, "downstream output must be normalized to map[string]any")
+		assert.Equal(t, "str-456", m["id"])
+		assert.Equal(t, "cluster-prod", m["name"])
+	})
+
+	// C. custom map type
+	t.Run("custom map type normalized with required fields", func(t *testing.T) {
+		input := TestCustomMap{
+			"id":   "cust-789",
+			"role": "leader",
+		}
+		expected := &model.TaskExpectedOutput{
+			Type:     "object",
+			Required: []string{"id", "role"},
+		}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		m, ok := out.(map[string]any)
+		require.True(t, ok, "custom map must be normalized to map[string]any")
+		assert.Equal(t, "cust-789", m["id"])
+		assert.Equal(t, "leader", m["role"])
+	})
+
+	// D. struct
+	t.Run("struct normalized to map[string]any with required fields", func(t *testing.T) {
+		input := TestResult{
+			Items: []TestItem{{Name: "node-1"}, {Name: "node-2"}},
+			ID:    "res-999",
+		}
+		expected := &model.TaskExpectedOutput{
+			Type:     "object",
+			Required: []string{"items", "id"},
+		}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		m, ok := out.(map[string]any)
+		require.True(t, ok, "struct must be normalized to map[string]any")
+		assert.Equal(t, "res-999", m["id"])
+		items, ok := m["items"].([]any)
+		require.True(t, ok, "nested slice in struct must be normalized to []any")
+		assert.Len(t, items, 2)
+	})
+
+	// E. struct with type: json
+	t.Run("struct with type: json normalized and checked", func(t *testing.T) {
+		input := TestResult{
+			Items: []TestItem{{Name: "node-1"}},
+			ID:    "res-888",
+		}
+		expected := &model.TaskExpectedOutput{
+			Type:     "json",
+			Required: []string{"items", "id"},
+		}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		m, ok := out.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "res-888", m["id"])
+	})
+
+	// F. wrapped payload with struct
+	t.Run("wrapped payload containing struct preserves envelope and normalizes inner", func(t *testing.T) {
+		input := map[string]any{
+			"data": TestResult{
+				Items: []TestItem{{Name: "worker-1"}},
+				ID:    "res-wrapped",
+			},
+			"exit_code": 0,
+		}
+		expected := &model.TaskExpectedOutput{
+			Type:     "object",
+			Required: []string{"items", "id"},
+		}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		resMap, ok := out.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, 0, resMap["exit_code"])
+		inner, ok := resMap["data"].(map[string]any)
+		require.True(t, ok, "wrapped struct must be normalized to map[string]any inside data envelope")
+		assert.Equal(t, "res-wrapped", inner["id"])
+	})
+
+	// Missing required field on struct
+	t.Run("struct missing required field returns ERR_MISSING_REQUIRED_FIELD", func(t *testing.T) {
+		input := TestResult{
+			Items: []TestItem{},
+			ID:    "res-incomplete",
+		}
+		expected := &model.TaskExpectedOutput{
+			Type:     "object",
+			Required: []string{"id", "nonexistent_field"},
+		}
+		_, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.NotNil(t, valErr)
+		assert.Equal(t, ErrCodeMissingRequiredField, valErr.Code)
+		assert.False(t, valErr.IsRetryable())
+	})
+
+	// Struct passed where array was expected
+	t.Run("struct with type array returns ERR_TYPE_MISMATCH", func(t *testing.T) {
+		input := TestResult{ID: "not-an-array"}
+		expected := &model.TaskExpectedOutput{Type: "array"}
+		_, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.NotNil(t, valErr)
+		assert.Equal(t, ErrCodeTypeMismatch, valErr.Code)
+		assert.False(t, valErr.IsRetryable())
+	})
+}
+
+func TestValidateTaskOutput_ArrayNormalization(t *testing.T) {
+	// []string -> []any
+	t.Run("[]string normalized to []any", func(t *testing.T) {
+		input := []string{"us-east-1", "us-west-2", "eu-west-1"}
+		expected := &model.TaskExpectedOutput{Type: "array"}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		arr, ok := out.([]any)
+		require.True(t, ok, "output must be []any")
+		assert.Equal(t, []any{"us-east-1", "us-west-2", "eu-west-1"}, arr)
+	})
+
+	// []int -> []any
+	t.Run("[]int normalized to []any", func(t *testing.T) {
+		input := []int{200, 201, 204}
+		expected := &model.TaskExpectedOutput{Type: "array"}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		arr, ok := out.([]any)
+		require.True(t, ok, "output must be []any")
+		assert.Equal(t, []any{float64(200), float64(201), float64(204)}, arr)
+	})
+
+	// []struct -> []any
+	t.Run("[]struct normalized to []any with inner maps", func(t *testing.T) {
+		input := []TestItem{{Name: "alpha"}, {Name: "beta"}}
+		expected := &model.TaskExpectedOutput{Type: "array"}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		arr, ok := out.([]any)
+		require.True(t, ok, "output must be []any")
+		require.Len(t, arr, 2)
+		first, ok := arr[0].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "alpha", first["name"])
+	})
+
+	// custom slice type -> []any
+	t.Run("custom slice type normalized to []any", func(t *testing.T) {
+		input := TestCustomSlice{"prod-1", "prod-2"}
+		expected := &model.TaskExpectedOutput{Type: "array"}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		arr, ok := out.([]any)
+		require.True(t, ok, "output must be []any")
+		assert.Equal(t, []any{"prod-1", "prod-2"}, arr)
+	})
+
+	// wrapped array in data key
+	t.Run("wrapped []string in data envelope normalizes to []any inside data", func(t *testing.T) {
+		input := map[string]any{
+			"data":      []string{"k8s-master-1", "k8s-master-2"},
+			"exit_code": 0,
+		}
+		expected := &model.TaskExpectedOutput{Type: "array"}
+		out, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.Nil(t, valErr)
+		m, ok := out.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, 0, m["exit_code"])
+		arr, ok := m["data"].([]any)
+		require.True(t, ok, "wrapped data slice must be normalized to []any")
+		assert.Equal(t, []any{"k8s-master-1", "k8s-master-2"}, arr)
+	})
+
+	// array expected but map provided -> ERR_TYPE_MISMATCH
+	t.Run("map provided when array expected returns ERR_TYPE_MISMATCH", func(t *testing.T) {
+		input := map[string]any{"not": "an array"}
+		expected := &model.TaskExpectedOutput{Type: "array"}
+		_, valErr := ValidateTaskOutput(input, expected, "test.task")
+		require.NotNil(t, valErr)
+		assert.Equal(t, ErrCodeTypeMismatch, valErr.Code)
+		assert.False(t, valErr.IsRetryable())
+	})
+}
+
 func BenchmarkValidateTaskOutput(b *testing.B) {
 	b.Run("NoValidation", func(b *testing.B) {
 		input := map[string]any{"status": "healthy", "nodes": 5}

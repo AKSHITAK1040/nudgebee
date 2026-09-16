@@ -102,8 +102,22 @@ func isPayloadEmpty(v any) bool {
 	return false
 }
 
+// normalizeJSONValue marshals an arbitrary Go value (struct, custom map, slice, primitive)
+// and unmarshals it back into standard Go JSON types (map[string]any, []any, float64, string, bool, nil).
+func normalizeJSONValue(v any) (any, error) {
+	bytes, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	var out any
+	if err := json.Unmarshal(bytes, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ValidateTaskOutput validates a task execution result against the declared expected output contract.
-// It normalizes string-encoded JSON payloads into native structures when JSON output is expected,
+// It normalizes string-encoded JSON payloads and custom Go types into native structures when JSON output is expected,
 // verifies non-emptiness when required, and checks required fields.
 // Returns the normalized result or a structured *TaskValidationError.
 func ValidateTaskOutput(result any, expected *model.TaskExpectedOutput, taskType string) (any, *TaskValidationError) {
@@ -164,18 +178,27 @@ func ValidateTaskOutput(result any, expected *model.TaskExpectedOutput, taskType
 			}
 		} else if _, isMap := payload.(map[string]any); !isMap {
 			if _, isSlice := payload.([]any); !isSlice {
-				if _, err := json.Marshal(payload); err != nil {
+				norm, err := normalizeJSONValue(payload)
+				if err != nil {
 					return nil, &TaskValidationError{
 						Code:     ErrCodeMalformedOutput,
 						Reason:   fmt.Sprintf("output cannot be represented as JSON: %v", err),
 						TaskType: taskType,
 					}
 				}
+				payload = norm
+				if isWrapped {
+					if resMap, ok := result.(map[string]any); ok {
+						resMap[wrapKey] = norm
+					}
+				} else {
+					result = norm
+				}
 			}
 		}
 	case "object":
 		if strVal, ok := payload.(string); ok {
-			var parsed map[string]any
+			var parsed any
 			if err := json.Unmarshal([]byte(strVal), &parsed); err != nil {
 				return nil, &TaskValidationError{
 					Code:     ErrCodeMalformedOutput,
@@ -183,24 +206,51 @@ func ValidateTaskOutput(result any, expected *model.TaskExpectedOutput, taskType
 					TaskType: taskType,
 				}
 			}
-			payload = parsed
+			parsedMap, isMap := parsed.(map[string]any)
+			if !isMap {
+				return nil, &TaskValidationError{
+					Code:     ErrCodeTypeMismatch,
+					Reason:   fmt.Sprintf("expected JSON object, got %T", parsed),
+					TaskType: taskType,
+				}
+			}
+			payload = parsedMap
 			if isWrapped {
 				if resMap, ok := result.(map[string]any); ok {
-					resMap[wrapKey] = parsed
+					resMap[wrapKey] = parsedMap
 				}
 			} else {
-				result = parsed
+				result = parsedMap
 			}
 		} else if _, isMap := payload.(map[string]any); !isMap {
-			return nil, &TaskValidationError{
-				Code:     ErrCodeTypeMismatch,
-				Reason:   fmt.Sprintf("expected object output, got %T", payload),
-				TaskType: taskType,
+			norm, err := normalizeJSONValue(payload)
+			if err != nil {
+				return nil, &TaskValidationError{
+					Code:     ErrCodeMalformedOutput,
+					Reason:   fmt.Sprintf("output cannot be represented as JSON object: %v", err),
+					TaskType: taskType,
+				}
+			}
+			parsedMap, isMap := norm.(map[string]any)
+			if !isMap {
+				return nil, &TaskValidationError{
+					Code:     ErrCodeTypeMismatch,
+					Reason:   fmt.Sprintf("expected object output, got %T", payload),
+					TaskType: taskType,
+				}
+			}
+			payload = parsedMap
+			if isWrapped {
+				if resMap, ok := result.(map[string]any); ok {
+					resMap[wrapKey] = parsedMap
+				}
+			} else {
+				result = parsedMap
 			}
 		}
 	case "array":
 		if strVal, ok := payload.(string); ok {
-			var parsed []any
+			var parsed any
 			if err := json.Unmarshal([]byte(strVal), &parsed); err != nil {
 				return nil, &TaskValidationError{
 					Code:     ErrCodeMalformedOutput,
@@ -208,22 +258,46 @@ func ValidateTaskOutput(result any, expected *model.TaskExpectedOutput, taskType
 					TaskType: taskType,
 				}
 			}
-			payload = parsed
+			parsedSlice, isSlice := parsed.([]any)
+			if !isSlice {
+				return nil, &TaskValidationError{
+					Code:     ErrCodeTypeMismatch,
+					Reason:   fmt.Sprintf("expected JSON array, got %T", parsed),
+					TaskType: taskType,
+				}
+			}
+			payload = parsedSlice
 			if isWrapped {
 				if resMap, ok := result.(map[string]any); ok {
-					resMap[wrapKey] = parsed
+					resMap[wrapKey] = parsedSlice
 				}
 			} else {
-				result = parsed
+				result = parsedSlice
 			}
 		} else if _, isSlice := payload.([]any); !isSlice {
-			rv := reflect.ValueOf(payload)
-			if rv.Kind() != reflect.Slice && rv.Kind() != reflect.Array {
+			norm, err := normalizeJSONValue(payload)
+			if err != nil {
+				return nil, &TaskValidationError{
+					Code:     ErrCodeMalformedOutput,
+					Reason:   fmt.Sprintf("output cannot be represented as JSON array: %v", err),
+					TaskType: taskType,
+				}
+			}
+			parsedSlice, isSlice := norm.([]any)
+			if !isSlice {
 				return nil, &TaskValidationError{
 					Code:     ErrCodeTypeMismatch,
 					Reason:   fmt.Sprintf("expected array output, got %T", payload),
 					TaskType: taskType,
 				}
+			}
+			payload = parsedSlice
+			if isWrapped {
+				if resMap, ok := result.(map[string]any); ok {
+					resMap[wrapKey] = parsedSlice
+				}
+			} else {
+				result = parsedSlice
 			}
 		}
 	}
@@ -232,6 +306,24 @@ func ValidateTaskOutput(result any, expected *model.TaskExpectedOutput, taskType
 	if len(expected.Required) > 0 {
 		payloadMap, isMap := payload.(map[string]any)
 		rootMap, hasRootMap := result.(map[string]any)
+
+		if !isMap && !hasRootMap {
+			// If payload is a struct or custom map that wasn't normalized yet (e.g. if type wasn't specified as object/json)
+			if norm, err := normalizeJSONValue(payload); err == nil {
+				if nm, ok := norm.(map[string]any); ok {
+					payloadMap = nm
+					isMap = true
+					payload = nm
+					if isWrapped {
+						if resMap, ok := result.(map[string]any); ok {
+							resMap[wrapKey] = nm
+						}
+					} else {
+						result = nm
+					}
+				}
+			}
+		}
 
 		if !isMap && !hasRootMap {
 			return nil, &TaskValidationError{
