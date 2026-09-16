@@ -81,25 +81,28 @@ func TestBuildCubeAPMConditions(t *testing.T) {
 			want: `k8s.namespace.name:="payments"`,
 		},
 		{
-			name: "neq negates",
+			// level is backed by log.level and level, compared case-insensitively.
+			name: "neq negates the whole alias disjunction",
 			where: query.QueryWhereClause{Binary: query.BinaryWhereClause{
 				"level": {query.Nq: "debug"},
 			}},
-			want: `NOT log.level:="debug"`,
+			want: `NOT (log.level:~"(?i)^debug$" OR level:~"(?i)^debug$")`,
 		},
 		{
-			name: "contains becomes a substring match",
+			// Not _msg:"*timeout*": inside quotes LogsQL reads the asterisks
+			// literally and that form matched nothing.
+			name: "contains becomes an escaped case-insensitive regex",
 			where: query.QueryWhereClause{Binary: query.BinaryWhereClause{
-				"message": {query.Contains: "timeout"},
+				"message": {query.Contains: "time.out"},
 			}},
-			want: `_msg:"*timeout*"`,
+			want: `_msg:~"(?i)time\\.out"`,
 		},
 		{
 			name: "regex",
 			where: query.QueryWhereClause{Binary: query.BinaryWhereClause{
 				"level": {query.Regex: "error|warn"},
 			}},
-			want: `log.level:~"error|warn"`,
+			want: `(log.level:~"error|warn" OR level:~"error|warn")`,
 		},
 		{
 			name: "unmapped field passes through verbatim",
@@ -114,7 +117,7 @@ func TestBuildCubeAPMConditions(t *testing.T) {
 				{Binary: query.BinaryWhereClause{"level": {query.Eq: "error"}}},
 				{Binary: query.BinaryWhereClause{"level": {query.Eq: "fatal"}}},
 			}},
-			want: `((log.level:="error") OR (log.level:="fatal"))`,
+			want: `(((log.level:~"(?i)^error$" OR level:~"(?i)^error$")) OR ((log.level:~"(?i)^fatal$" OR level:~"(?i)^fatal$")))`,
 		},
 		{
 			name: "not wraps",
@@ -174,7 +177,8 @@ func TestBuildCubeAPMConditionsFansOutAliasedLabels(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: unexpected error: %v", label, err)
 		}
-		want := `(k8s.deployment.name:="payment" OR service:="payment")`
+		// service is consulted only where the deployment field is absent.
+		want := `(k8s.deployment.name:="payment" OR (service:="payment" AND NOT k8s.deployment.name:*))`
 		if got != want {
 			t.Errorf("%s: got %q, want %q", label, got, want)
 		}
@@ -191,7 +195,7 @@ func TestBuildCubeAPMConditionsNegatesTheWholeAliasDisjunction(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := `NOT (k8s.deployment.name:="payment" OR service:="payment")`
+	want := `NOT (k8s.deployment.name:="payment" OR (service:="payment" AND NOT k8s.deployment.name:*))`
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -579,7 +583,9 @@ func TestBuildCubeAPMLogGroupQuery(t *testing.T) {
 	// pod prefix — an equality on a deployment field misses StatefulSets and Jobs.
 	t.Run("workload filter is a pod prefix", func(t *testing.T) {
 		got := buildCubeAPMLogGroupQuery(cubeAPMLogGroupFields, "", "payments", "checkout-api", 0)
-		if !strings.Contains(got, `k8s.pod.name:"checkout-api-*"`) {
+		// The asterisk sits outside the quotes; `"checkout-api-*"` is a literal
+		// phrase in LogsQL and matched no pod.
+		if !strings.Contains(got, `k8s.pod.name:"checkout-api-"*`) {
 			t.Errorf("query missing pod prefix filter\ngot: %s", got)
 		}
 		if !strings.Contains(got, `k8s.namespace.name:="payments"`) {
@@ -597,7 +603,7 @@ func TestBuildCubeAPMLogGroupQuery(t *testing.T) {
 	// so the pod-prefix term alone matched nothing and emptied the view with no error.
 	t.Run("workload filter also matches the OTel service", func(t *testing.T) {
 		got := buildCubeAPMLogGroupQuery(cubeAPMLogGroupFields, "", "", "checkout-api", 0)
-		want := `(k8s.pod.name:"checkout-api-*" OR service:="checkout-api")`
+		want := `(k8s.pod.name:"checkout-api-"* OR service:="checkout-api")`
 		if !strings.Contains(got, want) {
 			t.Errorf("query missing %q\ngot: %s", want, got)
 		}
@@ -895,5 +901,115 @@ func TestBuildCubeAPMLabelValuesQueryIsPerFieldNotCombination(t *testing.T) {
 	if got, want := buildCubeAPMLabelValuesQuery("", fields[1], 50),
 		`service:* | uniq by (service) limit 50`; got != want {
 		t.Errorf("query mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// FetchLogs rewrites a where clause through GetLabelMapping() before the source
+// builds its query, so alias labels arrive already mapped (`workload` as
+// k8s.deployment.name, `level` as log.level). The OR across alias fields must
+// survive that step, or the second shape of instance matches nothing.
+func TestCubeAPMLogAliasesSurviveUpstreamMapping(t *testing.T) {
+	src := &CubeAPMLogSource{}
+	tests := []struct {
+		label, value string
+		want         string
+	}{
+		{"workload", "checkout", `(k8s.deployment.name:="checkout" OR (service:="checkout" AND NOT k8s.deployment.name:*))`},
+		{"app", "checkout", `(k8s.deployment.name:="checkout" OR (service:="checkout" AND NOT k8s.deployment.name:*))`},
+		{"level", "ERROR", `(log.level:~"(?i)^ERROR$" OR level:~"(?i)^ERROR$")`},
+		{"severity", "error", `(log.level:~"(?i)^error$" OR level:~"(?i)^error$")`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.label, func(t *testing.T) {
+			where := query.QueryWhereClause{Binary: query.BinaryWhereClause{tt.label: {query.Eq: tt.value}}}
+			mapped := convertWhereClauseWithMApping(where, src.GetLabelMapping())
+			got, err := buildCubeAPMConditions(mapped, cubeAPMLogLabelMapping)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("after upstream mapping\n got: %s\nwant: %s", got, tt.want)
+			}
+		})
+	}
+}
+
+// An account override that maps a label to another field is honoured as that one
+// field; the default aliases must not widen it.
+func TestCubeAPMLogAliasesRespectMappingOverride(t *testing.T) {
+	where := query.QueryWhereClause{Binary: query.BinaryWhereClause{"level": {query.Eq: "warn"}}}
+	mapped := convertWhereClauseWithMApping(where, map[string]string{"level": "severity_text"})
+	got, err := buildCubeAPMConditions(mapped, cubeAPMLogLabelMapping)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != `severity_text:="warn"` {
+		t.Errorf("got %s, want only the overridden field", got)
+	}
+}
+
+func TestCubeAPMLogValuesAreQuotedInRegexForms(t *testing.T) {
+	got, err := buildCubeAPMConditions(query.QueryWhereClause{Binary: query.BinaryWhereClause{
+		"message": {query.Contains: `a"b | delete`},
+	}}, cubeAPMLogLabelMapping)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != `_msg:~"(?i)a\"b \\| delete"` {
+		t.Errorf("got %s", got)
+	}
+}
+
+// The service fallback is consulted only on records WITHOUT a deployment field, so a
+// filter on the raw k8s.deployment.name does not pick up unrelated services, and
+// negation keeps the whole expression together.
+func TestCubeAPMLogWorkloadFallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		where query.QueryWhereClause
+		want  string
+	}{
+		{
+			name:  "canonical workload",
+			where: query.QueryWhereClause{Binary: query.BinaryWhereClause{"workload": {query.Eq: "api"}}},
+			want:  `(k8s.deployment.name:="api" OR (service:="api" AND NOT k8s.deployment.name:*))`,
+		},
+		{
+			name:  "raw field",
+			where: query.QueryWhereClause{Binary: query.BinaryWhereClause{"k8s.deployment.name": {query.Eq: "api"}}},
+			want:  `(k8s.deployment.name:="api" OR (service:="api" AND NOT k8s.deployment.name:*))`,
+		},
+		{
+			name:  "negation",
+			where: query.QueryWhereClause{Binary: query.BinaryWhereClause{"workload": {query.Nq: "api"}}},
+			want:  `NOT (k8s.deployment.name:="api" OR (service:="api" AND NOT k8s.deployment.name:*))`,
+		},
+		{
+			name:  "contains",
+			where: query.QueryWhereClause{Binary: query.BinaryWhereClause{"workload": {query.Contains: "api"}}},
+			want:  `(k8s.deployment.name:~"(?i)api" OR (service:~"(?i)api" AND NOT k8s.deployment.name:*))`,
+		},
+		{
+			// Filtering on `service` itself stays exact.
+			name:  "service is not widened",
+			where: query.QueryWhereClause{Binary: query.BinaryWhereClause{"service": {query.Eq: "api"}}},
+			want:  `service:="api"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildCubeAPMConditions(tt.where, cubeAPMLogLabelMapping)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("\n got: %s\nwant: %s", got, tt.want)
+			}
+		})
+	}
+
+	// Label values for the raw field list deployments only; `workload` still unions.
+	if got := cubeAPMFieldsFor("k8s.deployment.name", cubeAPMLogLabelMapping); len(got) != 1 {
+		t.Errorf("raw k8s.deployment.name resolves to %v, want the field alone", got)
 	}
 }

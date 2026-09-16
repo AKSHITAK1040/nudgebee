@@ -11,6 +11,7 @@ import (
 	"nudgebee/services/integrations"
 	"nudgebee/services/query"
 	"nudgebee/services/security"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,26 +74,67 @@ var cubeAPMLogLabelMapping = map[string]string{
 	"env":      "env",
 }
 
-// cubeAPMLogFieldAliases lists EVERY CubeAPM field a canonical label may be backed
-// by, for labels whose real field depends on how the instance is instrumented.
+// cubeAPMLogFieldAliases lists EVERY CubeAPM field a label may be backed by, for
+// labels whose real field depends on how the instance is instrumented.
 //
-// "workload" is the only such label today. A CubeAPM fed by the OTel k8s attributes
-// processor carries k8s.deployment.name; one fed straight from an instrumented app
-// carries only `service` and no k8s.* field at all — CubeAPM's own demo deployment
-// indexes exactly `_msg, _time, service, env, endpoint, path, log.level, trace_id`.
+// "workload": a CubeAPM fed by the OTel k8s attributes processor carries
+// k8s.deployment.name; one fed straight from an instrumented app carries only
+// `service` and no k8s.* field at all — CubeAPM's own demo deployment indexes
+// exactly `_msg, _time, service, env, endpoint, path, log.level, trace_id`.
+//
+// "level": CubeAPM's OTel SDK data sets `log.level`, while Kubernetes logs whose
+// JSON body was lifted apart at ingestion carry `level` — the same pair the log
+// group query coalesces (cubeAPMLogGroupFields.Level). On a live instance `level`
+// was on 89k records and `log.level` on 41, so filtering on `log.level` alone
+// matched almost nothing.
+//
 // Resolving to a single field makes the other shape match nothing and return an
 // empty result with no error, which reads as "no logs" rather than "wrong field".
+//
+// FetchLogs rewrites a where clause through GetLabelMapping() before this source
+// sees it, so `workload` arrives as `k8s.deployment.name` and `level` as
+// `log.level`; an alias keyed only by the canonical name never matched on that
+// path. The level pair is therefore also keyed by `log.level` (the two fields mean
+// the same thing). The workload pair is not keyed by `k8s.deployment.name` — that
+// would widen a filter on the raw field to unrelated `service` values — and is
+// handled by cubeAPMLogFieldFallbacks instead. An account override that maps a
+// label elsewhere arrives as that other field and is used as-is.
 //
 // Order matters only for readability; a filter ORs across all of them, so whichever
 // field the instance actually populates is the one that matches.
 var cubeAPMLogFieldAliases = map[string][]string{
-	"workload": {"k8s.deployment.name", "service"},
-	"app":      {"k8s.deployment.name", "service"},
+	"workload":  {"k8s.deployment.name", "service"},
+	"app":       {"k8s.deployment.name", "service"},
+	"level":     {"log.level", "level"},
+	"severity":  {"log.level", "level"},
+	"log.level": {"log.level", "level"},
 }
 
-// cubeAPMFieldsFor returns the CubeAPM fields a canonical label resolves to: the
-// alias list when the label has one, otherwise the single mapped field (or the
-// label itself when it is already a raw field name).
+// cubeAPMLogFieldFallbacks names a field consulted only on records that lack the
+// primary one. A workload filter becomes
+//
+//	(k8s.deployment.name:=X OR (service:=X AND NOT k8s.deployment.name:*))
+//
+// so an instance shipping Kubernetes attributes is matched exactly on the
+// deployment, while one with no k8s.* fields still matches on `service`. It applies
+// whether the filter names `workload` or arrives already mapped to
+// `k8s.deployment.name`, which is the only form FetchLogs passes on.
+var cubeAPMLogFieldFallbacks = map[string]string{
+	"k8s.deployment.name": "service",
+}
+
+// cubeAPMLogCaseInsensitiveFields are compared without regard to case on equality.
+// Severity is written in whatever case the application logs it — one live window
+// held both `ERROR` (202 records) and `error` (22) — and LogsQL `:=` is exact, so a
+// level filter would otherwise return one spelling and silently drop the other.
+var cubeAPMLogCaseInsensitiveFields = map[string]struct{}{
+	"log.level": {},
+	"level":     {},
+}
+
+// cubeAPMFieldsFor returns the CubeAPM fields a label resolves to: the alias list
+// when the label (canonical or already mapped) has one, otherwise the single mapped
+// field (or the label itself when it is already a raw field name).
 func cubeAPMFieldsFor(label string, mapping map[string]string) []string {
 	if aliases, ok := cubeAPMLogFieldAliases[label]; ok {
 		return aliases
@@ -171,6 +213,28 @@ func isSafeCubeAPMField(field string) bool {
 	return true
 }
 
+// renderCubeAPMMatch renders the POSITIVE match of one operator on one field;
+// the caller applies negation for _neq.
+func renderCubeAPMMatch(col string, op query.BinaryWhereClauseType, value string) (string, error) {
+	switch op {
+	case query.Eq, query.Nq:
+		if _, ci := cubeAPMLogCaseInsensitiveFields[col]; ci {
+			return fmt.Sprintf("%s:~%s", col, cubeAPMQuote("(?i)^"+regexp.QuoteMeta(value)+"$")), nil
+		}
+		return fmt.Sprintf("%s:=%s", col, cubeAPMQuote(value)), nil
+	case query.Contains, query.ILike:
+		// An escaped, case-insensitive regex. Not field:"*value*": inside quotes
+		// LogsQL reads the asterisks literally, so that form matched nothing on
+		// every field (verified live: 0 records for _msg:"*error*" against 783 for
+		// _msg:~"error").
+		return fmt.Sprintf("%s:~%s", col, cubeAPMQuote("(?i)"+regexp.QuoteMeta(value))), nil
+	case query.Regex:
+		return fmt.Sprintf("%s:~%s", col, cubeAPMQuote(value)), nil
+	default:
+		return "", fmt.Errorf("unsupported operator for CubeAPM logs: %s", op)
+	}
+}
+
 // buildCubeAPMBinaryClause renders one binary where-clause into LogsQL conditions.
 func buildCubeAPMBinaryClause(binary query.BinaryWhereClause, mapping map[string]string) (string, error) {
 	var parts []string
@@ -181,32 +245,43 @@ func buildCubeAPMBinaryClause(binary query.BinaryWhereClause, mapping map[string
 				return "", fmt.Errorf("invalid or unsafe field name: %q", col)
 			}
 		}
+		// A primary field with a fallback renders as primary OR (fallback AND the
+		// primary is absent), whether it arrived alone or with its alias pair.
+		primary, fallback := "", ""
+		if fb, ok := cubeAPMLogFieldFallbacks[cols[0]]; ok && (len(cols) == 1 || (len(cols) == 2 && cols[1] == fb)) {
+			primary, fallback = cols[0], fb
+		}
+
 		for op, val := range ops {
 			strVal := fmt.Sprintf("%v", val)
 
-			// Render the POSITIVE match once per candidate field. A label with a
-			// single field keeps the exact expression it always emitted; only a
-			// multi-field label grows the OR, so existing queries are unchanged.
-			match := make([]string, 0, len(cols))
-			for _, col := range cols {
-				switch op {
-				case query.Eq, query.Nq:
-					match = append(match, fmt.Sprintf("%s:=%s", col, cubeAPMQuote(strVal)))
-				case query.Contains, query.ILike:
-					// LogsQL's substring form is *value* and is already
-					// case-insensitive for the word index, which is the closest
-					// thing it has to ILIKE.
-					match = append(match, fmt.Sprintf("%s:%s", col, cubeAPMQuote("*"+strVal+"*")))
-				case query.Regex:
-					match = append(match, fmt.Sprintf("%s:~%s", col, cubeAPMQuote(strVal)))
-				default:
-					return "", fmt.Errorf("unsupported operator for CubeAPM logs: %s", op)
+			var clause string
+			if primary != "" {
+				p, err := renderCubeAPMMatch(primary, op, strVal)
+				if err != nil {
+					return "", err
 				}
-			}
-
-			clause := match[0]
-			if len(match) > 1 {
-				clause = "(" + strings.Join(match, " OR ") + ")"
+				f, err := renderCubeAPMMatch(fallback, op, strVal)
+				if err != nil {
+					return "", err
+				}
+				clause = fmt.Sprintf("(%s OR (%s AND NOT %s:*))", p, f, primary)
+			} else {
+				// Render the POSITIVE match once per candidate field. A label with a
+				// single field keeps the exact expression it always emitted; only a
+				// multi-field label grows the OR.
+				match := make([]string, 0, len(cols))
+				for _, col := range cols {
+					m, err := renderCubeAPMMatch(col, op, strVal)
+					if err != nil {
+						return "", err
+					}
+					match = append(match, m)
+				}
+				clause = match[0]
+				if len(match) > 1 {
+					clause = "(" + strings.Join(match, " OR ") + ")"
+				}
 			}
 			// Negation wraps the whole disjunction. Distributing it instead
 			// (NOT a OR NOT b) is always true whenever the two fields differ,
@@ -629,8 +704,8 @@ func (s *CubeAPMLogSource) QueryLabelValues(ctx *security.RequestContext, req Fe
 	seen := make(map[string]struct{}, cubeAPMLabelValueLimit)
 
 	// An alias label is backed by whichever field this instance populates, so ask
-	// each in turn and merge. Only `workload`/`app` have more than one field, and
-	// the unpopulated one returns no rows almost immediately.
+	// each in turn and merge. An unpopulated field returns no rows almost
+	// immediately.
 	for _, field := range fields {
 		logsQL := buildCubeAPMLabelValuesQuery(cfg.Env, field, cubeAPMLabelValueLimit)
 
@@ -823,8 +898,10 @@ func buildCubeAPMLogGroupQuery(f cubeAPMLogGroupFieldSet, env, selectedNamespace
 		// deployment name at all. OR'd with the service name so the filter still
 		// selects something on an instance that ships no k8s.* fields, where the
 		// pod-prefix term matches nothing and silently emptied the view.
-		conditions = append(conditions, fmt.Sprintf("(%s:%s OR %s:=%s)",
-			f.Pod, cubeAPMQuote(selectedWorkload+"-*"),
+		// The asterisk goes OUTSIDE the quotes: `"name-"*` is a prefix match, while
+		// `"name-*"` is a literal phrase that matched no pod at all (verified live).
+		conditions = append(conditions, fmt.Sprintf("(%s:%s* OR %s:=%s)",
+			f.Pod, cubeAPMQuote(selectedWorkload+"-"),
 			f.Service, cubeAPMQuote(selectedWorkload)))
 	}
 

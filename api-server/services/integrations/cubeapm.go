@@ -217,7 +217,7 @@ func (m CubeAPM) TestConnection(sc *security.RequestContext, config []core.Integ
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		return nil
+		return probeCubeAPMTraceQueryAPI(url, token)
 	case http.StatusUnauthorized:
 		return fmt.Errorf("CubeAPM rejected the credentials (HTTP 401) — check cubeapm_token")
 	case http.StatusForbidden:
@@ -228,6 +228,43 @@ func (m CubeAPM) TestConnection(sc *security.RequestContext, config []core.Integ
 	default:
 		return fmt.Errorf("CubeAPM API returned unexpected status: HTTP %d", resp.StatusCode)
 	}
+}
+
+// CubeAPMTracesQueryPath is the LogsQL trace query endpoint the trace source reads.
+const CubeAPMTracesQueryPath = "/api/traces/select/logsql/query"
+
+// probeCubeAPMTraceQueryAPI confirms the instance serves the LogsQL trace query
+// API. It is not in CubeAPM's published API reference, so an instance that lacks it
+// is caught when the integration is saved rather than surfacing later as an empty
+// Traces page. Only a missing endpoint fails the check: CubeAPM answers an unknown
+// path with 400 "unsupported path requested", a reverse proxy with 404. Any other
+// outcome is left to the query itself, since reachability and auth were already
+// proven by the metrics probe.
+func probeCubeAPMTraceQueryAPI(url, token string) error {
+	now := time.Now()
+	form := neturl.Values{}
+	form.Set("query", "* | limit 1")
+	form.Set("start", fmt.Sprintf("%d", now.Add(-5*time.Minute).Unix()))
+	form.Set("end", fmt.Sprintf("%d", now.Unix()))
+
+	resp, err := common.HttpPost(
+		url+CubeAPMTracesQueryPath,
+		common.HttpWithHeaders(CubeAPMRequestHeaders(token, "application/x-www-form-urlencoded")),
+		common.HttpWithBody(io.NopCloser(bytes.NewReader([]byte(form.Encode())))),
+		common.HttpWithTimeout(15*time.Second),
+	)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode == http.StatusNotFound ||
+		(resp.StatusCode == http.StatusBadRequest && strings.Contains(string(body), "unsupported path requested")) {
+		return fmt.Errorf("CubeAPM at %s does not serve the trace query API (%s) — traces from this "+
+			"CubeAPM cannot be shown; upgrade CubeAPM to a version with LogsQL trace search", url, CubeAPMTracesQueryPath)
+	}
+	return nil
 }
 
 // normalizeCubeAPMURL trims whitespace and strips any path/query/fragment so a URL

@@ -1,6 +1,8 @@
 package integrations
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -227,5 +229,59 @@ func TestGetCubeAPMConfigsRequiresAccountID(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "account_id is required") {
 		t.Errorf("error = %v", err)
+	}
+}
+
+// TestConnection must catch an instance without the LogsQL trace query API when
+// the integration is saved, instead of the Traces page later reading as empty.
+func TestProbeCubeAPMTraceQueryAPI(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr bool
+	}{
+		{"endpoint served", http.StatusOK, `{"_time":"2026-09-16T10:00:00Z"}`, false},
+		{"empty window is still served", http.StatusOK, "", false},
+		{"CubeAPM unknown path", http.StatusBadRequest, `unsupported path requested: "/select/logsql/query"`, true},
+		{"proxy 404", http.StatusNotFound, "not found", true},
+		// Anything else is the query's problem, not a missing API; reachability and
+		// auth were already proven by the metrics probe.
+		{"other 400", http.StatusBadRequest, "cannot parse query", false},
+		{"server error", http.StatusInternalServerError, "boom", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotPath, gotAuth string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+				w.WriteHeader(tt.status)
+				_, _ = w.Write([]byte(tt.body))
+			}))
+			defer srv.Close()
+
+			err := probeCubeAPMTraceQueryAPI(srv.URL, "tok")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), "trace query API") {
+				t.Errorf("error %q should name the missing trace query API", err)
+			}
+			if gotPath != CubeAPMTracesQueryPath {
+				t.Errorf("probed %q, want %q", gotPath, CubeAPMTracesQueryPath)
+			}
+			if gotAuth != "Bearer tok" {
+				t.Errorf("Authorization = %q, want the integration token", gotAuth)
+			}
+		})
+	}
+}
+
+// An unreachable instance is already reported by the metrics probe; the trace
+// probe must not turn a network blip into a second, misleading error.
+func TestProbeCubeAPMTraceQueryAPIIgnoresTransportErrors(t *testing.T) {
+	if err := probeCubeAPMTraceQueryAPI("http://127.0.0.1:1", ""); err != nil {
+		t.Errorf("err = %v, want nil on a transport failure", err)
 	}
 }
