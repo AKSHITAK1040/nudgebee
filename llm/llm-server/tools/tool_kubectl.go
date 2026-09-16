@@ -1307,10 +1307,23 @@ func isKnownReadOnlyKubectlPipelineFilter(parts []string) bool {
 	command := filepath.Base(parts[0])
 	switch command {
 	case "cat", "cut", "egrep", "fgrep", "grep", "head", "jq", "od", "rgrep", "tail", "tr", "wc":
+		for _, part := range parts[1:] {
+			if filterArgNamesFile(command, part) {
+				return false
+			}
+		}
 		return true
 	case "sort":
-		for _, part := range parts[1:] {
-			if part == "-o" || strings.HasPrefix(part, "-o") || part == "--output" || strings.HasPrefix(part, "--output=") {
+		for i := 1; i < len(parts); i++ {
+			part := parts[i]
+			if filterArgNamesFile("sort", part) {
+				return false
+			}
+			if isNumericValueFlag("sort", part) && i+1 < len(parts) && isDigitsOnly(parts[i+1]) {
+				i++
+				continue
+			}
+			if !strings.HasPrefix(part, "-") {
 				return false
 			}
 		}
