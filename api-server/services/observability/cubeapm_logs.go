@@ -566,6 +566,30 @@ func (s *CubeAPMLogSource) QueryLabels(ctx *security.RequestContext, req FetchLo
 	return labels, nil
 }
 
+// buildCubeAPMLabelValuesQuery emits a LogsQL pipeline that returns one row per
+// distinct value of a field.
+//
+// `uniq by` is the distinct, done server-side: the wire carries each value once
+// rather than once per matching record, and no count comes back with it. It
+// replaced `stats by (field) count() | sort`, which built a per-value counter for
+// every distinct value in the window and only then discarded all but 100 of them,
+// plus a sort nothing needed — on a high-cardinality field that is the label-value
+// picker holding the whole group set in memory to answer a dropdown.
+//
+// `limit N` is the memory bound, not a scan bound: LogsQL keeps unique entries in
+// memory during execution, and the limit caps how many it accumulates. Reaching it
+// returns an arbitrary subset, which is why values no longer arrive most-frequent
+// first — `uniq` output is unordered, and re-adding `sort` would reintroduce the
+// full-scan-and-rank this change exists to remove.
+//
+// One field per query, not `uniq by (f1, f2)`: that form returns unique SETS of the
+// listed fields, so on an instance populating both alias fields the limit would be
+// spent on (deployment, service) pairs and surface only a handful of real values.
+func buildCubeAPMLabelValuesQuery(env, field string, limit int) string {
+	return fmt.Sprintf(`%s | uniq by (%s) limit %d`,
+		cubeAPMBaseQuery(env, field+":*"), field, limit)
+}
+
 func (s *CubeAPMLogSource) QueryLabelValues(ctx *security.RequestContext, req FetchLogLabelValuesRequest) ([]OutputLogLabelValue, error) {
 	cfg, err := integrations.GetCubeAPMConfigs(ctx, req.AccountId)
 	if err != nil {
@@ -579,23 +603,22 @@ func (s *CubeAPMLogSource) QueryLabelValues(ctx *security.RequestContext, req Fe
 		}
 	}
 
-	// An alias label is backed by whichever field this instance populates, so ask
-	// each in turn and merge. The unpopulated one returns no rows, which costs one
-	// extra aggregation on a label the user is actively picking a value for.
 	values := make([]OutputLogLabelValue, 0, cubeAPMLabelValueLimit)
 	seen := make(map[string]struct{}, cubeAPMLabelValueLimit)
+
+	// An alias label is backed by whichever field this instance populates, so ask
+	// each in turn and merge. Only `workload`/`app` have more than one field, and
+	// the unpopulated one returns no rows almost immediately.
 	for _, field := range fields {
-		// `stats by (field)` is an exact distinct-value list, which sampling records
-		// would only approximate — a value that appears once in a million-line window
-		// is still a legitimate filter choice and a sample would miss it.
-		logsQL := fmt.Sprintf(`%s | stats by (%s) count() as cube_count | sort ("cube_count" desc) | limit %d`,
-			cubeAPMBaseQuery(cfg.Env, field+":*"), field, cubeAPMLabelValueLimit)
+		logsQL := buildCubeAPMLabelValuesQuery(cfg.Env, field, cubeAPMLabelValueLimit)
 
 		rows, err := cubeAPMLogSearch(cfg, logsQL, req.StartTime, req.EndTime, 0, cubeAPMLogQueryTimeout)
 		if err != nil {
 			return nil, err
 		}
 
+		// `uniq` already deduplicated within this field; the seen set is what keeps a
+		// value that both alias fields carry from appearing twice.
 		for _, row := range rows {
 			v := cubeAPMString(row[field])
 			if v == "" {
@@ -606,6 +629,9 @@ func (s *CubeAPMLogSource) QueryLabelValues(ctx *security.RequestContext, req Fe
 			}
 			seen[v] = struct{}{}
 			values = append(values, OutputLogLabelValue{Value: v, Attributes: map[string]any{}})
+			if len(values) >= cubeAPMLabelValueLimit {
+				return values, nil
+			}
 		}
 	}
 	return values, nil
