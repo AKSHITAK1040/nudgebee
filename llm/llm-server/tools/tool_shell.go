@@ -434,7 +434,7 @@ func wrapShellError(rawError, originalCommand string) string {
 // <unix-nano> pattern missed entirely, which let a piped `grep <guess> | head`
 // be reclassified as a benign no-match instead of surfacing the file-not-found
 // hint (see looksLikeMissingDynamicFile / shellErrorHint).
-var dynamicWorkspaceFilePattern = regexp.MustCompile(`\b(?:logs|metrics|traces|evidence_logs|event_labels|event_investigation_context|investigation_query)_[a-zA-Z0-9._-]+\.(?:txt|json)\b`)
+var dynamicWorkspaceFilePattern = regexp.MustCompile(`\b(?:logs|metrics|traces|evidence_logs|event|investigation_query)_[a-zA-Z0-9._-]+\.(?:txt|json)\b`)
 
 // looksLikeMissingDynamicFile reports whether response carries a "no such
 // file or directory" signal for a dynamic-workspace-shaped filename. In a

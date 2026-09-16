@@ -144,6 +144,11 @@ func TestLooksLikeMissingDynamicFile(t *testing.T) {
 			want:     true,
 		},
 		{
+			name:     "missing structured event evidence file",
+			response: "jq: error: Could not open event_77c1f690_evidence.json: No such file or directory\n",
+			want:     true,
+		},
+		{
 			name:     "missing system-offloaded investigation-query file",
 			response: "grep: investigation_query_abc123.txt: No such file or directory\n",
 			want:     true,

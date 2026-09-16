@@ -194,7 +194,20 @@ func TestInferKubectlVerbType(t *testing.T) {
 		{"unknown verb falls through", "kubectl frobnicate pods", ""},
 		{"missing kubectl prefix falls through", "describe pods -n nudgebee", ""},
 		{"other shell command falls through", "rm -rf /tmp/work", ""},
-		{"pipeline falls through", "kubectl get pods | grep api", ""},
+		{"read pipeline", "kubectl get pods | grep api", core.ToolRequestTypeRead},
+		{"read aggregation pipeline", "kubectl get pods -A --no-headers -o custom-columns=NAMESPACE:.metadata.namespace | sort | uniq -c", core.ToolRequestTypeRead},
+		{"read sort with flag", "kubectl get pods | sort -r", core.ToolRequestTypeRead},
+		{"read sort with detached numeric key", "kubectl get pods | sort -k 2", core.ToolRequestTypeRead},
+		{"pipeline with grep file option falls through", "kubectl get pods | grep -f /etc/passwd", ""},
+		{"pipeline with jq file option falls through", "kubectl get pods | jq -f /etc/passwd", ""},
+		{"pipeline with executable tail falls through", "kubectl get pods | xargs kubectl delete pod", ""},
+		{"pipeline with redirect falls through", "kubectl get pods | sort > pods.txt", ""},
+		{"pipeline with sort output file falls through", "kubectl get pods | sort -o pods.txt", ""},
+		{"pipeline with sort bundled output file falls through", "kubectl get pods | sort -ro pods.txt", ""},
+		{"pipeline with sort files0-from falls through", "kubectl get pods | sort --files0-from=list.txt", ""},
+		{"pipeline with sort input file falls through", "kubectl get pods | sort /etc/passwd", ""},
+		{"pipeline with uniq output file falls through", "kubectl get pods | uniq input.txt output.txt", ""},
+		{"pipeline with compound tail falls through", "kubectl get pods | grep api && rm -f marker", ""},
 		{"compound read then delete falls through", "kubectl get pods && kubectl delete pod api", ""},
 		{"redirect falls through", "kubectl get pods > pods.txt", ""},
 		{"command substitution falls through", "kubectl get pods -l \"app=$(cat selector)\"", ""},
@@ -360,6 +373,27 @@ func TestValidateKubectlCommandAccess(t *testing.T) {
 		`kubectl get pods >/dev/null; printf '\163ecrets' | xargs kubectl get`,
 		`kubectl get pods | cat /var/run/secrets/kubernetes.io/serviceaccount/token`,
 		`kubectl get pods | grep -e. /var/run/./secrets/kubernetes.io/serviceaccount/token`,
+		// File-naming filter options. The path rides in as the option's value
+		// (or after '='), so it is never counted as a positional and the
+		// arity budget alone let these through. jq quotes the file back in
+		// its parse error, making -f a direct read primitive.
+		`kubectl get pods -o json | jq -f /etc/passwd`,
+		`kubectl get pods -o json | jq --from-file /etc/passwd`,
+		`kubectl get pods -o json | jq --rawfile x /etc/passwd '$x'`,
+		`kubectl get pods | grep -f /etc/passwd`,
+		`kubectl get pods | grep --file=/etc/passwd`,
+		// Short options bundle, so the guard cannot prefix-match on "-f"/"-e".
+		`kubectl get pods | grep -if /etc/passwd`,
+		`kubectl get pods | grep -ie root`,
+		// File-writing and file-reading options on sort/uniq.
+		`kubectl get pods | sort -o /tmp/evil`,
+		`kubectl get pods | sort --output=/tmp/evil`,
+		`kubectl get pods | sort --output /tmp/evil`,
+		`kubectl get pods | sort -ro /tmp/evil`,
+		`kubectl get pods | sort --files0-from=/tmp/evil`,
+		`kubectl get pods | sort /etc/passwd`,
+		`kubectl get pods | uniq input.txt output.txt`,
+		`kubectl get pods | uniq input.txt`,
 	}
 	for _, command := range blocked {
 		require.Error(t, validateKubectlCommandAccess(command), command)
@@ -369,6 +403,37 @@ func TestValidateKubectlCommandAccess(t *testing.T) {
 	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods -o 'jsonpath={$.items[*].metadata.name}'`))
 	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods -o json | jq '.items | length'`))
 	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | grep 'foo bar'`))
+	// Options that do not name a file stay allowed. jq's -e is --exit-status,
+	// and grep's -E/-F are uppercase, so neither trips the letter check.
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | grep -i nginx`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | grep -v Running`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | grep -E 'a|b'`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | grep -F nginx`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods -o json | jq -e '.items'`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods -o json | jq -r '.items[].metadata.name'`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | head -20`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | wc -l`))
+	// A detached numeric flag value ("-A 20", not "-A20") used to be
+	// miscounted as a second positional and rejected outright.
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | grep -A 20 nginx`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl describe nodes | grep -A 5 "Allocated resources"`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get events -n ns | tail -n 20`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods -A | head -n 20`))
+	// sort and uniq pipeline filters
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | sort`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | sort -r`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | sort -n`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | sort -u`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | sort -k 2`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | sort -k2`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | uniq -c`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | uniq -i`))
+	require.NoError(t, validateKubectlCommandAccess(`kubectl get pods | sort | uniq -c`))
+	// The detached-value allowance must not smuggle in a real extra
+	// positional or a non-numeric operand.
+	require.Error(t, validateKubectlCommandAccess(`kubectl get pods | tail -n 20 extra`))
+	require.Error(t, validateKubectlCommandAccess(`kubectl get pods | grep -A pattern extra`))
+	require.Error(t, validateKubectlCommandAccess(`kubectl get pods | sort -k 2 extra`))
 }
 
 // TestKubectlErrorHint_Patterns pins the hint discriminator added for
