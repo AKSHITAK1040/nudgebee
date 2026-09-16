@@ -702,3 +702,38 @@ func TestCubeAPMBaseQueryFoldsFieldExistsCondition(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+func TestBuildCubeAPMLabelValuesQueryUsesDistinctNotAggregation(t *testing.T) {
+	q := buildCubeAPMLabelValuesQuery("prod", "service", 100)
+
+	want := `{env="prod"} service:* | uniq by (service) limit 100`
+	if q != want {
+		t.Fatalf("query mismatch\n got: %s\nwant: %s", q, want)
+	}
+	// The point of the change: distinct values off the wire, with no full-scan
+	// aggregation and no count nothing reads.
+	for _, banned := range []string{"stats by", "count()", "cube_count", "sort"} {
+		if strings.Contains(q, banned) {
+			t.Errorf("query must not contain %q: %s", banned, q)
+		}
+	}
+}
+
+func TestBuildCubeAPMLabelValuesQueryIsPerFieldNotCombination(t *testing.T) {
+	// Alias labels resolve to several fields. Each gets its own uniq query, because
+	// `uniq by (a, b)` would return distinct combinations and spend the limit on the
+	// cartesian product.
+	fields := cubeAPMFieldsFor("workload", cubeAPMLogLabelMapping)
+	if len(fields) != 2 {
+		t.Fatalf("expected workload to resolve to 2 fields, got %v", fields)
+	}
+
+	if got, want := buildCubeAPMLabelValuesQuery("", fields[0], 50),
+		`k8s.deployment.name:* | uniq by (k8s.deployment.name) limit 50`; got != want {
+		t.Errorf("query mismatch\n got: %s\nwant: %s", got, want)
+	}
+	if got, want := buildCubeAPMLabelValuesQuery("", fields[1], 50),
+		`service:* | uniq by (service) limit 50`; got != want {
+		t.Errorf("query mismatch\n got: %s\nwant: %s", got, want)
+	}
+}
