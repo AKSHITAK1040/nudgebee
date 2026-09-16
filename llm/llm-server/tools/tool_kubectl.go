@@ -508,7 +508,8 @@ func (m KubectlExecuteTool) Description() string {
 		**Usage:**
 
 		* **Prioritize this tool:** Whenever you require information about the user's cluster to make decisions or provide accurate responses, use this tool.
-		* **Input:** Provide a valid, 'kubectl' command as input. Shell piping (|) is supported — you can pipe kubectl output through grep, head, tail, awk, etc. Reads of Secret-bearing kinds (secrets, sealedsecrets, externalsecrets) and secret-mounted exec/cp are blocked.
+		* **Routing:** Availability does not make this tool the default for every Kubernetes command. Follow the active agent's system prompt when choosing between this direct tool and a workspace shell. If that prompt assigns Kubernetes reads to the workspace shell, do not use this tool for those reads; keep this direct path for mutations and commands with uncertain effects so approval and resume behavior is preserved.
+		* **Input:** Provide a valid, 'kubectl' command as input. Shell piping (|) is supported when the active agent routes the operation here; this support does not override its tool-routing policy. Reads of Secret-bearing kinds (secrets, sealedsecrets, externalsecrets) and secret-mounted exec/cp are blocked.
 		* **Output:** The tool will return the output of the executed command.
 
 		**Examples:**
@@ -518,13 +519,20 @@ func (m KubectlExecuteTool) Description() string {
 		* 'kubectl get events --sort-by=.metadata.creationTimestamp'
 		* 'kubectl get pods -A -o "custom-columns=NAME:.metadata.name,NAMESPACE:.metadata.namespace"'
 
+		**Investigation surface — 'kubectl describe':**
+
+		'kubectl describe <kind> <name>' is a primary investigation surface — it surfaces conditions, events, PVC binding status, image-pull errors, scheduling failures, and container state-transition history that 'kubectl get' omits. Use it (not just 'get') when diagnosing whether a resource is healthy — a bounded issue often shows only in describe output. Skip it for pure list/count queries.
+
 		**Log Commands — IMPORTANT:**
 
 		When fetching logs, ALWAYS use --tail or --since to limit output. Unfiltered logs can return hundreds of thousands of lines and overwhelm the response.
 		Combine --tail with grep/head/tail pipes ONLY when you already know what you're looking for (a known error string, a specific request id) or the volume genuinely needs it. When checking a specific, already-identified resource's logs for the first time — especially one that shows no restarts, no warning events, or otherwise looks healthy — read it unfiltered first: a keyword filter can only show you what you already expect, and a component that is failing quietly often logs the actual cause at INFO or without any error-shaped word at all. --tail/--since already bounds the volume; a filter on top of that is an extra, optional narrowing, not a required one.
 
-		* 'kubectl logs <pod> -n <namespace> --tail 200' — limit to recent lines
-		* 'kubectl logs <pod> -n <namespace> --tail 500 | grep -i -E "(error|exception|fatal|panic|fail|warn)"' — filter for errors
+		**Flag choice — --tail vs --since:** for a live snapshot of what a pod is emitting *right now*, use --tail. For any investigation over a *time window* (including "were there issues", "is X healthy", "what happened", "diagnose" — any historical question, even without an explicit clock time), use --since=<duration> — --tail=N returns only the last N lines wherever they land in time, so a bounded past incident that stopped logging becomes invisible under --tail. Default --since=24h for investigation queries with no time cue.
+
+		**Timestamps:** modern apps emit structured logs (JSON/klog/logfmt) with their own timestamp field — extract the incident window from those, not from a --timestamps prefix. Only add --timestamps as a fallback when the app's output is unstructured and carries no embedded time of its own; mixing kubectl's ingestion prefix with an app-emitted timestamp on the same line is a common source of wrong-time answers.
+
+		* 'kubectl logs <pod> -n <namespace> --since=24h | grep -i -E "(error|refused|timeout|reset|panic|OOM)"' — investigation over a bounded historical window (extract incident time from the app's own embedded timestamps in the matches)
 		* 'kubectl logs <pod> -n <namespace> --since=1h | grep -i error' — recent logs with error filter
 		* 'kubectl logs <pod> -n <namespace> --since=6h | grep -i -E "(connection|timeout|retry)" | head -50' — indirect failure signals over a widened window
 		* 'kubectl logs <pod> -n <namespace> --since=24h --timestamps | grep -i failure' — FALLBACK: use --timestamps only when the app's own logs carry no embedded time
@@ -534,7 +542,6 @@ func (m KubectlExecuteTool) Description() string {
 		* 'kubectl logs <pod> -n <namespace> --tail 500 | grep -i -B2 -A2 error' — errors with surrounding context
 		* 'kubectl logs <pod> -n <namespace> --tail 500 | awk "/error|exception/,/^$/"' — extract error blocks
 		* 'kubectl logs <pod> -n <namespace> -p --tail 200' — previous container logs (crash loops)
-		* 'kubectl logs <pod> -n <namespace> --tail 500 | tail -100' — last 100 lines of recent 500
 
 		**Important Notes:**
 
@@ -728,12 +735,12 @@ func splitShellWords(input string) ([]string, bool) {
 // isSafeKubectlPipelineFilter below.
 const kubectlCommandGrammarHint = "Send exactly one kubectl command, " +
 	"optionally piped into a single filter: grep/egrep/fgrep/rgrep/jq (at most one pattern argument) " +
-	"or head/tail/wc (flags only). Loops, subshells, redirections, command substitution and " +
+	"or head/tail/wc/sort/uniq (flags only). Loops, subshells, redirections, command substitution and " +
 	"multiple kubectl calls are not accepted. To aggregate across namespaces or resources, " +
 	"issue one kubectl call per target and combine the results yourself."
 
 // isSafeKubectlPipelineFilter accepts only filters whose arguments cannot name
-// an input file. grep/jq get one positional expression; head/tail/wc get none
+// an input file. grep/jq get one positional expression; head/tail/wc/sort/uniq get none
 // and therefore must consume stdin. This intentionally rejects richer option
 // forms when their operand roles are ambiguous.
 func isSafeKubectlPipelineFilter(parts []string) bool {
@@ -744,7 +751,7 @@ func isSafeKubectlPipelineFilter(parts []string) bool {
 	switch parts[0] {
 	case "grep", "egrep", "fgrep", "rgrep", "jq":
 		maxPositionals = 1
-	case "head", "tail", "wc":
+	case "head", "tail", "wc", "sort", "uniq":
 		maxPositionals = 0
 	default:
 		return false
@@ -787,6 +794,11 @@ func isNumericValueFlag(cmd, part string) bool {
 		case "-n", "-c":
 			return true
 		}
+	case "sort":
+		switch part {
+		case "-k":
+			return true
+		}
 	}
 	return false
 }
@@ -819,9 +831,10 @@ func filterArgNamesFile(cmd, part string) bool {
 	}
 	isGrep := strings.Contains(cmd, "grep")
 	isJq := cmd == "jq"
-	// head/tail/wc read stdin only; they take no file-valued option, and their
+	isSort := cmd == "sort"
+	// head/tail/wc/uniq read stdin only; they take no file-valued option, and their
 	// zero-positional budget already rejects a bare path.
-	if !isGrep && !isJq {
+	if !isGrep && !isJq && !isSort {
 		return false
 	}
 
@@ -839,14 +852,21 @@ func filterArgNamesFile(cmd, part string) bool {
 			// jq reads the program (--from-file) or raw data (--rawfile and
 			// friends) straight off disk and can echo it to stdout.
 			return isJq
+		case "output", "files0-from":
+			// sort --output writes to a file; --files0-from reads input list from a file.
+			return isSort
 		}
 		return false
 	}
 
 	// grep: -f names a pattern file, -e a pattern that may name a path.
 	// jq: -f names a program file; its -e is --exit-status and is harmless.
+	// sort: -o writes to a file.
 	if isGrep {
 		return strings.ContainsAny(part[1:], "ef")
+	}
+	if isSort {
+		return strings.ContainsRune(part[1:], 'o')
 	}
 	return strings.ContainsAny(part[1:], "f")
 }
@@ -1179,6 +1199,28 @@ func (m KubectlExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestCont
 // fall through to InferToolRequestTypePrompt so the safety posture remains
 // fail-closed.
 func inferKubectlVerbType(command string) core.ToolRequestType {
+	// A read-only kubectl command followed only by argument-processing filters
+	// remains a read. kubectl_execute accepts these bounded pipelines, and
+	// classifying the whole string as unknown would pay for an unnecessary LLM
+	// safety decision on the dominant aggregation shape (`get | sort | uniq`).
+	// Keep the tail allowlist deliberately narrow: shells, xargs, awk, sed, tee,
+	// substitutions, redirections, and compound operators still fall through.
+	stages := splitShellPipeline(command)
+	if len(stages) > 1 {
+		if inferKubectlVerbType(stages[0]) != core.ToolRequestTypeRead {
+			return ""
+		}
+		for _, stage := range stages[1:] {
+			if hasUnquotedShellSyntax(stage) {
+				return ""
+			}
+			parts, err := shlex.Split(strings.TrimSpace(stage))
+			if err != nil || !isKnownReadOnlyKubectlPipelineFilter(parts) {
+				return ""
+			}
+		}
+		return core.ToolRequestTypeRead
+	}
 	if hasUnquotedShellSyntax(command) {
 		return ""
 	}
@@ -1253,6 +1295,40 @@ func inferKubectlVerbType(command string) core.ToolRequestType {
 	return ""
 }
 
+// isKnownReadOnlyKubectlPipelineFilter permits only stdout-oriented local
+// transforms after a read-only kubectl invocation. This is intentionally
+// narrower than shellArgumentOnlyUtilities: that list answers whether arguments
+// may contain command names, whereas this function must also reject utility
+// modes that can write files (for example sort -o or uniq INPUT OUTPUT).
+func isKnownReadOnlyKubectlPipelineFilter(parts []string) bool {
+	if len(parts) == 0 {
+		return false
+	}
+	command := filepath.Base(parts[0])
+	switch command {
+	case "cat", "cut", "egrep", "fgrep", "grep", "head", "jq", "od", "rgrep", "tail", "tr", "wc":
+		return true
+	case "sort":
+		for _, part := range parts[1:] {
+			if part == "-o" || strings.HasPrefix(part, "-o") || part == "--output" || strings.HasPrefix(part, "--output=") {
+				return false
+			}
+		}
+		return true
+	case "uniq":
+		// uniq accepts positional INPUT and OUTPUT files. In a pipeline it needs
+		// only flags; any positional argument makes the effect ambiguous.
+		for _, part := range parts[1:] {
+			if !strings.HasPrefix(part, "-") {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
 // hasUnquotedShellSyntax reports command shapes whose overall intent cannot be
 // inferred from one kubectl verb. Operators inside single/double quotes are
 // arguments (for example JSONPath); substitutions remain executable inside
@@ -1280,7 +1356,7 @@ func hasUnquotedShellSyntax(command string) bool {
 		if singleQuoted {
 			continue
 		}
-		if char == '`' || (char == '$' && i+1 < len(command) && command[i+1] == '(') {
+		if char == '`' || char == '$' {
 			return true
 		}
 		if !doubleQuoted && strings.ContainsRune("|&;<>\n\r(){}", rune(char)) {
