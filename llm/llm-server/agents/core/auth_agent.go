@@ -22,7 +22,11 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 		// by the agent. Apply that same injection at dispatch, while enforcing
 		// restrictions before any legacy or discovered-tool fallback can accept it.
 		caps := request.Capabilities.Merge(request.QueryConfig.Capabilities)
-		knowledgeTool, registered := toolcore.GetNBTool(request.AccountId, strings.ToLower(canonicalToolName))
+		var knowledgeTool toolcore.NBTool
+		var registered bool
+		if request.AccountId != "" {
+			knowledgeTool, registered = toolcore.GetNBTool(request.AccountId, strings.ToLower(canonicalToolName))
+		}
 		policy := request.KnowledgePolicy
 		if policy == "" {
 			policy = KnowledgeAuto
@@ -47,9 +51,11 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 	if !found {
 		// check if it's a builtin tool like load_skills or shell_execute
 		if strings.EqualFold(toolName, "load_skills") || strings.EqualFold(toolName, toolcore.ToolExecuteShellCommand) {
-			if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok {
-				found = true
-				tool = t
+			if request.AccountId != "" {
+				if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok && t != nil {
+					found = true
+					tool = t
+				}
 			}
 		}
 	}
@@ -60,9 +66,11 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 		// them — otherwise the LLM emits a watch_resource action that gets rejected
 		// at dispatch time even though the tool was advertised in the prompt.
 		if config.Config.WatchEnabled && isWatchToolName(toolName) {
-			if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok {
-				found = true
-				tool = t
+			if request.AccountId != "" {
+				if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok && t != nil {
+					found = true
+					tool = t
+				}
 			}
 		}
 	}
@@ -74,9 +82,11 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 		// the planner advertises it, the model calls it, and dispatch rejects it with
 		// "auth: tool not found", burning an iteration and losing the notebook update.
 		if isNotebookToolName(toolName) {
-			if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok {
-				found = true
-				tool = t
+			if request.AccountId != "" {
+				if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok && t != nil {
+					found = true
+					tool = t
+				}
 			}
 		}
 	}

@@ -61,6 +61,9 @@ func parseKnowledgePolicy(value string) (KnowledgePolicy, error) {
 // Read on each invocation: policy changes (especially disabled) must not wait
 // for a process-local cache to expire. No tenant or per-agent overrides.
 func resolveKnowledgePolicy(ctx *security.RequestContext, accountID string) (KnowledgePolicy, error) {
+	if accountID == "" {
+		return KnowledgeAuto, nil
+	}
 	db, err := common.GetDatabaseManager(common.Metastore)
 	if err != nil {
 		return "", fmt.Errorf("knowledge policy database: %w", err)

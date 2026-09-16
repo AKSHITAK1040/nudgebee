@@ -164,8 +164,8 @@ func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt st
 		found := lo.ContainsBy(toolList, func(t toolcore.NBTool) bool {
 			return strings.EqualFold(t.Name(), toolcore.ToolExecuteShellCommand)
 		})
-		if !found {
-			if t, ok := toolcore.GetNBTool(accountId, toolcore.ToolExecuteShellCommand); ok {
+		if !found && accountId != "" {
+			if t, ok := toolcore.GetNBTool(accountId, toolcore.ToolExecuteShellCommand); ok && t != nil {
 				toolList = append(toolList, t)
 			}
 		}
@@ -182,8 +182,10 @@ func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt st
 				if already {
 					continue
 				}
-				if t, ok := toolcore.GetNBTool(accountId, watchToolName); ok {
-					toolList = append(toolList, t)
+				if accountId != "" {
+					if t, ok := toolcore.GetNBTool(accountId, watchToolName); ok && t != nil {
+						toolList = append(toolList, t)
+					}
 				}
 			}
 		}
@@ -199,8 +201,8 @@ func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt st
 		found := lo.ContainsBy(toolList, func(t toolcore.NBTool) bool {
 			return t.Name() == "load_skills"
 		})
-		if !found {
-			if t, ok := toolcore.GetNBTool(accountId, "load_skills"); ok {
+		if !found && accountId != "" {
+			if t, ok := toolcore.GetNBTool(accountId, "load_skills"); ok && t != nil {
 				toolList = append(toolList, t)
 			}
 		}
