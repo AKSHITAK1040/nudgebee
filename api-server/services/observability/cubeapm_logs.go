@@ -668,27 +668,128 @@ var cubeAPMErrorSeverities = []string{"error", "err", "critical", "crit", "fatal
 // OpenObserve log-group paths already apply.
 var cubeAPMExcludedContainers = []string{"istio-proxy", "linkerd-proxy", "envoy", "vault-agent", "config-reloader"}
 
-// cubeAPMLogGroupFields are the grouping dimensions, paired with the LogGroup field
-// each populates.
-var cubeAPMLogGroupFields = struct {
-	Message   string
+// cubeAPMLogGroupFieldSet names the CubeAPM field behind each grouping dimension,
+// paired with the LogGroup field each populates.
+//
+// Message and Level are ordered candidate lists, highest priority first, because
+// one instance routinely carries both shapes: CubeAPM's own OTel SDK data sets
+// `log.level` and `_msg`, while Kubernetes logs whose JSON body was lifted apart at
+// ingestion carry `level` and a short `msg` beside the full line in `_msg`. The
+// query coalesces each list into one synthetic field, so a record is grouped on the
+// first candidate it actually has.
+type cubeAPMLogGroupFieldSet struct {
+	Message   []string
 	Namespace string
 	Pod       string
 	Workload  string
 	Container string
-	Level     string
+	Level     []string
 	Service   string
-}{
-	Message:   "_msg",
+}
+
+// The synthetic fields the group query coalesces Message and Level into.
+const (
+	cubeAPMLogGroupMessageField = "cube_message"
+	cubeAPMLogGroupLevelField   = "cube_level"
+)
+
+// cubeAPMLogGroupFields is the field set an account with no label-mapping override
+// groups on.
+var cubeAPMLogGroupFields = cubeAPMLogGroupFieldSet{
+	// `msg` first: grouping a JSON log on its full line groups on the timestamp
+	// embedded in it, one group per record. `_msg` stays the fallback for plain-text
+	// lines and for records with no separate message field.
+	Message:   []string{"msg", "_msg"},
 	Namespace: "k8s.namespace.name",
 	Pod:       "k8s.pod.name",
 	Workload:  "k8s.deployment.name",
 	Container: "k8s.container.name",
-	Level:     "log.level",
+	Level:     []string{"log.level", "level"},
 	// The OTel-native identity, present whether or not the k8s.* fields are. It is
 	// grouped on so a group still has a name to show — and a filter to drill into —
 	// on an instance that ships no Kubernetes attributes. See cubeAPMLogFieldAliases.
 	Service: "service",
+}
+
+// cubeAPMLogGroupFieldsFromMapping resolves the grouping fields through the account's
+// merged label mapping, so a remap in Advanced Settings (say `level` -> `severity`)
+// changes the Log Groups query the same way it already changes the Logs filters.
+//
+// Where two canonical names back one dimension (`level`/`severity`,
+// `app`/`workload`), the first one mapped away from the provider default wins, so
+// an operator editing either name is honoured. For Message and Level the override
+// is tried first and the defaults stay behind it, so remapping to a field only some
+// records carry does not drop the rest. A mapped value that is not a safe LogsQL
+// field name is ignored rather than interpolated into the pipeline.
+func cubeAPMLogGroupFieldsFromMapping(mapping map[string]string) cubeAPMLogGroupFieldSet {
+	d := cubeAPMLogGroupFields
+	override := func(canonical ...string) string {
+		for _, name := range canonical {
+			v := strings.TrimSpace(mapping[name])
+			if v != "" && v != cubeAPMLogLabelMapping[name] && isSafeCubeAPMField(v) {
+				return v
+			}
+		}
+		return ""
+	}
+	pick := func(def string, canonical ...string) string {
+		if v := override(canonical...); v != "" {
+			return v
+		}
+		return def
+	}
+	candidates := func(defaults []string, canonical ...string) []string {
+		return cubeAPMDedupeFields(append([]string{override(canonical...)}, defaults...))
+	}
+	return cubeAPMLogGroupFieldSet{
+		Message:   candidates(d.Message, "message", "body"),
+		Namespace: pick(d.Namespace, "namespace"),
+		Pod:       pick(d.Pod, "pod"),
+		Workload:  pick(d.Workload, "workload", "app"),
+		Container: pick(d.Container, "container"),
+		Level:     candidates(d.Level, "level", "severity"),
+		Service:   pick(d.Service, "service"),
+	}
+}
+
+// cubeAPMDedupeFields drops empty and repeated entries, keeping first-seen order.
+func cubeAPMDedupeFields(values []string) []string {
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, v := range values {
+		if _, dup := seen[v]; v == "" || dup {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+// cubeAPMAnyOf renders one condition per field, OR'd, as a single term.
+func cubeAPMAnyOf(fields []string, condition func(field string) string) string {
+	terms := make([]string, len(fields))
+	for i, field := range fields {
+		terms[i] = condition(field)
+	}
+	if len(terms) == 1 {
+		return terms[0]
+	}
+	return "(" + strings.Join(terms, " OR ") + ")"
+}
+
+// cubeAPMCoalescePipes copies the first present candidate into target. Pipes run
+// lowest priority first, each overwriting the last only when its field exists.
+func cubeAPMCoalescePipes(candidates []string, target string) []string {
+	pipes := make([]string, 0, len(candidates))
+	for i := len(candidates) - 1; i >= 0; i-- {
+		if i == len(candidates)-1 {
+			pipes = append(pipes, fmt.Sprintf(`format "<%s>" as %s`, candidates[i], target))
+			continue
+		}
+		pipes = append(pipes, fmt.Sprintf(`format if (%s:*) "<%s>" as %s`, candidates[i], candidates[i], target))
+	}
+	return pipes
 }
 
 // buildCubeAPMLogGroupQuery emits a LogsQL pipeline that aggregates error logs
@@ -697,16 +798,16 @@ var cubeAPMLogGroupFields = struct {
 // Grouping on the exact message matches every other provider here:
 // generatePatternHash is a hash of the raw message bytes, so pulling raw records
 // back to group them in Go would cost a full scan for no extra fidelity.
-func buildCubeAPMLogGroupQuery(env, selectedNamespace, selectedWorkload string, limit int) string {
+func buildCubeAPMLogGroupQuery(f cubeAPMLogGroupFieldSet, env, selectedNamespace, selectedWorkload string, limit int) string {
 	if limit <= 0 {
 		limit = cubeAPMLogGroupLimit
 	}
-	f := cubeAPMLogGroupFields
+	severityRe := cubeAPMQuote("(?i)^(" + strings.Join(cubeAPMErrorSeverities, "|") + ")$")
 
 	conditions := []string{
 		// A record with no message has nothing to group on or display.
-		fmt.Sprintf("%s:*", f.Message),
-		fmt.Sprintf("%s:~%s", f.Level, cubeAPMQuote("(?i)^("+strings.Join(cubeAPMErrorSeverities, "|")+")$")),
+		cubeAPMAnyOf(f.Message, func(field string) string { return field + ":*" }),
+		cubeAPMAnyOf(f.Level, func(field string) string { return field + ":~" + severityRe }),
 	}
 
 	for _, c := range cubeAPMExcludedContainers {
@@ -727,10 +828,17 @@ func buildCubeAPMLogGroupQuery(env, selectedNamespace, selectedWorkload string, 
 			f.Service, cubeAPMQuote(selectedWorkload)))
 	}
 
-	groupBy := strings.Join([]string{f.Message, f.Namespace, f.Pod, f.Workload, f.Container, f.Level, f.Service}, ", ")
+	pipes := append(cubeAPMCoalescePipes(f.Message, cubeAPMLogGroupMessageField),
+		cubeAPMCoalescePipes(f.Level, cubeAPMLogGroupLevelField)...)
 
-	return fmt.Sprintf(`%s | stats by (%s) count() as cube_count | sort ("cube_count" desc) | limit %d`,
-		cubeAPMBaseQuery(env, strings.Join(conditions, " AND ")), groupBy, limit)
+	// A remap can point two dimensions at one field (workload -> service); name it
+	// once, since `stats by` rejects a repeated field.
+	groupBy := strings.Join(cubeAPMDedupeFields([]string{
+		cubeAPMLogGroupMessageField, f.Namespace, f.Pod, f.Workload, f.Container, cubeAPMLogGroupLevelField, f.Service,
+	}), ", ")
+
+	return fmt.Sprintf(`%s | %s | stats by (%s) count() as cube_count | sort ("cube_count" desc) | limit %d`,
+		cubeAPMBaseQuery(env, strings.Join(conditions, " AND ")), strings.Join(pipes, " | "), groupBy, limit)
 }
 
 // QueryLogGroup makes CubeAPMLogSource satisfy LogGroupSource, so the Log Groups
@@ -742,7 +850,9 @@ func (s *CubeAPMLogSource) QueryLogGroup(ctx *security.RequestContext, req Fetch
 		return LogGroupOutput{}, fmt.Errorf("failed to get CubeAPM configs: %w", err)
 	}
 
+	fields := cubeAPMLogGroupFieldsFromMapping(getMergedLabelMapping(ctx, req.AccountId, s))
 	logsQL := buildCubeAPMLogGroupQuery(
+		fields,
 		cfg.Env,
 		common.GetString(req.Request, "selectedNamespace"),
 		common.GetString(req.Request, "selectedWorkload"),
@@ -767,17 +877,16 @@ func (s *CubeAPMLogSource) QueryLogGroup(ctx *security.RequestContext, req Fetch
 	// functions have no max()), so every group is stamped with the end of the
 	// query window — the same fallback the OpenObserve path uses for groups whose
 	// aggregate timestamp is missing.
-	return convertCubeAPMLogGroups(rows, endMs/1000), nil
+	return convertCubeAPMLogGroups(fields, rows, endMs/1000), nil
 }
 
 // convertCubeAPMLogGroups maps aggregated rows onto the shared LogGroup contract.
 // Timestamps are emitted in epoch seconds — the frontend multiplies by 1000.
-func convertCubeAPMLogGroups(rows []map[string]any, timestampSec int64) LogGroupOutput {
-	f := cubeAPMLogGroupFields
+func convertCubeAPMLogGroups(f cubeAPMLogGroupFieldSet, rows []map[string]any, timestampSec int64) LogGroupOutput {
 	groups := make([]LogGroup, 0, len(rows))
 
 	for _, row := range rows {
-		sample := cubeAPMString(row[f.Message])
+		sample := cubeAPMString(row[cubeAPMLogGroupMessageField])
 		if sample == "" {
 			continue
 		}
@@ -807,7 +916,7 @@ func convertCubeAPMLogGroups(rows []map[string]any, timestampSec int64) LogGroup
 			Namespace:   cubeAPMString(row[f.Namespace]),
 			Workload:    workload,
 			Container:   cubeAPMString(row[f.Container]),
-			Level:       cubeAPMString(row[f.Level]),
+			Level:       cubeAPMString(row[cubeAPMLogGroupLevelField]),
 			Count:       count,
 			Timestamps:  []int64{timestampSec},
 			Values:      []float64{float64(count)},

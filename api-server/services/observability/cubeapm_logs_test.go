@@ -1,6 +1,7 @@
 package observability
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -551,16 +552,20 @@ func TestCubeAPMTimeRangeMillis(t *testing.T) {
 	})
 }
 
+const cubeAPMTestSeverityRe = `"(?i)^(error|err|critical|crit|fatal|emergency|alert|panic|severe)$"`
+
 func TestBuildCubeAPMLogGroupQuery(t *testing.T) {
 	t.Run("includes severity, exclusions and the pipeline", func(t *testing.T) {
-		got := buildCubeAPMLogGroupQuery("prod", "", "", 50)
+		got := buildCubeAPMLogGroupQuery(cubeAPMLogGroupFields, "prod", "", "", 50)
 
 		for _, want := range []string{
 			`{env="prod"}`,
-			`_msg:*`,
-			`log.level:~"(?i)^(error|err|critical|crit|fatal|emergency|alert|panic|severe)$"`,
+			`(msg:* OR _msg:*)`,
+			`(log.level:~` + cubeAPMTestSeverityRe + ` OR level:~` + cubeAPMTestSeverityRe + `)`,
 			`NOT k8s.container.name:="istio-proxy"`,
-			`| stats by (_msg, k8s.namespace.name, k8s.pod.name, k8s.deployment.name, k8s.container.name, log.level, service) count() as cube_count`,
+			`| format "<_msg>" as cube_message | format if (msg:*) "<msg>" as cube_message`,
+			`| format "<level>" as cube_level | format if (log.level:*) "<log.level>" as cube_level`,
+			`| stats by (cube_message, k8s.namespace.name, k8s.pod.name, k8s.deployment.name, k8s.container.name, cube_level, service) count() as cube_count`,
 			`| sort ("cube_count" desc)`,
 			`| limit 50`,
 		} {
@@ -573,7 +578,7 @@ func TestBuildCubeAPMLogGroupQuery(t *testing.T) {
 	// Pods are named {workload}-{replica-suffix}, so a workload filter has to be a
 	// pod prefix — an equality on a deployment field misses StatefulSets and Jobs.
 	t.Run("workload filter is a pod prefix", func(t *testing.T) {
-		got := buildCubeAPMLogGroupQuery("", "payments", "checkout-api", 0)
+		got := buildCubeAPMLogGroupQuery(cubeAPMLogGroupFields, "", "payments", "checkout-api", 0)
 		if !strings.Contains(got, `k8s.pod.name:"checkout-api-*"`) {
 			t.Errorf("query missing pod prefix filter\ngot: %s", got)
 		}
@@ -583,7 +588,7 @@ func TestBuildCubeAPMLogGroupQuery(t *testing.T) {
 	})
 
 	t.Run("zero limit falls back to the default", func(t *testing.T) {
-		if !strings.Contains(buildCubeAPMLogGroupQuery("", "", "", 0), "| limit 100") {
+		if !strings.Contains(buildCubeAPMLogGroupQuery(cubeAPMLogGroupFields, "", "", "", 0), "| limit 100") {
 			t.Error("expected the default log-group limit")
 		}
 	})
@@ -591,7 +596,7 @@ func TestBuildCubeAPMLogGroupQuery(t *testing.T) {
 	// A CubeAPM fed straight from an instrumented app carries no k8s.* field at all,
 	// so the pod-prefix term alone matched nothing and emptied the view with no error.
 	t.Run("workload filter also matches the OTel service", func(t *testing.T) {
-		got := buildCubeAPMLogGroupQuery("", "", "checkout-api", 0)
+		got := buildCubeAPMLogGroupQuery(cubeAPMLogGroupFields, "", "", "checkout-api", 0)
 		want := `(k8s.pod.name:"checkout-api-*" OR service:="checkout-api")`
 		if !strings.Contains(got, want) {
 			t.Errorf("query missing %q\ngot: %s", want, got)
@@ -599,27 +604,125 @@ func TestBuildCubeAPMLogGroupQuery(t *testing.T) {
 	})
 }
 
+// With no override the merged mapping is the provider default, which resolves to
+// the default field set.
+func TestCubeAPMLogGroupFieldsFromDefaultMapping(t *testing.T) {
+	if got := cubeAPMLogGroupFieldsFromMapping(cubeAPMLogLabelMapping); !reflect.DeepEqual(got, cubeAPMLogGroupFields) {
+		t.Errorf("fields = %+v, want the defaults %+v", got, cubeAPMLogGroupFields)
+	}
+	if got := cubeAPMLogGroupFieldsFromMapping(nil); !reflect.DeepEqual(got, cubeAPMLogGroupFields) {
+		t.Errorf("nil mapping: fields = %+v, want the defaults", got)
+	}
+}
+
+// An operator remapping labels in Advanced Settings changes the Log Groups query,
+// not only the Logs filters.
+func TestCubeAPMLogGroupQueryFollowsLabelMapping(t *testing.T) {
+	mapping := map[string]string{}
+	for k, v := range cubeAPMLogLabelMapping {
+		mapping[k] = v
+	}
+	mapping["level"] = "severity_text"
+	mapping["message"] = "body_text"
+	mapping["namespace"] = "kubernetes.namespace"
+
+	f := cubeAPMLogGroupFieldsFromMapping(mapping)
+	got := buildCubeAPMLogGroupQuery(f, "", "payments", "", 0)
+
+	for _, want := range []string{
+		// The override is tried first; the defaults stay behind it so records that
+		// lack the remapped field are not dropped.
+		`(body_text:* OR msg:* OR _msg:*)`,
+		`(severity_text:~` + cubeAPMTestSeverityRe + ` OR log.level:~` + cubeAPMTestSeverityRe + ` OR level:~` + cubeAPMTestSeverityRe + `)`,
+		`format if (body_text:*) "<body_text>" as cube_message | format "<`,
+		`format if (severity_text:*) "<severity_text>" as cube_level`,
+		`kubernetes.namespace:="payments"`,
+		`| stats by (cube_message, kubernetes.namespace, k8s.pod.name, k8s.deployment.name, k8s.container.name, cube_level, service) count() as cube_count`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("query missing %q\ngot: %s", want, got)
+		}
+	}
+	// The override must be the LAST format pipe, so it wins over the defaults.
+	if !strings.HasSuffix(strings.Split(got, " | stats")[0], `format if (severity_text:*) "<severity_text>" as cube_level`) {
+		t.Errorf("override is not the final coalesce step\ngot: %s", got)
+	}
+
+	out := convertCubeAPMLogGroups(f, []map[string]any{{
+		"cube_message":         "upstream timeout",
+		"kubernetes.namespace": "payments",
+		"cube_level":           "ERROR",
+		"cube_count":           "7",
+	}}, 1788489360)
+	if len(out.Groups) != 1 {
+		t.Fatalf("got %d groups, want 1", len(out.Groups))
+	}
+	if g := out.Groups[0]; g.Sample != "upstream timeout" || g.Namespace != "payments" || g.Level != "ERROR" {
+		t.Errorf("group = %+v; rows must be read through the mapped fields", g)
+	}
+}
+
+func TestCubeAPMLogGroupFieldsFromMappingAliasesAndSafety(t *testing.T) {
+	t.Run("severity is honoured when level is left at the default", func(t *testing.T) {
+		f := cubeAPMLogGroupFieldsFromMapping(map[string]string{"level": "log.level", "severity": "severity_text"})
+		if want := []string{"severity_text", "log.level", "level"}; !reflect.DeepEqual(f.Level, want) {
+			t.Errorf("Level = %q, want %q", f.Level, want)
+		}
+	})
+
+	t.Run("mapping to a default candidate reorders instead of duplicating", func(t *testing.T) {
+		f := cubeAPMLogGroupFieldsFromMapping(map[string]string{"level": "level"})
+		if want := []string{"level", "log.level"}; !reflect.DeepEqual(f.Level, want) {
+			t.Errorf("Level = %q, want %q", f.Level, want)
+		}
+	})
+
+	t.Run("app is honoured for the workload dimension", func(t *testing.T) {
+		f := cubeAPMLogGroupFieldsFromMapping(map[string]string{"app": "k8s.statefulset.name"})
+		if f.Workload != "k8s.statefulset.name" {
+			t.Errorf("Workload = %q", f.Workload)
+		}
+	})
+
+	// A mapped value is interpolated into the pipeline, so one that could close the
+	// filter and append its own pipe falls back to the default.
+	t.Run("an unsafe field name falls back to the default", func(t *testing.T) {
+		f := cubeAPMLogGroupFieldsFromMapping(map[string]string{"level": `x:* | delete _msg`})
+		if !reflect.DeepEqual(f.Level, cubeAPMLogGroupFields.Level) {
+			t.Errorf("Level = %q, want the default", f.Level)
+		}
+	})
+
+	t.Run("a field shared by two dimensions is grouped on once", func(t *testing.T) {
+		f := cubeAPMLogGroupFieldsFromMapping(map[string]string{"workload": "service"})
+		got := buildCubeAPMLogGroupQuery(f, "", "", "", 0)
+		if !strings.Contains(got, "stats by (cube_message, k8s.namespace.name, k8s.pod.name, service, k8s.container.name, cube_level) count()") {
+			t.Errorf("expected service once in the group-by\ngot: %s", got)
+		}
+	})
+}
+
 func TestConvertCubeAPMLogGroups(t *testing.T) {
 	rows := []map[string]any{
 		{
-			"_msg":                "upstream timeout",
+			"cube_message":        "upstream timeout",
 			"k8s.namespace.name":  "payments",
 			"k8s.pod.name":        "checkout-api-7d9f-abc",
 			"k8s.deployment.name": "checkout-api",
 			"k8s.container.name":  "app",
-			"log.level":           "error",
+			"cube_level":          "error",
 			// stats counts arrive as strings in the NDJSON body.
 			"cube_count": "42",
 		},
 		// No message: nothing to group on or display.
 		{"cube_count": "5"},
 		// Unparseable count.
-		{"_msg": "x", "cube_count": "not-a-number"},
+		{"cube_message": "x", "cube_count": "not-a-number"},
 		// Zero count.
-		{"_msg": "y", "cube_count": "0"},
+		{"cube_message": "y", "cube_count": "0"},
 	}
 
-	out := convertCubeAPMLogGroups(rows, 1788489360)
+	out := convertCubeAPMLogGroups(cubeAPMLogGroupFields, rows, 1788489360)
 
 	if len(out.Groups) != 1 {
 		t.Fatalf("got %d groups, want 1 (rows without a message or a usable count are dropped)", len(out.Groups))
@@ -654,13 +757,13 @@ func TestConvertCubeAPMLogGroups(t *testing.T) {
 // nothing to build a filter from and refused to fetch the surrounding logs.
 func TestConvertCubeAPMLogGroupsFallsBackToService(t *testing.T) {
 	rows := []map[string]any{{
-		"_msg":       "Failed connecting to database",
-		"service":    "payment",
-		"log.level":  "error",
-		"cube_count": "927",
+		"cube_message": "Failed connecting to database",
+		"service":      "payment",
+		"cube_level":   "error",
+		"cube_count":   "927",
 	}}
 
-	out := convertCubeAPMLogGroups(rows, 1788489360)
+	out := convertCubeAPMLogGroups(cubeAPMLogGroupFields, rows, 1788489360)
 	if len(out.Groups) != 1 {
 		t.Fatalf("got %d groups, want 1", len(out.Groups))
 	}
@@ -673,13 +776,13 @@ func TestConvertCubeAPMLogGroupsFallsBackToService(t *testing.T) {
 // fallback cannot change what a Kubernetes-enriched deployment reports.
 func TestConvertCubeAPMLogGroupsPrefersK8sWorkloadOverService(t *testing.T) {
 	rows := []map[string]any{{
-		"_msg":                "upstream timeout",
+		"cube_message":        "upstream timeout",
 		"k8s.deployment.name": "checkout-api",
 		"service":             "checkout",
 		"cube_count":          "3",
 	}}
 
-	out := convertCubeAPMLogGroups(rows, 1788489360)
+	out := convertCubeAPMLogGroups(cubeAPMLogGroupFields, rows, 1788489360)
 	if len(out.Groups) != 1 {
 		t.Fatalf("got %d groups, want 1", len(out.Groups))
 	}
@@ -691,8 +794,8 @@ func TestConvertCubeAPMLogGroupsPrefersK8sWorkloadOverService(t *testing.T) {
 // A pod with no deployment field (StatefulSet, Job) still has to resolve a
 // workload, which is derived from the pod name.
 func TestConvertCubeAPMLogGroupsDerivesWorkloadFromPod(t *testing.T) {
-	out := convertCubeAPMLogGroups([]map[string]any{{
-		"_msg":               "boom",
+	out := convertCubeAPMLogGroups(cubeAPMLogGroupFields, []map[string]any{{
+		"cube_message":       "boom",
 		"k8s.namespace.name": "payments",
 		"k8s.pod.name":       "ledger-0",
 		"cube_count":         "3",
