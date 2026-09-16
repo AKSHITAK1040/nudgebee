@@ -44,7 +44,7 @@ Prometheus metrics provide visibility into cache efficiency:
 
 ## Google AI Provider: System Message Handling
 
-Google AI's API accepts a single `SystemInstruction` field, not multiple system messages in the `contents` array. When we send multiple system messages (base prompt, agent prompt, account prompt, etc.), they are **merged into one `SystemInstruction`** by concatenating all their parts. This happens in `llms/googleai/caching.go` and `llms/googleai/googleai.go`.
+Google AI's API accepts a single `SystemInstruction` field, not multiple system messages in the `contents` array. When we send multiple system messages (base prompt, stable account context, agent prompt, etc.), they are **merged into one `SystemInstruction`** by concatenating all their parts. This happens in `llms/googleai/caching.go` and `llms/googleai/googleai.go`.
 
 This means:
 - `CountTokens`, `CreateCachedContent`, and `GenerateContent` all merge system messages the same way
@@ -69,8 +69,8 @@ Built in `planner_react_3.go`. Base template: `planner_react_3_base.txt`.
 ├─────────────────────────────────────────────────────────────┤
 │ 2. Client tools priority instruction (if ClientTools exist) │
 ├─────────────────────────────────────────────────────────────┤
-│ 3. <additional_system_prompt>{AccountPrompt}                │
-│    </additional_system_prompt> (optional)                   │
+│ 3. <account_context>{AccountContext}</account_context>      │
+│    (optional, stable account-wide GlobalContext)            │
 ├─────────────────────────────────────────────────────────────┤
 │ 4. <additional_agent_prompt>{additionalPrompt}              │
 │    </additional_agent_prompt> (optional, from DB config)    │
@@ -81,7 +81,7 @@ Built in `planner_react_3.go`. Base template: `planner_react_3_base.txt`.
 │ HUMAN MESSAGE (dynamic — changes every iteration)           │
 ├─────────────────────────────────────────────────────────────┤
 │ 6. <task_context>                                           │
-│      conversation_context, history                          │
+│      request-specific AccountPrompt, context, history       │
 │    </task_context>                                          │
 │    <notebook_content>{notebook}</notebook_content>          │
 │    <question>{input}</question>                             │
@@ -91,7 +91,7 @@ Built in `planner_react_3.go`. Base template: `planner_react_3_base.txt`.
 
 ### Critique Message Layout (Top-Level Investigation Answers Only)
 
-Fires when `LlmServerReActCritiqueEnabled=true` (default), the agent is top-level (not a sub-agent), and the query is an investigation task. Uses `planner_react_critiquer.txt`.
+Fires when the agent is top-level (not a sub-agent) and the query is an investigation task. Uses `planner_react_critiquer.txt`.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -115,7 +115,8 @@ Fires when `LlmServerReActCritiqueEnabled=true` (default), the agent is top-leve
 |---|---|---|
 | Static rules, instructions, tool usage guidelines | System message | Stable across requests = cacheable |
 | Agent domain expertise (investigation methodology) | System message (via `GetSystemPrompt()`) | Stable per agent = cacheable at Account scope |
-| Account-level customizations | System message (`AccountPrompt` / `additionalPrompt`) | Stable per account = cacheable |
+| Account-wide GlobalContext | System message (`AccountContext`) | Stable per account = cacheable |
+| Entry-point/request additional instructions | Human message (`AccountPrompt`) | May differ between event analysis and ordinary chat |
 | User query, conversation history, scratchpad | Human message | Changes every request = must not pollute cache |
 | Date/time (`today`) | System message is OK | Rotates daily; acceptable for 12h TTL |
 | Previous tool observations, iteration state | Human message (`scratchpad`) | Changes every ReAct3 iteration |

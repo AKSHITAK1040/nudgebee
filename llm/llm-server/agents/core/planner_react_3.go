@@ -215,11 +215,9 @@ func (o *NBReActPlanner3) isTopLevelAgent() bool {
 // orchestrator's direction-setting calls that warrants the elevated thinking
 // level: the first reasoning call of a turn (where the answer contract and
 // investigation plan are laid down) or a post-critique refinement pass.
-// Always false for executor sub-agents, when orchestrator mode is disabled,
-// or when no override level is configured.
+// Always false for executor sub-agents or when no override level is configured.
 func (o *NBReActPlanner3) orchestratorDeepThinking(firstPlanCallOfTurn bool) bool {
-	if !config.Config.LlmServerReact3OrchestratorModeEnabled ||
-		config.Config.LlmServerReact3OrchestratorThinkingLevel == "" ||
+	if config.Config.LlmServerOrchestratorThinkingLevel == "" ||
 		!o.isTopLevelAgent() {
 		return false
 	}
@@ -240,7 +238,7 @@ var thinkingLevelRank = map[string]int{"minimal": 1, "low": 2, "medium": 3, "hig
 // clamping still happens centrally in GenerateAndTrackLLMContent, and the
 // provider layer ignores ThinkingLevel on models that don't accept it.
 func resolveOrchestratorThinkingLevel(model string) string {
-	orch := strings.ToLower(config.Config.LlmServerReact3OrchestratorThinkingLevel)
+	orch := strings.ToLower(config.Config.LlmServerOrchestratorThinkingLevel)
 	orchRank, ok := thinkingLevelRank[orch]
 	if !ok {
 		return ""
@@ -538,7 +536,7 @@ func (o *NBReActPlanner3) buildScratchpad(intermediateSteps []NBAgentPlannerTool
 	// prior turns' steps, and nudging a trivial follow-up would contradict the
 	// prompt's "simple lookups skip the contract" carve-out.
 	turnSteps := totalSteps - o.turnStartStepIndex
-	if orchestratorMode, _ := resolveReact3RoleModes(o.request); orchestratorMode &&
+	if orchestratorMode, _ := resolveOrchestratorRoleModes(o.request); orchestratorMode &&
 		o.notebookSectionEnabled() && turnSteps >= answerContractNudgeMinSteps &&
 		!strings.Contains(strings.ToLower(o.Notebook), strings.ToLower(answerContractHeader)) {
 		history.WriteString("\n<system_nudge>")
@@ -1345,10 +1343,22 @@ func (o *NBReActPlanner3) processToolActions(output string) []NBAgentPlannerTool
 	// XmlExtractCDATA which would strip nested CDATA from child <action> blocks,
 	// destroying the structure when tool_input contains CDATA sections.
 	actionsStart := strings.Index(output, "<actions>")
-	actionsEnd := strings.LastIndex(output, "</actions>")
-	if actionsStart == -1 || actionsEnd == -1 || actionsEnd <= actionsStart {
+	if actionsStart == -1 {
 		return nil
 	}
+	// A planner turn may contain exactly one thought/action decision. Some
+	// models nevertheless emit a speculative sequence of several
+	// <thought_action> blocks in one completion. Using LastIndex here merged
+	// every later block into the first parallel batch, so tools that were meant
+	// to depend on earlier observations all ran at once. Parse only the first
+	// complete <actions> container; the next planner turn can then react to its
+	// real observations.
+	actionsRemainder := output[actionsStart+len("<actions>"):]
+	relativeActionsEnd := strings.Index(actionsRemainder, "</actions>")
+	if relativeActionsEnd == -1 {
+		return nil
+	}
+	actionsEnd := actionsStart + len("<actions>") + relativeActionsEnd
 	actionsBlock := strings.TrimSpace(output[actionsStart+len("<actions>") : actionsEnd])
 	if actionsBlock == "" {
 		return nil
@@ -1417,6 +1427,9 @@ func (o *NBReActPlanner3) processToolActions(output string) []NBAgentPlannerTool
 
 		toolInput = common.SubstituteDateMacros(toolInput)
 		toolInput = o.normalizeToolInput(toolName, toolInput)
+		if isEmptyShellExecutionAction(toolName, toolInput) {
+			continue
+		}
 
 		o.stepCount++
 		actions = append(actions, NBAgentPlannerToolAction{
@@ -1488,6 +1501,9 @@ func (o *NBReActPlanner3) processToolAction(output string) []NBAgentPlannerToolA
 
 	toolInput = common.SubstituteDateMacros(toolInput)
 	toolInput = o.normalizeToolInput(toolName, toolInput)
+	if isEmptyShellExecutionAction(toolName, toolInput) {
+		return nil
+	}
 
 	thought := common.XmlExtractTagContent(output, "thought")
 	if thought == "" {
@@ -1516,6 +1532,14 @@ func (o *NBReActPlanner3) processToolAction(output string) []NBAgentPlannerToolA
 			MemoryRefs: parseMemoryUsedFromActionContent(actionContent),
 		},
 	}
+}
+
+// isEmptyShellExecutionAction rejects placeholder shell calls before they can
+// become client-tool requests. Other tools may legitimately have an empty
+// input schema, so keep this guard narrowly scoped to the shell tool family.
+func isEmptyShellExecutionAction(toolName, toolInput string) bool {
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(toolName)), "shell_execute") &&
+		strings.TrimSpace(toolInput) == ""
 }
 
 // normalizeToolInput delegates to the package-level normalizer so all planners
@@ -1807,6 +1831,14 @@ func (o *NBReActPlanner3) Plan(
 				}
 			}
 
+			// Agent-level policy is the final authority. Database-backed custom
+			// agents default to low reasoning (and may explicitly override it),
+			// matching react_4. Built-in agents do not implement this optional
+			// capability, so their orchestrator/model resolution remains unchanged.
+			if level := ResolveAgentThinkingLevel(o.nbAgent); level != "" {
+				callOptions = append(callOptions, WithThinkingLevel(level))
+			}
+
 			if stopWords := reactPlannerStopWords(provider, model); len(stopWords) > 0 {
 				callOptions = append(callOptions, llms.WithStopWords(stopWords))
 			}
@@ -1887,13 +1919,13 @@ func (o *NBReActPlanner3) Plan(
 			noToolRefusal := topLevel && len(intermediateSteps)-o.turnStartStepIndex == 0 &&
 				looksLikeCapabilityRefusal(finish.Data)
 			critiqueAllowed := o.enableCritique ||
-				(config.Config.LlmServerReActCritiqueEnabled && topLevel && (isInvestigation || noToolRefusal))
+				(topLevel && (isInvestigation || noToolRefusal))
 			if agent, ok := o.nbAgent.(NBAgentReActPlannerCritiqueSupport); ok {
 				critiqueAllowed = critiqueAllowed && agent.CritiqueEnabled()
 			}
 
 			if !critiqueAllowed {
-				logger.Info("reactagent3: skipping critique", "enableCritique", o.enableCritique, "isTopLevel", topLevel, "isInvestigation", isInvestigation, "noToolRefusal", noToolRefusal, "autoCritiqueEnabled", config.Config.LlmServerReActCritiqueEnabled)
+				logger.Info("reactagent3: skipping critique", "enableCritique", o.enableCritique, "isTopLevel", topLevel, "isInvestigation", isInvestigation, "noToolRefusal", noToolRefusal)
 				return nil, finish, nil
 			}
 
@@ -2363,19 +2395,15 @@ func resolveHypothesisModeEnabled(request NBAgentRequest, agent NBAgent) bool {
 	return ResolveAgentNotebookEnabled(agent) && isTopLevel
 }
 
-// resolveReact3RoleModes returns the role prompt-overlay gates for the react_3
-// planner. The same planner (and base prompt) serves two opposite jobs: the
+// resolveOrchestratorRoleModes returns the shared role prompt-overlay modes for
+// ReAct3 and ReAct4. The planners serve two opposite jobs: the
 // top-level orchestrator, which owns the completeness of the final answer, and
 // executor sub-agents, which run a scoped brief fast. The orchestrator overlay
 // adds the answer contract + completion self-check; the executor overlay adds
 // the stay-in-brief / surface-anomalies reporting rule. At most one of the two
-// returns true; both are false when the feature flag is off, rendering the
-// prompt byte-identical to the pre-split behavior. Role is stable for a given
-// agent instance, so the cached system prefix is not busted per request.
-func resolveReact3RoleModes(request NBAgentRequest) (orchestratorMode, executorMode bool) {
-	if !config.Config.LlmServerReact3OrchestratorModeEnabled {
-		return false, false
-	}
+// returns true. Role is stable for a given agent instance, so the cached system
+// prefix is not busted per request.
+func resolveOrchestratorRoleModes(request NBAgentRequest) (orchestratorMode, executorMode bool) {
 	isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
 	return isTopLevel, !isTopLevel
 }
@@ -2385,7 +2413,8 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	tools := make([]toolcore.NBTool, len(toolsIn))
 	copy(tools, toolsIn)
 
-	reactBasePrompt, reactBaseErr := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptReact3Base, request.AccountId)
+	reactBasePromptName := react3BasePromptName(agent)
+	reactBasePrompt, reactBaseErr := nbprompts.GetPromptStrict(ctx.GetContext(), reactBasePromptName, request.AccountId)
 	if reactBaseErr != nil {
 		// This prompt backs every ReAct agent. Planning with an empty base is not a
 		// degraded run, it is a broken one — fail construction instead.
@@ -2400,10 +2429,10 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	// agent role, so the cached system prefix is not busted per request.
 	notebookEnabled := ResolveAgentNotebookEnabled(agent)
 	hypothesisModeEnabled := resolveHypothesisModeEnabled(request, agent)
-	orchestratorMode, executorMode := resolveReact3RoleModes(request)
+	orchestratorMode, executorMode := resolveOrchestratorRoleModes(request)
 
 	// Lean prompt variant: on a top-level plain-retrieval turn (stamped by
-	// applyPromptVariant when the feature is enabled), drop the heavy investigation
+	// applyPromptVariant), drop the heavy investigation
 	// overlays — answer contract, notebook discipline, and hypothesis tree — via
 	// the existing {{if}} gates in planner_react_3_base.txt. Reading the same
 	// ContextKeyPromptVariant the cache key uses keeps the prompt shape and its
@@ -2425,7 +2454,7 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	// content and its cache slot never disagree. Mirrors the formatter's programmatic
 	// gate (executor_response_formatter.go), which prose-instruction alone could not
 	// reliably enforce.
-	isInvestigation := promptVariant != promptVariantLean && promptVariant != promptVariantQuery
+	isInvestigation := promptVariant != promptVariantLean
 
 	// Only declare template variables actually referenced in planner_react_3_base.txt.
 	// Dynamic vars (history, conversation_context, input, scratchpad) are in the human
@@ -2440,6 +2469,7 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 				"delegate_agent_enabled",
 				"notebook_enabled",
 				"hypothesis_mode_enabled",
+				"is_top_level",
 				"orchestrator_mode",
 				"executor_mode",
 				"is_investigation",
@@ -2449,6 +2479,7 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 				"data_protection_rules",
 				"code_analysis_rules",
 				"security_rules",
+				"memory_consumption_rules",
 				"async_completion_rules",
 			},
 		),
@@ -2471,14 +2502,18 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		messageFormatters = append(messageFormatters, LiteralSystemMessage{Content: priorityInstruction})
 	}
 
-	// AccountPrompt (account GlobalContext + event-analysis additional
-	// instructions) is intentionally NOT added as a system message: its
-	// event-analysis fragment varies per entry-point, so injecting it here
-	// would alternate the cacheable prefix and bust the Account-scope cache.
-	// It is rendered into the human-message <global_preferences> block below.
-	// This is also why ReAct agents need no per-agent GC wiring — custom-planner
-	// agents that bypass this prompt path (fetch_logs, resource_search) attach
-	// AccountPrompt to their own LLM calls explicitly.
+	// Stable account-wide context belongs in the account-scoped cacheable system
+	// prefix. Request/entry-point-specific AccountPrompt remains in the human
+	// message below so event-analysis traffic cannot churn the shared cache slot.
+	if ResolveAgentAccountContextEnabled(agent) {
+		if accountContext := renderAccountContextBlock(request.AccountContext); accountContext != "" {
+			messageFormatters = append(messageFormatters, LiteralSystemMessage{Content: accountContext})
+		}
+	}
+
+	// ReAct agents need no per-agent GC wiring. Custom-planner agents that bypass
+	// this prompt path attach the combined AccountContext + AccountPrompt to
+	// their own LLM calls explicitly.
 
 	agentAdditionalPrompt, configuredTools, _ := AgentAdditionalInstructionsAndToolsAndConfigs(ctx, request.AccountId, agent.GetName())
 	if agentAdditionalPrompt != "" {
@@ -2502,7 +2537,7 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	// SkillListsMenu is appended to the detection string so load_skills is still
 	// injected when the menu lives in the human message (KB pre-step path)
 	// rather than the system prompt (legacy path).
-	tools = FilterAndInjectDefaultTools(request.AccountId, agent, agentPrompt+request.SkillListsMenu, tools, request.Capabilities)
+	tools = FilterAndInjectDefaultTools(request.AccountId, agent, agentPrompt+request.SkillListsMenu, tools, request.Capabilities, request.KnowledgePolicy)
 
 	// Agent prompt as system message so it falls within the cacheable prefix
 	// for Global/Account cache scopes. Dynamic parts (history, context, input, scratchpad) stay as human message.
@@ -2514,39 +2549,42 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		messageFormatters = append(messageFormatters, LiteralSystemMessage{Content: agentPrompt})
 	}
 
+	isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
+
 	// First name for greeting personalisation, top-level turns only (sub-agents
 	// don't greet). Human-message → per-user, cache-safe. "" when name unknown.
 	userContextBlock := ""
-	if request.ParentAgentId == "" || request.ParentAgentId == request.AgentId {
+	if isTopLevel {
 		userContextBlock = renderUserContextBlock(ctx)
 	}
 
 	// Move all dynamic context to the final Human message so the system prefix is stable.
 	// today is placed here (not in the system message) so the cached system prefix
 	// does not expire on date rollover.
-	// global_preferences_block carries AccountPrompt (account GlobalContext,
-	// merged with any event-analysis additional instructions — populated on
-	// every entry point by handleDefaultConversation) so
-	// the cacheable system prefix does not flip between entry points.
+	// global_preferences_block carries only request/entry-point-specific
+	// AccountPrompt so the cacheable system prefix does not flip between entry
+	// points.
 	dynamicPrompt := `
 **Current date and time:** {{.today}}
 {{.kb_prestep_content}}
 {{.skill_lists_menu}}
 {{.global_preferences_block}}
 {{.user_context_block}}
-<task_context>
+{{if .is_top_level}}<task_context>
 **Previous Conversation Context:** {{.conversation_context}}
 **Previous Messages (History):**
 {{.history}}
 {{.evidence_index}}
 </task_context>
-
+{{end}}
 {{if .notebook}}<notebook_content>
 {{.notebook}}
 </notebook_content>
 {{end}}
+{{if .is_top_level}}
 {{.memory_context_block}}
 {{.channel_context_block}}
+{{end}}
 <question>{{.input}}</question>
 
 {{.scratchpad}}`
@@ -2565,6 +2603,8 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		"skill_lists_menu",
 		"memory_context_block",
 		"channel_context_block",
+		"is_top_level",
+		"orchestrator_mode",
 	}))
 
 	tools = FilterTools(tools, request.Capabilities)
@@ -2599,6 +2639,15 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 	if err != nil {
 		return prompts.ChatPromptTemplate{}, nil, fmt.Errorf("reactagent3: loading PromptMemoryConsumptionRules fragment: %w", err)
 	}
+
+	evidenceIndex := ""
+	var memoryContextBlock, channelContextBlock string
+	if isTopLevel {
+		evidenceIndex = fetchEvidenceIndex(ctx, request)
+		memoryContextBlock = renderMemoryContextBlock(request.MemoryContext)
+		channelContextBlock = renderChannelContextBlock(request.ChannelContext)
+	}
+
 	tmpl.PartialVariables = map[string]any{
 		// System message template vars (stable — cached across conversations)
 		"tool_names":                   reActPromptToolNames(tools),
@@ -2606,6 +2655,7 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		"delegate_agent_enabled":       HasDelegateAgentTool(tools),
 		"notebook_enabled":             notebookEnabled,
 		"hypothesis_mode_enabled":      hypothesisModeEnabled,
+		"is_top_level":                 isTopLevel,
 		"orchestrator_mode":            orchestratorMode,
 		"executor_mode":                executorMode,
 		"is_investigation":             isInvestigation,
@@ -2618,32 +2668,29 @@ func reActCreatePrompt3(ctx *security.RequestContext, agentPrompt string, toolsI
 		"memory_consumption_rules":     memoryConsumptionRules,
 		"async_completion_rules":       asyncCompletionRules(agent),
 		// Human message template vars (dynamic — change per conversation/iteration)
-		"today":                time.Now().UTC().Format("Monday, January 2, 2006, 15:04:05 UTC"),
-		"history":              previousMessageStr,
-		"conversation_context": conversationContext,
-		// FS evidence recall (flag-gated): an always-visible list of the exact
-		// workspace files earlier tool calls saved, so the model greps them by
-		// real name instead of re-fetching or hallucinating a filename. Empty
-		// (renders nothing) when the flag is off or no files exist.
-		"evidence_index":           fetchEvidenceIndex(ctx, request),
+		"today":                    time.Now().UTC().Format("Monday, January 2, 2006, 15:04:05 UTC"),
+		"history":                  previousMessageStr,
+		"conversation_context":     conversationContext,
+		"evidence_index":           evidenceIndex,
 		"scratchpad":               "", // default; overridden per-iteration in fullInputs
 		"global_preferences_block": renderGlobalPreferencesBlock(request.AccountPrompt),
 		"user_context_block":       userContextBlock,
-		// KB pre-step output — empty on the legacy path; populated into the human
-		// message (above the scratchpad, so compression never drops it) when the
-		// KB pre-step is enabled.
-		"kb_prestep_content": request.KBPrestepContent,
-		"skill_lists_menu":   request.SkillListsMenu,
-		// Memories are reference material, not the agent's own working state —
-		// rendered as a framed block beside the channel context rather than
-		// seeded into the notebook, where they carried the authority of prior
-		// findings.
-		"memory_context_block": renderMemoryContextBlock(request.MemoryContext),
-		// Sits above the question so context compression never trims it away
-		// before the model reads what it is meant to be grounded in.
-		"channel_context_block": renderChannelContextBlock(request.ChannelContext),
+		"kb_prestep_content":       request.KBPrestepContent,
+		"skill_lists_menu":         request.SkillListsMenu,
+		"memory_context_block":     memoryContextBlock,
+		"channel_context_block":    channelContextBlock,
 	}
 	return tmpl, tools, nil
+}
+
+// react3BasePromptName keeps database-backed custom agents isolated from the
+// built-in-agent planning policy while preserving the same React3 parser and
+// executor contract. Other agent implementations retain the established base.
+func react3BasePromptName(agent NBAgent) string {
+	if _, ok := agent.(*nbCustomAgent); ok {
+		return nbprompts.PromptReact3CustomBase
+	}
+	return nbprompts.PromptReact3Base
 }
 
 // NewReActAgent3 initializes a new instance of the react_3 planner.

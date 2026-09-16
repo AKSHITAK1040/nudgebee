@@ -93,6 +93,10 @@ type nbCustomAgent struct {
 // user-configured tool list (a.agent.Tools) is honored verbatim. Without this, the
 // planner silently injects shell_execute / load_skills on top of the user's selection.
 var _ DefaultToolsOptOut = (*nbCustomAgent)(nil)
+var _ NBAgentAccountContextProvider = (*nbCustomAgent)(nil)
+var _ NBAgentMemoryProvider = (*nbCustomAgent)(nil)
+var _ NBAgentThinkingLevelProvider = (*nbCustomAgent)(nil)
+var _ NBAgentReActPlannerCritiqueSupport = (*nbCustomAgent)(nil)
 
 // OptOutDefaultTools implements DefaultToolsOptOut. Custom agents are user-curated:
 // the operator picks the tool list explicitly via the UI/API. The planner must not
@@ -100,6 +104,42 @@ var _ DefaultToolsOptOut = (*nbCustomAgent)(nil)
 // config flags. If the operator wants shell, they add `shell_execute` to the tool list.
 func (a *nbCustomAgent) OptOutDefaultTools() bool {
 	return true
+}
+
+// GetAccountContextEnabled keeps database-backed custom agents scoped to the
+// instructions and tools explicitly configured by their owner. Global Context
+// can be large and may introduce unrelated infrastructure assumptions.
+func (a *nbCustomAgent) GetAccountContextEnabled() bool {
+	return false
+}
+
+// GetMemoryEnabled keeps database-backed custom agents isolated from account
+// and conversation memory. Their stored prompt and explicitly selected tools
+// define the context available to the agent.
+func (a *nbCustomAgent) GetMemoryEnabled() bool {
+	return false
+}
+
+// CritiqueEnabled keeps the shared ReAct critiquer opt-in for database-backed
+// custom agents. Their stored prompt and selected tools define an independent
+// completion contract that the built-in critiquer must not override by default.
+func (a *nbCustomAgent) CritiqueEnabled() bool {
+	enabled, _ := a.agent.Config["enable_shared_critiquer"].(bool)
+	return enabled
+}
+
+// GetThinkingLevel reads the optional custom-agent planner preference. Custom
+// agents default to low reasoning so their focused prompt/tool contract does not
+// inherit a potentially expensive provider default. A valid explicit setting
+// remains authoritative.
+func (a *nbCustomAgent) GetThinkingLevel() string {
+	level, _ := a.agent.Config["thinking_level"].(string)
+	level = strings.ToLower(strings.TrimSpace(level))
+	switch level {
+	case ThinkingLevelMinimal, ThinkingLevelLow, ThinkingLevelMedium, ThinkingLevelHigh:
+		return level
+	}
+	return ThinkingLevelLow
 }
 
 func (a *nbCustomAgent) GetName() string {

@@ -33,6 +33,7 @@ describe('execution batch metadata', () => {
   it('represents a single-tool planner iteration without inventing a dispatch mode', () => {
     const batch = parseExecutionBatchMetadata('{"planner_iteration":3}');
     expect(executionBatchLabel(batch, 1)).toBe('Iteration 3 · 1 direct tool');
+    expect(batch).toMatchObject({ id: 'iteration-3', hasExplicitBatchId: false });
   });
 
   it('normalizes non-string sequential fallback reasons', () => {
@@ -71,16 +72,29 @@ describe('withExecutionBatchNodes', () => {
     expect(withExecutionBatchNodes(tasks)).toEqual(tasks);
   });
 
-  it('groups a single tool when planner iteration metadata is present', () => {
+  it('shows a group for a single-action planner iteration', () => {
     const tasks = [
       { id: 'agent-1', nodeKind: 'agent', parentId: null },
       { id: 'tool-1', nodeKind: 'tool', parentId: 'agent-1', metadata: '{"planner_iteration":3}' },
     ];
 
     const normalized = withExecutionBatchNodes(tasks);
-    const iterationNode = normalized.find((task) => task.nodeKind === 'execution_batch');
-    expect(iterationNode.executionBatch.plannerIteration).toBe(3);
-    expect(normalized.find((task) => task.id === 'tool-1').parentId).toBe(iterationNode.id);
+    const batchNode = normalized.find((task) => task.nodeKind === 'execution_batch');
+    expect(batchNode).toMatchObject({ id: 'execution-batch:agent-1:iteration-3', observedBatchSize: 1 });
+    expect(normalized.find((task) => task.id === 'tool-1').parentId).toBe(batchNode.id);
+  });
+
+  it('groups calls emitted by the same planner iteration', () => {
+    const tasks = [
+      { id: 'agent-1', nodeKind: 'agent', parentId: null },
+      { id: 'tool-1', nodeKind: 'tool', parentId: 'agent-1', metadata: '{"planner_iteration":1}' },
+      { id: 'tool-2', nodeKind: 'tool', parentId: 'agent-1', metadata: '{"planner_iteration":1}' },
+    ];
+
+    const normalized = withExecutionBatchNodes(tasks);
+    const batchNode = normalized.find((task) => task.nodeKind === 'execution_batch');
+    expect(batchNode).toMatchObject({ id: 'execution-batch:agent-1:iteration-1', observedBatchSize: 2 });
+    expect(normalized.filter((task) => task.parentId === batchNode.id)).toHaveLength(2);
   });
 
   it('preserves recursive child-agent parentage beneath grouped tool calls', () => {
@@ -132,7 +146,7 @@ describe('withExecutionBatchNodes', () => {
   });
 
   it('uses a null timestamp when grouped tasks have no creation time', () => {
-    const tasks = [{ id: 'tool-1', nodeKind: 'tool', parentId: null, metadata: '{"planner_iteration":1}' }];
+    const tasks = [{ id: 'tool-1', nodeKind: 'tool', parentId: null, metadata: '{"execution_batch_id":"batch-1","planner_iteration":1}' }];
 
     const normalized = withExecutionBatchNodes(tasks);
     const batchNode = normalized.find((task) => task.nodeKind === 'execution_batch');

@@ -451,7 +451,7 @@ func TestDetectCloudCLI_GcpCommands(t *testing.T) {
 		{"gsutil ls gs://my-bucket", "gcp", ToolExecuteGcpCliCommand},
 		{"bq query --use_legacy_sql=false 'SELECT 1'", "gcp", ToolExecuteGcpCliCommand},
 		// gcloud inside a chained command
-		{"touch .nb_profile && . ./.nb_profile && gcloud auth list", "gcp", ToolExecuteGcpCliCommand},
+		{"gcloud auth list", "gcp", ToolExecuteGcpCliCommand},
 	}
 
 	for _, tt := range tests {
@@ -471,7 +471,7 @@ func TestDetectCloudCLI_AwsCommands(t *testing.T) {
 	}{
 		{"aws s3 ls", "aws", ToolExecuteAwsCliCommand},
 		{"aws sts get-caller-identity", "aws", ToolExecuteAwsCliCommand},
-		{"touch .nb_profile && aws ec2 describe-instances", "aws", ToolExecuteAwsCliCommand},
+		{"aws ec2 describe-instances", "aws", ToolExecuteAwsCliCommand},
 	}
 
 	for _, tt := range tests {
@@ -491,7 +491,7 @@ func TestDetectCloudCLI_AzureCommands(t *testing.T) {
 	}{
 		{"az vm list", "azure", ToolExecuteAzureCliCommand},
 		{"az account show", "azure", ToolExecuteAzureCliCommand},
-		{"touch .nb_profile && az group list", "azure", ToolExecuteAzureCliCommand},
+		{"az group list", "azure", ToolExecuteAzureCliCommand},
 	}
 
 	for _, tt := range tests {
@@ -508,7 +508,6 @@ func TestDetectCloudCLI_NonCloudCommands(t *testing.T) {
 	commands := []string{
 		"ls -la /tmp",
 		"curl https://example.com",
-		"kubectl get pods",
 		"helm list",
 		"cat /etc/hosts",
 		"echo gcloud",            // word "gcloud" but not a CLI invocation? — actually this matches
@@ -591,4 +590,10 @@ func TestShellCloudAuth_WrapCommandWithAndOperator(t *testing.T) {
 	chainedCmd := "cd /app && ls -la"
 	wrapped := WrapCommandWithAuth(chainedCmd, auth)
 	assert.Contains(t, wrapped, chainedCmd, "&&-chained command must be preserved")
+}
+
+func TestDetectCloudCLI_KubernetesTarget(t *testing.T) {
+	provider, owner := detectCloudCLI("kubectl get pods | head")
+	assert.Equal(t, "k8s", provider)
+	assert.Equal(t, ToolExecuteKubectlCommand, owner)
 }

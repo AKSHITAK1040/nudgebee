@@ -13,15 +13,37 @@ import (
 
 func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent NBAgent, request NBAgentRequest, action NBAgentPlannerToolAction) (*NBAgentPlannerFinishAction, *toolcore.ToolRequestType, error) {
 	toolName := action.Tool
+	canonicalToolName := toolcore.ResolveNBToolAlias(toolName)
 	var tool toolcore.NBTool
 	found := false
+	supported := SupportedToolsForRequest(ctx, agent, request)
+	if strings.EqualFold(canonicalToolName, "search_skills") || strings.EqualFold(canonicalToolName, "load_skills") {
+		// Knowledge tools can be injected into the planner without being declared
+		// by the agent. Apply that same injection at dispatch, while enforcing
+		// restrictions before any legacy or discovered-tool fallback can accept it.
+		caps := request.Capabilities.Merge(request.QueryConfig.Capabilities)
+		var knowledgeTool toolcore.NBTool
+		var registered bool
+		if request.AccountId != "" {
+			knowledgeTool, registered = toolcore.GetNBTool(request.AccountId, strings.ToLower(canonicalToolName))
+		}
+		policy := request.KnowledgePolicy
+		if policy == "" {
+			policy = KnowledgeAuto
+		}
+		if policy == KnowledgeDisabled || !registered || knowledgeTool == nil || len(FilterTools([]toolcore.NBTool{knowledgeTool}, caps)) == 0 {
+			return nil, nil, fmt.Errorf("auth: knowledge tool %s is disabled or unavailable for agent %s", toolName, agent.GetName())
+		}
+		supported = FilterAndInjectDefaultTools(request.AccountId, agent, request.SkillListsMenu, supported, caps, policy)
+	}
 	// Resolve request-aware so a mode-restricted tool (absent from this
 	// request's set) is rejected here even though the agent's canonical
 	// toolset contains it.
-	for _, tool1 := range SupportedToolsForRequest(ctx, agent, request) {
-		if strings.EqualFold(tool1.Name(), toolName) {
+	for _, tool1 := range supported {
+		if matchesToolName(tool1, []string{toolName}) {
 			found = true
 			tool = tool1
+			toolName = tool1.Name()
 			break
 		}
 	}
@@ -29,9 +51,11 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 	if !found {
 		// check if it's a builtin tool like load_skills or shell_execute
 		if strings.EqualFold(toolName, "load_skills") || strings.EqualFold(toolName, toolcore.ToolExecuteShellCommand) {
-			if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok {
-				found = true
-				tool = t
+			if request.AccountId != "" {
+				if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok && t != nil {
+					found = true
+					tool = t
+				}
 			}
 		}
 	}
@@ -42,9 +66,11 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 		// them — otherwise the LLM emits a watch_resource action that gets rejected
 		// at dispatch time even though the tool was advertised in the prompt.
 		if config.Config.WatchEnabled && isWatchToolName(toolName) {
-			if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok {
-				found = true
-				tool = t
+			if request.AccountId != "" {
+				if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok && t != nil {
+					found = true
+					tool = t
+				}
 			}
 		}
 	}
@@ -56,9 +82,11 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 		// the planner advertises it, the model calls it, and dispatch rejects it with
 		// "auth: tool not found", burning an iteration and losing the notebook update.
 		if isNotebookToolName(toolName) {
-			if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok {
-				found = true
-				tool = t
+			if request.AccountId != "" {
+				if t, ok := toolcore.GetNBTool(request.AccountId, toolName); ok && t != nil {
+					found = true
+					tool = t
+				}
 			}
 		}
 	}
@@ -150,7 +178,10 @@ func IsAgentToolAuthorizedToProcessRequest(ctx *security.RequestContext, agent N
 						ctx.GetLogger().Error("auth: unable to execute llm model for infering tool request type", "error", err, "agent", agent.GetName())
 						return nil, nil, err
 					}
-					requestTypeStr := strings.ToLower(response.Choices[0].Content)
+					requestTypeStr := ""
+					if response != nil && len(response.Choices) > 0 && response.Choices[0] != nil {
+						requestTypeStr = strings.ToLower(response.Choices[0].Content)
+					}
 					if strings.Contains(requestTypeStr, "\n") {
 						requestTypeStr = strings.Split(requestTypeStr, "\n")[0]
 					}

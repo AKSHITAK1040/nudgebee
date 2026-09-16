@@ -13,7 +13,10 @@ var nbSystemTools = map[string]func(accountId string) (NBTool, error){}
 // canonical name is the only one the LLM should see, so aliases are back-compat
 // plumbing for historical delegate calls, stored conversations, and any tool-name
 // resolution the LLM produces from prior-turn cached knowledge.
-var toolAliases = map[string]string{}
+var (
+	toolAliases        = map[string]string{}
+	reverseToolAliases = map[string][]string{}
+)
 
 func RegisterNBToolFactory(tool string, toolFactory func(accountId string) (NBTool, error)) {
 	slog.Info("registering tool", "tool", tool)
@@ -31,7 +34,39 @@ func RegisterNBToolFactory(tool string, toolFactory func(accountId string) (NBTo
 // referencing `delegate_agent(tools=["aws"])` resolving after the wrapping
 // agent is unregistered.
 func RegisterNBToolAlias(alias, canonical string) {
-	toolAliases[strings.ToLower(alias)] = strings.ToLower(canonical)
+	aliasLower := strings.ToLower(alias)
+	canonicalLower := strings.ToLower(canonical)
+	if oldCanonical, ok := toolAliases[aliasLower]; ok && oldCanonical != canonicalLower {
+		var filtered []string
+		for _, a := range reverseToolAliases[oldCanonical] {
+			if a != aliasLower {
+				filtered = append(filtered, a)
+			}
+		}
+		reverseToolAliases[oldCanonical] = filtered
+	}
+	toolAliases[aliasLower] = canonicalLower
+	for _, existing := range reverseToolAliases[canonicalLower] {
+		if existing == aliasLower {
+			return
+		}
+	}
+	reverseToolAliases[canonicalLower] = append(reverseToolAliases[canonicalLower], aliasLower)
+}
+
+// ResolveNBToolAlias returns the canonical tool name if alias is a registered
+// alias, or the original name if not aliased. Comparison is case-insensitive.
+func ResolveNBToolAlias(name string) string {
+	if canonical, ok := toolAliases[strings.ToLower(name)]; ok {
+		return canonical
+	}
+	return name
+}
+
+// GetNBToolAliases returns all registered aliases (in lowercase) that map to the
+// given canonical tool name.
+func GetNBToolAliases(canonical string) []string {
+	return reverseToolAliases[strings.ToLower(canonical)]
 }
 
 // ListRegisteredSystemToolNames returns every tool name registered via

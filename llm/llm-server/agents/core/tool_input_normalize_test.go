@@ -182,4 +182,15 @@ func TestNormalizeToolInputByName(t *testing.T) {
 		got := normalizeToolInputByName(tools, "beta", "ls -la")
 		assert.Equal(t, `{"command":"ls -la"}`, got)
 	})
+
+	t.Run("case-insensitive tool name lookup", func(t *testing.T) {
+		got := normalizeToolInputByName(tools, "BETA", "ls -la")
+		assert.Equal(t, `{"command":"ls -la"}`, got)
+	})
+
+	t.Run("registered alias tool lookup", func(t *testing.T) {
+		toolcore.RegisterNBToolAlias("beta_alias", "beta")
+		got := normalizeToolInputByName(tools, "BETA_ALIAS", "ls -la")
+		assert.Equal(t, `{"command":"ls -la"}`, got)
+	})
 }

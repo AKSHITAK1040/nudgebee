@@ -193,6 +193,11 @@ func authorizeWorkspaceRequest(c *gin.Context, requestedAccountId string, tracer
 		if _, found := common.CacheGet(workspace.CacheNamespaceWorkspaceTokens, tokenString); found {
 			return nil, fmt.Errorf("token has been revoked")
 		}
+		allowedTarget := claims.AccountId
+		if claims.TargetAccountId != "" {
+			allowedTarget = claims.TargetAccountId
+		}
+		c.Set("workspace_allowed_target", allowedTarget)
 		if claims.AccountId != requestedAccountId {
 			return nil, fmt.Errorf("token does not match account")
 		}
@@ -448,11 +453,43 @@ func handleWorkspaceExecute(c *gin.Context, tracer trace.Tracer, meter metric.Me
 		_ = audit.CreateAudit(ctx, auditReq)
 	}()
 
-	result, err := tools.ExecuteContainerJob(toolCtx, relayJob, req.Command, req.AccountId, req.Arguments, true)
+	// The pod/token remains bound to req.AccountId; Kubernetes execution uses
+	// the selected cluster account, not the workspace's account.
+	targetAccountId, targetErr := workspaceRelayTarget(toolCtx, relayJob, req.ConfigName)
+	if targetErr != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": targetErr.Error()})
+		return
+	}
+	if allowed, bound := c.Get("workspace_allowed_target"); bound && targetAccountId != allowed {
+		c.JSON(http.StatusForbidden, gin.H{"error": "workspace token does not permit the selected target"})
+		return
+	}
+	result, err := tools.ExecuteContainerJob(toolCtx, relayJob, req.Command, targetAccountId, req.Arguments, true)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error(), "result": result})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{"result": result})
+}
+
+func workspaceRelayTarget(ctx core.NbToolContext, job tools.RelayJob, requestedConfig string) (string, error) {
+	if job != tools.RelayJobKubectl {
+		return ctx.AccountId, nil
+	}
+	if requestedConfig == "" {
+		return ctx.AccountId, nil
+	}
+	if ctx.ToolConfig.Name != requestedConfig {
+		return "", fmt.Errorf("selected cluster configuration is unavailable")
+	}
+	for _, value := range ctx.ToolConfig.Values {
+		if value.Name == "id" && value.Value != "" {
+			if !ctx.Ctx.GetSecurityContext().HasAccountAccess(value.Value, security.SecurityAccessTypeRead) {
+				return "", fmt.Errorf("target cluster access denied")
+			}
+			return value.Value, nil
+		}
+	}
+	return "", fmt.Errorf("selected cluster configuration has no account id")
 }

@@ -32,6 +32,54 @@ func TestSplitKubectlStderrNoise(t *testing.T) {
 	}
 }
 
+// TestContainerDefaultWarning guards against a real production miss: a
+// multi-container pod with no default-container annotation silently returns
+// only one container's logs, and — before this warning existed — nothing in
+// the observation told the LLM another container was never checked. See
+// namespace-233's cart-cache-test repro: the agent concluded "no issues" off
+// a single clean container while the other one carried the actual warning.
+func TestContainerDefaultWarning(t *testing.T) {
+	cases := []struct {
+		name   string
+		stderr string
+		want   string // "" means no warning expected; non-empty checked via Contains
+	}{
+		{"no stderr", "", ""},
+		{"stderr with unrelated noise only", "Warning: some other notice", ""},
+		{
+			"multi-container defaulted — warns and names the others",
+			`Defaulted container "cache" out of: cache, redis`,
+			"redis",
+		},
+		{
+			"single-container pod — kubectl never emits 'out of' with one name, nothing to warn about",
+			`Defaulted container "app" out of: app`,
+			"",
+		},
+		{
+			"three containers — lists every one not fetched",
+			`Defaulted container "main" out of: main, sidecar, exporter`,
+			"sidecar",
+		},
+		{
+			"CRLF line ending and irregular spacing — names parsed without stray whitespace",
+			"Defaulted container \"cache\" out of: cache,  redis \r\n",
+			"(redis)",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := containerDefaultWarning(tc.stderr)
+			if tc.want == "" {
+				assert.Empty(t, got)
+				return
+			}
+			assert.Contains(t, got, tc.want)
+			assert.Contains(t, got, "does not mean the pod is healthy")
+		})
+	}
+}
+
 func TestKubectlResourceKind(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -121,6 +169,21 @@ func TestInferKubectlVerbType(t *testing.T) {
 		{"incomplete describe remains read", "kubectl describe pods -n nudgebee -l", core.ToolRequestTypeRead},
 		{"json wrapped describe", `{"command":"kubectl describe pods -n nudgebee -l"}`, core.ToolRequestTypeRead},
 		{"global flags before read verb", "kubectl --context prod -n nudgebee get pods", core.ToolRequestTypeRead},
+		{"read config current-context", "kubectl config current-context", core.ToolRequestTypeRead},
+		{"read config get-contexts", "kubectl config get-contexts", core.ToolRequestTypeRead},
+		{"read config get-clusters", "kubectl config get-clusters", core.ToolRequestTypeRead},
+		{"read config view", "kubectl config view --minify", core.ToolRequestTypeRead},
+		{"read rollout status deployment/api", "kubectl rollout status deployment/api", core.ToolRequestTypeRead},
+		{"read rollout history deployment/api", "kubectl rollout history deployment/api", core.ToolRequestTypeRead},
+		{"read auth can-i update deployments", "kubectl auth can-i update deployments", core.ToolRequestTypeRead},
+		{"read --context prod auth can-i patch pods", "kubectl --context prod auth can-i patch pods", core.ToolRequestTypeRead},
+		{"fallback config set-context prod", "kubectl config set-context prod", ""},
+		{"fallback config use-context prod", "kubectl config use-context prod", ""},
+		{"fallback rollout restart deployment/api", "kubectl rollout restart deployment/api", ""},
+		{"fallback rollout undo deployment/api", "kubectl rollout undo deployment/api", ""},
+		{"fallback auth reconcile -f roles.yaml", "kubectl auth reconcile -f roles.yaml", ""},
+		{"fallback config --unknown get-contexts", "kubectl config --unknown get-contexts", ""},
+		{"fallback flag before config view", "kubectl config --kubeconfig=foo view", ""},
 		{"create", "kubectl create deployment api --image=nginx", core.ToolRequestTypeCreate},
 		{"update", "kubectl scale deployment api --replicas=2", core.ToolRequestTypeUpdate},
 		{"delete", "kubectl delete pod api-123 -n nudgebee", core.ToolRequestTypeDelete},

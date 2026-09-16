@@ -44,9 +44,31 @@ func (t GcpCliTool) Name() string {
 	return ToolExecuteGcpCliCommand
 }
 
+func (t GcpCliTool) GetNameAliases() []string {
+	return []string{"gcp"}
+}
+
 func (t GcpCliTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
+
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes a
+// GCP-scoped CLI via shell_execute instead of gcp_execute.
+//
+// Includes the sibling CLIs shipped in the same google-cloud-sdk bundle
+// that are commonly used from shell_execute (see cloudCLIMapping in
+// tool_shell.go — same grouping under provider "gcp"):
+//   - gsutil: Cloud Storage. Auto-prefixed by the tool itself (see line 154
+//     comment); routing here keeps the consent gate consistent whether the
+//     LLM calls gcloud_execute("gsutil ...") or shell_execute("gsutil ...").
+//   - bq: BigQuery. gcloud_execute rejects the direct call (see
+//     rejectNonGcloudShapes) and tells the LLM to route via shell_execute,
+//     so registering `bq` here is the ONLY place the consent gate can hook.
+//     Classifier accuracy on `bq` verbs will fall back to the LLM-prompt
+//     path when the static heuristic doesn't recognize them.
+func (t GcpCliTool) ShellCommandPrefixes() []string { return []string{"gcloud", "gsutil", "bq"} }
 
 func (t GcpCliTool) Description() string {
 	return `Executes 'gcloud' CLI commands. This tool allows gathering information from various GCP services.

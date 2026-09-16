@@ -165,25 +165,15 @@ func resolveModelTier(agent NBAgent, request NBAgentRequest) ModelTier {
 // promptVariantForRequest returns the prompt/cache variant for a turn. Only a
 // TOP-LEVEL plain-retrieval (query) turn gets a non-default variant; investigations,
 // sub-agents, and degenerate queries resolve to "" (full/default prompt + its cache
-// slot). Query turns fork the prompt shape AND the cache slot:
-//   - lean-prompt flag ON  → promptVariantLean: drops the heavy investigation overlays
-//     (notebook / hypothesis / orchestrator contract) AND the RCA answer-format spec.
-//   - lean-prompt flag OFF → promptVariantQuery: drops ONLY the RCA answer-format spec,
-//     so a simple query is not answered as an investigation, while keeping every other
-//     overlay identical to today.
-//
-// Either way the variant keys a DISTINCT cache slot from investigation turns, so the
-// two prompt shapes coexist instead of alternating content under one slot and busting it.
+// slot). Query turns use promptVariantLean, which drops investigation-only
+// overlays and the RCA answer-format spec while retaining a distinct cache slot.
 // Classification uses isTopLevelPlainRetrievalTurn — the same canonical signal that
 // drives the model-tier downshift — so prompt variant, cache slot, and tier agree.
 func promptVariantForRequest(request NBAgentRequest) string {
 	if !isTopLevelPlainRetrievalTurn(request) {
 		return ""
 	}
-	if config.Config.LlmServerReact3QueryLeanPromptEnabled {
-		return promptVariantLean
-	}
-	return promptVariantQuery
+	return promptVariantLean
 }
 
 // isTopLevelPlainRetrievalTurn reports whether this is a TOP-LEVEL, non-investigation
@@ -533,6 +523,18 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	}
 
 	// setting the parent agent id
+	policy := request.KnowledgePolicy
+	if !request.KnowledgePolicyResolved {
+		var policyErr error
+		policy, policyErr = resolveKnowledgePolicy(ctx, request.AccountId)
+		if policyErr != nil {
+			return NBAgentResponse{}, policyErr
+		}
+	}
+	applyKnowledgePolicy(&request, policy)
+	if err := validateKnowledgePolicyForAgent(policy, agent); err != nil {
+		return NBAgentResponse{}, err
+	}
 	// Get base system prompt (includes GC for k8s_debugger)
 	promptStart := time.Now()
 	basePrompt := agent.GetSystemPrompt(ctx, request)
@@ -650,6 +652,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// (or the tenant is not allowlisted) the legacy notebook remains primary.
 	tenantID := ctx.GetSecurityContext().GetTenantId()
 	memoryModuleActive := isMemoryV2ActiveFn(tenantID)
+	memoryEnabled := ResolveAgentMemoryEnabled(agent)
 
 	memChan := make(chan string, 1)
 	memV2Chan := make(chan string, 1)
@@ -661,7 +664,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// distinct parent agent as a sub-agent (the canonical test in promptVariantForRequest).
 	isSubAgentInvocation := !isTopLevelInvocation ||
 		(request.ParentAgentId != "" && request.ParentAgentId != request.AgentId)
-	if isSubAgentInvocation {
+	if isSubAgentInvocation || !memoryEnabled {
 		// Empty sends keep the collectors below unblocked.
 		memChan <- ""
 		memV2Chan <- ""
@@ -680,7 +683,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 	// Collect results
 	kbStart := time.Now()
 	kbResult = <-kbChan
-	if memoryModuleActive {
+	if memoryModuleActive && memoryEnabled {
 		// Reference context, not working state: seeding the notebook handed
 		// every injected memory the authority of the agent's own prior
 		// findings. The planner frames it as <user_memory>; the notebook
@@ -691,7 +694,7 @@ func executeAgent(ctx *security.RequestContext, agent NBAgent, request NBAgentRe
 		initialNotebook = <-memChan
 		<-memV2Chan // drain
 	}
-	ctx.GetLogger().Info("agentexecutor: KB and memory retrieval complete", "duration", time.Since(kbStart).String(), "memory_module_active", memoryModuleActive)
+	ctx.GetLogger().Info("agentexecutor: KB and memory retrieval complete", "duration", time.Since(kbStart).String(), "memory_module_active", memoryModuleActive, "agent_memory_enabled", memoryEnabled)
 
 	if len(kbResult.prompt.Instructions) > 0 {
 		basePrompt = kbResult.prompt
@@ -1381,7 +1384,8 @@ func createAgentPlanner(ctx *security.RequestContext, agent NBAgent, request NBA
 		// Orchestrating, ReAct and ReAct3 execute as react_3 by default, or as
 		// react_4 (provider-native tool calling) when LlmServerReAct4Enabled is
 		// set AND the resolved provider/model supports native tools
-		// (useReAct4Engine). Gated off by default. See docs/planner_react_4.md.
+		// (useReAct4Engine). An explicit false override rolls back to ReAct3.
+		// See docs/planner_react_4.md.
 		//
 		// react_4 receives the react_3-style agent systemMessage (built via the
 		// same GetPromptTemplate, which carries no XML action grammar — that
@@ -1483,6 +1487,12 @@ func getNameToTool(t []toolcore.NBTool) map[string]toolcore.NBTool {
 				}
 				nameToTool[strings.ToUpper(alias)] = tool
 			}
+		}
+		for _, alias := range toolcore.GetNBToolAliases(tool.Name()) {
+			if alias == "" {
+				continue
+			}
+			nameToTool[strings.ToUpper(alias)] = tool
 		}
 	}
 	return nameToTool

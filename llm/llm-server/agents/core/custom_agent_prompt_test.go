@@ -8,6 +8,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestCustomAgentSharedCritiquerIsOptIn(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  map[string]any
+		enabled bool
+	}{
+		{name: "missing config defaults off", config: map[string]any{}, enabled: false},
+		{name: "explicit false", config: map[string]any{"enable_shared_critiquer": false}, enabled: false},
+		{name: "explicit true", config: map[string]any{"enable_shared_critiquer": true}, enabled: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			agent := &nbCustomAgent{agent: AgentDto{Config: tt.config}}
+			assert.Equal(t, tt.enabled, agent.CritiqueEnabled())
+		})
+	}
+}
+
 // A custom agent's prompt is stored as JSON, and tool_usage is omitempty. Any
 // agent authored outside the UI — through the ai_create_agent API, a migration,
 // or by hand — normally has no tool_usage key at all, which unmarshals to a nil
@@ -53,4 +72,28 @@ func TestNilToolUsageWriteWouldPanic(t *testing.T) {
 	assert.Panics(t, func() {
 		prompt.ToolUsage["some_tool"] = []string{"a description"}
 	})
+}
+
+func TestCustomAgentThinkingLevel(t *testing.T) {
+	tests := []struct {
+		name   string
+		config map[string]any
+		want   string
+	}{
+		{name: "absent", config: nil, want: ThinkingLevelLow},
+		{name: "low", config: map[string]any{"thinking_level": "LOW"}, want: ThinkingLevelLow},
+		{name: "trimmed", config: map[string]any{"thinking_level": " medium "}, want: ThinkingLevelMedium},
+		{name: "unknown", config: map[string]any{"thinking_level": "enthusiastic"}, want: ThinkingLevelLow},
+		{name: "wrong type", config: map[string]any{"thinking_level": 2}, want: ThinkingLevelLow},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := &nbCustomAgent{agent: AgentDto{Config: tc.config}}
+			assert.Equal(t, tc.want, ResolveAgentThinkingLevel(agent))
+		})
+	}
+
+	assert.Empty(t, ResolveAgentThinkingLevel(&MockAgent{}),
+		"agents without the optional capability must preserve default resolution")
 }

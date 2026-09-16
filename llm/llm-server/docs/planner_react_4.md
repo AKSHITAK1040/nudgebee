@@ -1,7 +1,8 @@
 # ReAct4 Planner — Design Document
 
 > **Status:** Phases 0–3b implemented and merged on the feature branch, all gated
-> off by default (`LlmServerReAct4Enabled=false`). Remaining: Phase 4 (provider
+> on by default (`LlmServerReAct4Enabled=true`), with explicit false as the
+> rollback path. Remaining: Phase 4 (provider
 > round-trip validation + eval parity, both needing a live env) and Phase 5 (XML
 > deletion). This document is the plan of record for moving from prompt-driven
 > (XML) function calling to **provider-native tool calling**. It mirrors the
@@ -158,9 +159,10 @@ for react_3, so a react_4 agent runs with an identical tool surface (`resolveRea
 client tools → account-configured tools (`AgentAdditionalInstructionsAndToolsAndConfigs`) →
 `FilterAndInjectDefaultTools` (injects `load_skills` on KB-mapped agents, plus shell/watch) →
 `FilterTools(capabilities)` → then the `update_notebook` tool (added last so capability
-filtering never drops it). The account-configured `<additional_agent_prompt>` is placed in the
-system prefix, and the human message carries the global-preferences / KB-prestep / skill-lists
-blocks — matching react_3's human-message context so KB/skill flows behave identically.
+filtering never drops it). The stable account-wide `AccountContext` and account-configured
+`<additional_agent_prompt>` are placed in the system prefix. The human message carries the
+request-specific `AccountPrompt` as global preferences, plus KB-prestep / skill-lists blocks —
+matching react_3's context split so KB/skill flows behave identically without cache churn.
 
 ### Tool definitions
 
@@ -266,8 +268,9 @@ rebuilds history from persisted turns instead of rebuilding a scratchpad string.
 
 ## Coexistence & Rollout
 
-1. **Land ReAct4 behind `LlmServerReAct4Enabled` (default off)**, capability-gated. ReAct3 is
-   untouched and remains the default runtime.
+1. **Run ReAct4 behind `LlmServerReAct4Enabled` (default on)**, capability-gated. Native-capable
+   providers use ReAct4; ReAct3 remains the fallback for unsupported providers/models and explicit
+   ReAct3 agents.
 2. **Eval before flip.** Run the existing eval framework (`agents/core/evaluator.go`:
    Correctness / Relevance / Completeness / Helpfulness) and the `prompts/` A/B harness on the
    same query set through both planners. Compare scores, token cost, and tool-call correctness.

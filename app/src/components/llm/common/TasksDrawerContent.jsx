@@ -24,6 +24,10 @@ const withExecutionBatchNodes = (tasks) => {
       return;
     }
     const batch = parseExecutionBatchMetadata(task.metadata);
+    // Prefer the executor-issued batch ID when present. A planner iteration is
+    // the fallback grouping key for sequential/single-action turns; the server
+    // advances it after client-tool resume so separate planner generations no
+    // longer collapse into one drawer node.
     if (!batch) {
       return;
     }

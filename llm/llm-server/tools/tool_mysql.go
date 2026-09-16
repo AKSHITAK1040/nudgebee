@@ -28,6 +28,12 @@ func (m MySQLExecuteTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("mysql ...")` instead of `mysql_execute`.
+func (m MySQLExecuteTool) ShellCommandPrefixes() []string { return []string{"mysql"} }
+
 func (m MySQLExecuteTool) Description() string {
 	return `Executes read-only 'mysql' queries against the user's Database. This tool allows you to gather information about the mysql tables, enabling you to provide informed assistance and suggestions.
 

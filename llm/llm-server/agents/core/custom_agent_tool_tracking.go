@@ -2,6 +2,7 @@ package core
 
 import (
 	"nudgebee/llm/common"
+	"nudgebee/llm/config"
 	toolcore "nudgebee/llm/tools/core"
 	"time"
 
@@ -87,8 +88,18 @@ func CallTool(tc toolcore.NbToolContext, tool toolcore.NBTool, req toolcore.NBTo
 	if callErr != nil {
 		response = callErr.Error()
 	}
+	// Only the persisted copy is capped; resp/callErr (what the caller gets) are untouched.
+	persistedResponse := response
+	if maxChars := config.Config.LlmServerToolCallResponsePersistMaxChars; maxChars > 0 && len(persistedResponse) > maxChars {
+		// Marker overhead can make TruncateMiddle's output longer than the input near
+		// the boundary (e.g. maxChars=100 on a 101-char response) — only apply it if
+		// it actually shrinks the string.
+		if truncated := TruncateMiddle(persistedResponse, maxChars/2, maxChars/2); len(truncated) < len(persistedResponse) {
+			persistedResponse = truncated
+		}
+	}
 	if err := dao.SaveConversationToolCall(tc.ConversationId, tc.AccountId, toolCallUserId(tc), tc.MessageId,
-		tc.ParentAgentId, toolCallId, toolName, "", "", "", stripNullBytes(response),
+		tc.ParentAgentId, toolCallId, toolName, "", "", "", stripNullBytes(persistedResponse),
 		status, tool.GetType(), nil, resp.References, metadataJSON, nil); err != nil {
 		ctx.GetLogger().Error("customagenttool: unable to save tool call result", "tool", toolName, "error", err)
 	}

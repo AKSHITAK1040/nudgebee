@@ -104,7 +104,7 @@ func (l *K8sLeanAgent) IsWatchCapable() bool { return true }
 
 // NB: no CritiqueEnabled() method on purpose — the orchestrator does not
 // implement NBAgentReActPlannerCritiqueSupport, so critique is governed by the
-// standard gate (LlmServerReActCritiqueEnabled && top-level && investigation).
+// standard gate (top-level && investigation).
 
 func (l *K8sLeanAgent) GetSupportedTools(ctx *security.RequestContext) []toolcore.NBTool {
 	// Reduced k8s core (kubectl_execute + logs/events/metrics/traces + SDG +

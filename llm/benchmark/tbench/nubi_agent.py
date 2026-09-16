@@ -29,8 +29,11 @@ Usage:
 import base64
 import json
 import logging
+import math
 import os
+import re
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -67,7 +70,23 @@ _TERMINAL_STATUS_FAIL = {"FAILED", "TERMINATED", "KILLED"}
 _WAITING_FOR_TOOL = "WAITING_FOR_CLIENT_TOOL"
 _AGENT_WAITING = "waiting_for_client_tool"
 
+
+def _positive_float_env(name: str, default: str) -> float:
+    raw = os.environ.get(name, default)
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"Invalid {name}: {raw!r}; expected a positive number"
+        ) from exc
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"Invalid {name}: {raw!r}; expected a positive number")
+    return value
+
+
 _DEFAULT_CMD_TIMEOUT = float(os.environ.get("NUBI_CMD_TIMEOUT", "600"))
+_ORPHAN_CHECK_INTERVAL = _positive_float_env("NUBI_ORPHAN_CHECK_INTERVAL", "2")
+_TIMEOUT_GRACE = float(os.environ.get("NUBI_TIMEOUT_GRACE", "15"))
 
 # Commands are delivered to the container via copy_to_container + `bash <script>`
 # by default (NUBI_SHELL_INLINE_THRESHOLD=0). The keystroke stream only ever
@@ -97,6 +116,16 @@ _DEFAULT_CMD_TIMEOUT = float(os.environ.get("NUBI_CMD_TIMEOUT", "600"))
 # normal benchmark runs.
 _SHELL_INLINE_THRESHOLD = int(os.environ.get("NUBI_SHELL_INLINE_THRESHOLD", "0"))
 _CONTAINER_SCRIPT_DIR = "/tmp"
+_NONINTERACTIVE_ENV = "export PAGER=cat GIT_PAGER=cat SYSTEMD_PAGER=cat MANPAGER=cat"
+_ENVIRONMENT_EXECUTABLES = (
+    "bash sh cat ls find grep sed awk sort uniq wc head tail jq "
+    "printf chmod cp mv rm mkdir touch date "
+    "python3 python node npm go ruby rustc gcc g++ make git curl wget openssl "
+    "iptables nft ufw fail2ban"
+)
+_VERSION_EXECUTABLES = (
+    "python3 python node npm go ruby rustc gcc g++ make git curl wget openssl"
+)
 
 
 def _extract_balanced_json_object(s: str) -> str | None:
@@ -152,7 +181,13 @@ class NuBiAgent(BaseAgent):
         self._tenant_id = os.environ["NUBI_TENANT_ID"]
         self._user_id = os.environ.get("NUBI_USER_ID", "")
         self._poll_interval = int(os.environ.get("NUBI_POLL_INTERVAL", "2"))
-        self._task_timeout = int(os.environ.get("NUBI_TASK_TIMEOUT", "1800"))
+        timeout_override = os.environ.get("NUBI_TASK_TIMEOUT")
+        self._task_timeout_override = (
+            _positive_float_env("NUBI_TASK_TIMEOUT", "1800")
+            if timeout_override is not None
+            else None
+        )
+        self._task_timeout = self._task_timeout_override or 1800.0
         self._agent_name = os.environ.get("NUBI_AGENT_NAME", "tbench")
 
     @property
@@ -191,45 +226,158 @@ class NuBiAgent(BaseAgent):
     def _run(
         self, instruction: str, session: TmuxSession, log_path: Path | None
     ) -> AgentResult:
+        environment = self._discover_environment(session)
+        self._log(log_path, f"[environment] {environment.replace(chr(10), '; ')}")
         with httpx.Client(timeout=30.0) as client:
-            conv_id = self._start_conversation(client, instruction)
+            conv_id = self._start_conversation(client, instruction, environment)
             if not conv_id:
                 return AgentResult(failure_mode=FailureMode.UNKNOWN_AGENT_ERROR)
 
             self._log(log_path, f"[start] conversation_id={conv_id}")
 
-            deadline = time.monotonic() + self._task_timeout
-            while time.monotonic() < deadline:
-                conv = self._poll(client, conv_id)
-                if conv is not None:
-                    status = self._top_status(conv)
-                    self._log(log_path, f"[poll] status={status}")
+            # terminal-bench runs perform_task() in an executor thread. Its
+            # asyncio timeout stops awaiting that thread but cannot cancel the
+            # synchronous function. Without an independent lifecycle watcher,
+            # a timed-out NuBi conversation keeps running while terminal-bench
+            # starts the test session (and can remain WAITING_FOR_CLIENT_TOOL
+            # after the trial container is removed).
+            watchdog_stop = threading.Event()
+            watchdog = threading.Thread(
+                target=self._watch_for_harness_exit,
+                args=(conv_id, session, watchdog_stop, log_path),
+                daemon=True,
+                name=f"nubi-tbench-watchdog-{conv_id[:8]}",
+            )
+            watchdog.start()
 
-                    if status == _WAITING_FOR_TOOL:
-                        self._execute_client_tools(
-                            client, conv, conv_id, session, log_path
-                        )
-                    elif status in _TERMINAL_STATUS_DONE:
-                        return AgentResult()
-                    elif status in _TERMINAL_STATUS_FAIL:
-                        return AgentResult(failure_mode=FailureMode.UNKNOWN_AGENT_ERROR)
+            try:
+                task_timeout, timeout_source = self._resolve_task_timeout(log_path)
+                self._log(
+                    log_path,
+                    f"[budget] adapter={task_timeout:g}s source={timeout_source}",
+                )
+                deadline = time.monotonic() + task_timeout
+                while time.monotonic() < deadline:
+                    remaining = deadline - time.monotonic()
+                    conv = self._poll(
+                        client, conv_id, timeout_sec=min(30.0, max(1.0, remaining))
+                    )
+                    if conv is not None:
+                        status = self._top_status(conv)
+                        self._log(log_path, f"[poll] status={status}")
 
-                time.sleep(self._poll_interval)
+                        if status == _WAITING_FOR_TOOL:
+                            self._execute_client_tools(
+                                client,
+                                conv,
+                                conv_id,
+                                session,
+                                log_path,
+                                deadline,
+                            )
+                        elif status in _TERMINAL_STATUS_DONE:
+                            return AgentResult()
+                        elif status in _TERMINAL_STATUS_FAIL:
+                            return AgentResult(
+                                failure_mode=FailureMode.UNKNOWN_AGENT_ERROR
+                            )
 
-            self._log(log_path, "[timeout] task did not complete in time")
-            return AgentResult(failure_mode=FailureMode.AGENT_TIMEOUT)
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        time.sleep(min(self._poll_interval, remaining))
+
+                self._log(log_path, "[timeout] task did not complete in time")
+                self._stop_conversation(client, conv_id, log_path)
+                return AgentResult(failure_mode=FailureMode.AGENT_TIMEOUT)
+            finally:
+                watchdog_stop.set()
+                watchdog.join(timeout=_ORPHAN_CHECK_INTERVAL + 1)
+
+    def _resolve_task_timeout(self, log_path: Path | None) -> tuple[float, str]:
+        """Finish before terminal-bench's effective agent timeout.
+
+        terminal-bench stores the run-wide override/multiplier in ``tb.lock``
+        and the native timeout in the selected task's ``task.yaml``. Reading
+        those artifacts keeps this adapter aligned with mixed-timeout datasets
+        without changing benchmark limits.
+        """
+        if self._task_timeout_override is not None:
+            return self._task_timeout_override, "env"
+        if log_path is None:
+            return self._task_timeout, "default"
+
+        try:
+            run_dir = log_path.parents[3]
+            task_id = log_path.parents[2].name
+            lock = json.loads((run_dir / "tb.lock").read_text())
+            if not isinstance(lock, dict):
+                raise ValueError("tb.lock root must be an object")
+            run_config = lock.get("run_config")
+            if not isinstance(run_config, dict):
+                run_config = {}
+            harness_timeout = run_config.get("global_agent_timeout_sec")
+            source = "tb.lock:global"
+
+            if harness_timeout is None:
+                dataset = lock.get("dataset")
+                if not isinstance(dataset, dict):
+                    dataset = {}
+                local_path = dataset.get("local_path")
+                task_yaml = None
+                if local_path:
+                    task_yaml = Path(local_path) / task_id / "task.yaml"
+                elif "name" in dataset and "version" in dataset:
+                    task_yaml = (
+                        Path.home()
+                        / ".cache"
+                        / "terminal-bench"
+                        / str(dataset["name"])
+                        / str(dataset["version"])
+                        / task_id
+                        / "task.yaml"
+                    )
+                match = None
+                if task_yaml is not None and task_yaml.exists():
+                    match = re.search(
+                        r"^max_agent_timeout_sec:\s*([0-9.]+)\s*$",
+                        task_yaml.read_text(),
+                        flags=re.MULTILINE,
+                    )
+                native_timeout = float(match.group(1)) if match else 360.0
+                multiplier = float(run_config.get("global_timeout_multiplier") or 1.0)
+                harness_timeout = native_timeout * multiplier
+                source = "task.yaml"
+
+            return max(1.0, float(harness_timeout) - _TIMEOUT_GRACE), source
+        except Exception as exc:
+            logger.warning(
+                "nubi_agent: unable to resolve terminal-bench timeout: %s", exc
+            )
+            return self._task_timeout, "default"
 
     # ------------------------------------------------------------------
     # NuBi API calls
     # ------------------------------------------------------------------
 
-    def _start_conversation(self, client: httpx.Client, instruction: str) -> str | None:
+    def _start_conversation(
+        self, client: httpx.Client, instruction: str, environment: str
+    ) -> str | None:
+        query = (
+            f"@{self._agent_name} {instruction}\n\n"
+            "<terminal_environment>\n"
+            "The benchmark adapter already verified these capabilities in the "
+            "task container:\n"
+            f"{environment}\n"
+            "Reuse this map. Do not repeat generic OS, working-directory, or "
+            "executable discovery unless a command contradicts it.\n"
+            "</terminal_environment>"
+        )
         try:
             resp = client.post(
                 f"{self._url}/v1/completions/chat",
                 headers=self._headers,
                 json={
-                    "query": f"@{self._agent_name} {instruction}",
+                    "query": query,
                     "account_id": self._account_id,
                     "user_id": self._user_id,
                     "tenant_id": self._tenant_id,
@@ -243,12 +391,66 @@ class NuBiAgent(BaseAgent):
             logger.error("nubi_agent: start_conversation failed: %s", exc)
             return None
 
-    def _poll(self, client: httpx.Client, conv_id: str) -> dict | None:
+    def _discover_environment(self, session: TmuxSession) -> str:
+        """Return a bounded, non-secret capability map from the task container."""
+        probe = (
+            'printf "working_directory=%s\\n" "$PWD"; '
+            'printf "kernel="; uname -srm 2>/dev/null || printf "unavailable\\n"; '
+            "if [ -r /etc/os-release ]; then "
+            "sed -n 's/^PRETTY_NAME=/os=/p' /etc/os-release | head -1; "
+            "fi; "
+            f'printf "checked_executables={_ENVIRONMENT_EXECUTABLES}\\n"; '
+            'printf "available_executables="; first=1; missing=""; '
+            f"for name in {_ENVIRONMENT_EXECUTABLES}; do "
+            'path=$(command -v "$name" 2>/dev/null) || { missing="$missing $name"; continue; }; '
+            'if [ "$first" -eq 0 ]; then printf ","; fi; '
+            'printf "%s:%s" "$name" "$path"; first=0; '
+            'done; printf "\\nunavailable_executables=%s\\n" "${missing# }"; '
+            'printf "versions="; first=1; '
+            f"for name in {_VERSION_EXECUTABLES}; do "
+            'command -v "$name" >/dev/null 2>&1 || continue; '
+            'case "$name" in '
+            "go) version=$(go version 2>&1 | head -1) ;; "
+            "openssl) version=$(openssl version 2>&1 | head -1) ;; "
+            '*) version=$("$name" --version 2>&1 | head -1) ;; '
+            "esac; "
+            'if [ "$first" -eq 0 ]; then printf " | "; fi; '
+            'printf "%s:%s" "$name" "$version"; first=0; '
+            'done; printf "\\ncurrent_directory_listing:\\n"; '
+            "ls -la . 2>/dev/null | head -40 | sed 's/^/  /'"
+        )
+        try:
+            result = session.container.exec_run(["sh", "-lc", probe])
+            if result.exit_code != 0:
+                raise RuntimeError(f"probe exited {result.exit_code}")
+            output = result.output
+            if isinstance(output, bytes):
+                output = output.decode("utf-8", errors="replace")
+            output = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "?", str(output))
+            lines = [line.rstrip() for line in output.splitlines() if line.strip()]
+            truncated = "\n".join(lines)[:6000]
+            escaped = (
+                truncated.replace("&", "&amp;")
+                .replace("<", "&lt;")
+                .replace(">", "&gt;")
+            )
+            return escaped or "capability_map=unavailable"
+        except Exception as exc:
+            logger.warning("nubi_agent: environment discovery failed: %s", exc)
+            return "capability_map=unavailable"
+
+    def _poll(
+        self,
+        client: httpx.Client,
+        conv_id: str,
+        timeout_sec: float = 30.0,
+    ) -> dict | None:
         try:
             resp = client.post(
                 f"{self._url}/v1/completions/chat_get",
                 headers=self._headers,
                 json={"conversation_id": conv_id, "account_id": self._account_id},
+                timeout=timeout_sec,
             )
             resp.raise_for_status()
             return resp.json()
@@ -281,6 +483,88 @@ class NuBiAgent(BaseAgent):
         except Exception as exc:
             logger.error("nubi_agent: submit_tool_results failed: %s", exc)
 
+    def _stop_conversation(
+        self,
+        client: httpx.Client,
+        conv_id: str,
+        log_path: Path | None,
+    ) -> bool:
+        """Best-effort, idempotent termination of server-side benchmark work."""
+        try:
+            resp = client.post(
+                f"{self._url}/v1/completions/chat_stop",
+                headers=self._headers,
+                json={
+                    "conversation_id": conv_id,
+                    "account_id": self._account_id,
+                    "user_id": self._user_id,
+                },
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            self._log(log_path, "[stop] conversation terminated")
+            return True
+        except Exception as exc:
+            logger.warning("nubi_agent: stop_conversation failed: %s", exc)
+            self._log(log_path, f"[stop-error] {exc}")
+            return False
+
+    def _watch_for_harness_exit(
+        self,
+        conv_id: str,
+        session: TmuxSession,
+        stop: threading.Event,
+        log_path: Path | None,
+    ) -> None:
+        """Stop NuBi when terminal-bench moves from the agent to its tests.
+
+        asyncio cannot kill the executor thread running this synchronous agent.
+        The appearance of terminal-bench's ``tests`` tmux session is therefore
+        the first reliable signal that the harness has abandoned perform_task.
+        Container removal is the fallback signal for setup/test failures.
+        """
+        unavailable_checks = 0
+        while not stop.wait(_ORPHAN_CHECK_INTERVAL):
+            try:
+                session.container.reload()
+                container_running = session.container.status == "running"
+                tests_started = False
+                if container_running:
+                    result = session.container.exec_run(
+                        ["tmux", "has-session", "-t", "tests"]
+                    )
+                    tests_started = result.exit_code == 0
+            except Exception:
+                container_running = False
+                tests_started = False
+
+            if container_running and not tests_started:
+                unavailable_checks = 0
+                continue
+
+            if not container_running:
+                unavailable_checks += 1
+                # Do not kill a healthy task because of one transient Docker
+                # API error. A removed container remains unavailable.
+                if unavailable_checks < 2:
+                    continue
+
+            reason = "tests_started" if tests_started else "container_stopped"
+            self._log(log_path, f"[watchdog] harness exited agent phase: {reason}")
+            if tests_started:
+                try:
+                    session.container.exec_run(
+                        ["tmux", "send-keys", "-t", "agent", "C-c"]
+                    )
+                except Exception:
+                    logger.warning(
+                        "nubi_agent: failed to interrupt orphaned agent command"
+                    )
+
+            with httpx.Client(timeout=30.0) as client:
+                self._stop_conversation(client, conv_id, log_path)
+            return
+
     # ------------------------------------------------------------------
     # Client-tool execution
     # ------------------------------------------------------------------
@@ -292,6 +576,7 @@ class NuBiAgent(BaseAgent):
         conv_id: str,
         session: TmuxSession,
         log_path: Path | None,
+        deadline: float,
     ) -> None:
         data = conv.get("data", conv)
         messages = data.get("llm_conversation_messages", [])
@@ -313,7 +598,12 @@ class NuBiAgent(BaseAgent):
                     command = self._extract_command(tc.get("tool_input"))
                     self._log(log_path, f"[exec] {command!r}")
 
-                    output = self._run_in_terminal(session, command)
+                    remaining = max(1.0, deadline - time.monotonic())
+                    output = self._run_in_terminal(
+                        session,
+                        command,
+                        max_timeout_sec=min(_DEFAULT_CMD_TIMEOUT, remaining),
+                    )
                     self._log(log_path, f"[output] {len(output)} chars")
                     results.append(
                         {"tool_id": tool_id, "result": output, "status": "SUCCESS"}
@@ -369,17 +659,30 @@ class NuBiAgent(BaseAgent):
                 pass
         return tool_input
 
-    def _run_in_terminal(self, session: TmuxSession, command: str) -> str:
+    def _run_in_terminal(
+        self,
+        session: TmuxSession,
+        command: str,
+        max_timeout_sec: float = _DEFAULT_CMD_TIMEOUT,
+    ) -> str:
         if not command:
             return ""
+        command = self._with_noninteractive_env(command)
         if self._needs_script_delivery(command):
             delivered = self._deliver_via_script(session, command)
             if delivered is not None:
-                return self._send_and_capture(session, delivered)
+                return self._send_and_capture(
+                    session, delivered, max_timeout_sec=max_timeout_sec
+                )
             # copy_to_container failed — fall back to base64 inline.
             b64 = base64.b64encode(command.encode("utf-8")).decode("ascii")
             command = f"printf %s '{b64}' | base64 -d | bash"
-        return self._send_and_capture(session, command)
+        return self._send_and_capture(session, command, max_timeout_sec=max_timeout_sec)
+
+    @staticmethod
+    def _with_noninteractive_env(command: str) -> str:
+        """Disable implicit pagers while preserving the command's shell syntax."""
+        return f"{_NONINTERACTIVE_ENV}\n{command}"
 
     @staticmethod
     def _needs_script_delivery(command: str) -> bool:
@@ -432,12 +735,17 @@ class NuBiAgent(BaseAgent):
             f"rc=$?; rm -f {_CONTAINER_SCRIPT_DIR}/{container_filename}; (exit $rc)"
         )
 
-    def _send_and_capture(self, session: TmuxSession, command: str) -> str:
+    def _send_and_capture(
+        self,
+        session: TmuxSession,
+        command: str,
+        max_timeout_sec: float = _DEFAULT_CMD_TIMEOUT,
+    ) -> str:
         session.get_incremental_output()  # drain buffer before running
         try:
             session.send_command(
                 TerminalCommand(
-                    command=command, block=True, max_timeout_sec=_DEFAULT_CMD_TIMEOUT
+                    command=command, block=True, max_timeout_sec=max_timeout_sec
                 )
             )
         except TimeoutError:
@@ -450,7 +758,7 @@ class NuBiAgent(BaseAgent):
             partial = session.get_incremental_output()
             return (
                 f"[TIMEOUT] command did not finish within "
-                f"{int(_DEFAULT_CMD_TIMEOUT)}s and was interrupted.\n"
+                f"{int(max_timeout_sec)}s and was interrupted.\n"
                 f"Partial output:\n{partial}"
             )
         return session.get_incremental_output()

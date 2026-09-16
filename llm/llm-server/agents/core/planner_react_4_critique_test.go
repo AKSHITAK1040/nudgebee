@@ -30,31 +30,56 @@ func TestReAct4_IsTopLevel(t *testing.T) {
 	assert.False(t, o.isTopLevel())
 }
 
-func TestReAct4_ShouldCritique(t *testing.T) {
-	// Each case mutates the global critique flag, so isolate them in subtests with
-	// per-case t.Cleanup restore rather than a single shared defer.
-	setCritiqueFlag := func(t *testing.T, v bool) {
-		orig := config.Config.LlmServerReActCritiqueEnabled
-		t.Cleanup(func() { config.Config.LlmServerReActCritiqueEnabled = orig })
-		config.Config.LlmServerReActCritiqueEnabled = v
-	}
+func TestReAct4_OrchestratorDeepThinking(t *testing.T) {
+	previous := config.Config.LlmServerOrchestratorThinkingLevel
+	t.Cleanup(func() { config.Config.LlmServerOrchestratorThinkingLevel = previous })
+	config.Config.LlmServerOrchestratorThinkingLevel = "medium"
 
-	t.Run("explicit per-request enable wins regardless of config/topology", func(t *testing.T) {
-		setCritiqueFlag(t, false)
+	orchestrator := &NBReActPlanner4{request: NBAgentRequest{AgentId: "parent"}}
+	// A fresh planner's first Plan call is direction-setting even when restored
+	// history will pass non-empty intermediate steps into Plan.
+	assert.True(t, orchestrator.orchestratorDeepThinking(orchestrator.beginPlanCall()))
+	assert.False(t, orchestrator.orchestratorDeepThinking(orchestrator.beginPlanCall()))
+	orchestrator.refinementData = []refinementRecord{{}}
+	assert.True(t, orchestrator.orchestratorDeepThinking(false))
+
+	subAgent := &NBReActPlanner4{request: NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}}
+	assert.False(t, subAgent.orchestratorDeepThinking(true))
+
+	config.Config.LlmServerOrchestratorThinkingLevel = ""
+	assert.False(t, orchestrator.orchestratorDeepThinking(true))
+}
+
+func TestReAct4_ShouldCritique(t *testing.T) {
+	t.Run("explicit per-request enable wins regardless of topology", func(t *testing.T) {
 		o := &NBReActPlanner4{enableCritique: true, request: NBAgentRequest{AgentId: "child", ParentAgentId: "parent"}}
 		assert.True(t, o.shouldCritique())
 	})
 
-	t.Run("config on + sub-agent -> not allowed (sub-agents are never critiqued)", func(t *testing.T) {
-		setCritiqueFlag(t, true)
+	t.Run("sub-agent is not automatically critiqued", func(t *testing.T) {
 		o := &NBReActPlanner4{enableCritique: false, request: NBAgentRequest{AgentId: "child", ParentAgentId: "parent", Query: "why is the pod crashing"}}
 		assert.False(t, o.shouldCritique())
 	})
 
-	t.Run("config off + no explicit enable -> not allowed even at top level", func(t *testing.T) {
-		setCritiqueFlag(t, false)
+	t.Run("top-level investigation is automatically critiqued", func(t *testing.T) {
 		o := &NBReActPlanner4{enableCritique: false, request: NBAgentRequest{AgentId: "a1", Query: "why is the pod crashing"}}
+		assert.True(t, o.shouldCritique())
+	})
+
+	t.Run("database custom agent defaults off", func(t *testing.T) {
+		o := &NBReActPlanner4{
+			nbAgent: &nbCustomAgent{agent: AgentDto{Config: map[string]any{}}},
+			request: NBAgentRequest{AgentId: "custom", Query: "why is the pod crashing"},
+		}
 		assert.False(t, o.shouldCritique())
+	})
+
+	t.Run("database custom agent can opt in", func(t *testing.T) {
+		o := &NBReActPlanner4{
+			nbAgent: &nbCustomAgent{agent: AgentDto{Config: map[string]any{"enable_shared_critiquer": true}}},
+			request: NBAgentRequest{AgentId: "custom", Query: "why is the pod crashing"},
+		}
+		assert.True(t, o.shouldCritique())
 	})
 }
 

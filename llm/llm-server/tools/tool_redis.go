@@ -31,6 +31,12 @@ func (m RedisExecuteTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("redis-cli ...")` instead of `redis_execute`.
+func (m RedisExecuteTool) ShellCommandPrefixes() []string { return []string{"redis-cli"} }
+
 func (m RedisExecuteTool) Description() string {
 	return `Executes redis-cli commands against the user's Redis instance. This tool allows you to gather information about Redis resources and configuration, enabling you to provide informed assistance and suggestions.
 
@@ -217,6 +223,14 @@ func (m RedisExecuteTool) InferToolRequestTypePrompt(ctx *security.RequestContex
 	answer: delete
 	`
 	return prompt, nil
+}
+
+func (m RedisExecuteTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
+	requestType := inferRedisRequestType(input)
+	if requestType == "" {
+		ctx.GetLogger().Warn("redis: action not recognized by heuristic, falling through to LLM classification", "input", input)
+	}
+	return requestType, nil
 }
 
 func (m RedisExecuteTool) IdentifyConfig(ctx core.NbToolContext, input core.NBToolCallRequest, availableConfigs []core.ToolConfig) (core.ToolConfig, error) {

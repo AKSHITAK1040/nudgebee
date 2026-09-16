@@ -79,8 +79,8 @@ func (l LLMAgent) Execute(ctx *security.RequestContext, request NBAgentRequest) 
 	}
 
 	accountInstructions := ""
-	if request.AccountPrompt != "" {
-		accountInstructions = fmt.Sprintf("\nAccount Instructions:\n%s\n", common.SanitizePromptInput(request.AccountPrompt))
+	if accountPrompt := CombinedAccountPrompt(request); accountPrompt != "" {
+		accountInstructions = fmt.Sprintf("\nAccount Instructions:\n%s\n", common.SanitizePromptInput(accountPrompt))
 	}
 
 	sourceInfo := ""

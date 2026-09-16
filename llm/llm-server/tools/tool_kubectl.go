@@ -110,6 +110,52 @@ func splitKubectlStderrNoise(response string) (stdout, stderr string) {
 	return strings.Join(lines[i:], "\n"), strings.Join(lines[:i], "\n")
 }
 
+// containerDefaultWarning parses a "Defaulted container ... out of: a, b, c"
+// stderr line and, when the pod has more than one container, returns a
+// stdout-visible note listing the ones that were NOT fetched — so the LLM
+// can't mistake "this container's logs are clean" for "the pod is healthy".
+// Returns "" when stderr doesn't contain the notice, or the pod only has one
+// container (nothing was actually skipped).
+func containerDefaultWarning(stderr string) string {
+	const marker = `Defaulted container "`
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimRight(line, "\r")
+		idx := strings.Index(line, marker)
+		if idx == -1 {
+			continue
+		}
+		rest := line[idx+len(marker):]
+		nameEnd := strings.Index(rest, `"`)
+		if nameEnd == -1 {
+			continue
+		}
+		defaulted := rest[:nameEnd]
+		const outOf = `" out of: `
+		if !strings.HasPrefix(rest[nameEnd:], outOf) {
+			continue
+		}
+		var names, others []string
+		for _, n := range strings.Split(rest[nameEnd+len(outOf):], ",") {
+			n = strings.TrimSpace(n)
+			if n == "" {
+				continue
+			}
+			names = append(names, n)
+			if n != defaulted {
+				others = append(others, n)
+			}
+		}
+		if len(names) < 2 || len(others) == 0 {
+			return ""
+		}
+		return fmt.Sprintf(
+			"\n\n[NOTE: this pod has multiple containers (%s). This command only returned logs for the default container %q — the others (%s) were NOT checked. A clean result here does not mean the pod is healthy; re-run with -c <container> for each of the others before concluding there is no issue.]",
+			strings.Join(names, ", "), defaulted, strings.Join(others, ", "),
+		)
+	}
+	return ""
+}
+
 func init() {
 	core.RegisterNBToolFactory(ToolExecuteKubectlCommand, func(accountId string) (core.NBTool, error) {
 		return KubectlExecuteTool{}, nil
@@ -449,6 +495,12 @@ func (m KubectlExecuteTool) GetNameAliases() []string {
 func (m KubectlExecuteTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
+
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("kubectl ...")` instead of `kubectl_execute`.
+func (m KubectlExecuteTool) ShellCommandPrefixes() []string { return []string{"kubectl"} }
 
 func (m KubectlExecuteTool) Description() string {
 	return `Executes 'kubectl' commands against the user's Kubernetes cluster. This tool allows you to gather information about the cluster's resources and configuration, enabling you to provide informed assistance and suggestions.
@@ -878,25 +930,23 @@ func (m KubectlExecuteTool) Call(nbRequestContext core.NbToolContext, input core
 		}
 	}
 
-	// Extract accountId from tool config (selected cluster account)
-	configAccountId := ""
-	for _, v := range nbRequestContext.ToolConfig.Values {
-		if v.Name == "id" {
-			configAccountId = v.Value
-			break
+	// The shim routes the selected cluster via NB_TOOL_CONFIG_NAME. Keep files
+	// in the original conversation workspace even for cross-environment calls.
+	wm := workspace.NewWorkspaceManager()
+	requestType, classifyErr := m.InferToolRequestType(nbRequestContext.Ctx, m.Name(), command)
+	if classifyErr != nil {
+		return core.NBToolResponse{}, classifyErr
+	}
+	if requestType != core.ToolRequestTypeRead {
+		if accessErr := CheckShellTargetWriteAccess(nbRequestContext.Ctx, nbRequestContext.ToolConfig); accessErr != nil {
+			return core.NBToolResponse{}, accessErr
 		}
 	}
-
-	// Use config-selected account if available, otherwise fall back to request account
-	effectiveAccountId := nbRequestContext.AccountId
-	if configAccountId != "" {
-		effectiveAccountId = configAccountId
+	env, err := KubernetesTargetEnv(nbRequestContext, nbRequestContext.ToolConfig)
+	if err != nil {
+		return core.NBToolResponse{}, err
 	}
-
-	wm := workspace.NewWorkspaceManager()
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, effectiveAccountId, nbRequestContext.ConversationId, command, map[string]string{
-		workspace.ENV_NB_TOOL_CONFIG_NAME: nbRequestContext.ToolConfig.Name,
-	})
+	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
 	if err != nil {
 		// Pipeline-tail no-match reclassification (issue #32240).
 		// The LLM regularly uses kubectl with `| grep` / `| awk` /
@@ -921,6 +971,17 @@ func (m KubectlExecuteTool) Call(nbRequestContext core.NbToolContext, input core
 	}
 
 	stdout, stderr := splitKubectlStderrNoise(response)
+
+	// "Defaulted container" is the one stderr notice that changes what the
+	// LLM should conclude from stdout: `kubectl logs pod/x` with no `-c` on a
+	// multi-container pod silently picks one container and returns only its
+	// logs. Hiding that in Metadata.Stderr (like every other noise line)
+	// means the LLM never learns the other containers were never checked and
+	// treats a clean single-container log as proof the whole pod is healthy.
+	// See containerDefaultWarning for the exact trigger condition.
+	if warning := containerDefaultWarning(stderr); warning != "" {
+		stdout += warning
+	}
 
 	// Wrap stdout in JSON so agents can parse it. Stderr is intentionally
 	// NOT packed into this envelope — it travels via Metadata.Stderr so it
@@ -1166,6 +1227,17 @@ func inferKubectlVerbType(command string) core.ToolRequestType {
 	verb := strings.ToLower(parts[0])
 	if kubectlReadVerbs[verb] {
 		return core.ToolRequestTypeRead
+	}
+
+	// These subcommands inspect state. Keep sibling mutations (config set-*,
+	// rollout restart/undo, auth reconcile) on the existing fallback path.
+	if len(parts) > 1 {
+		subcommand := parts[1]
+		if (verb == "config" && (subcommand == "current-context" || subcommand == "get-contexts" || subcommand == "get-clusters" || subcommand == "view")) ||
+			(verb == "rollout" && (subcommand == "status" || subcommand == "history")) ||
+			(verb == "auth" && subcommand == "can-i") {
+			return core.ToolRequestTypeRead
+		}
 	}
 
 	if kubectlCreateVerbs[verb] {

@@ -70,7 +70,7 @@ func (t *delegateAgentTool) Description() string {
 Input: {"prompt": <brief>, "tools": [<tool names>], "max_iterations": <int>} — "tools" is required; omitting it leaves the sub-agent LLM-only, which is almost always misuse. max_iterations defaults to 5, minimum 2, maximum 15.
 USE when a specific sub-question needs 3+ tool calls to answer and would otherwise pollute your own scratchpad with serial discovery (e.g. "investigate DNS for service X", "check egress firewall for namespace Y").
 DO NOT use when 1-2 tool calls suffice — call the tool directly.
-DO NOT use to record findings — write to your own notebook with <update_notebook>. Prompts that start with "update the notebook" / "updating the notebook" are rejected at the tool boundary with an error pointing here.
+DO NOT use to record findings — the parent agent owns investigation state. Prompts that start with "update the notebook" / "updating the notebook" are rejected at the tool boundary with an error pointing here.
 DO NOT use to format, summarize, or rewrite text — call the LLM tool directly.
 DO NOT use as a final-answer preamble.`
 }
@@ -382,7 +382,7 @@ func parseDelegateInput(input toolcore.NBToolCallRequest) (prompt string, toolNa
 	// Reject notebook-update misuse at the tool boundary. See
 	// notebookMisusePromptRe for the why and the rejection rationale.
 	if notebookMisusePromptRe.MatchString(prompt) {
-		return "", nil, 0, fmt.Errorf("delegate_agent rejected: prompt starts with 'update the notebook' — the sub-agent's job is to investigate a focused sub-question, not to record findings on your behalf. Write to your own notebook with the <update_notebook> XML tag in your next thought; do not delegate the notebook update")
+		return "", nil, 0, fmt.Errorf("delegate_agent rejected: prompt starts with 'update the notebook' — the sub-agent's job is to investigate a focused sub-question, not to record findings on your behalf. Update the parent agent's notebook directly; do not delegate the notebook update")
 	}
 
 	// Reject degenerate single-iteration delegations when no tools are provided.
@@ -719,6 +719,14 @@ func (a *dynamicReActAgent) GetPlannerType() core.AgentPlannerType {
 // trimmed orchestrators' on-demand reach-back) cost-competitive with a direct tool call.
 func (a *dynamicReActAgent) GetModelCategory() core.ModelTier {
 	return core.ModelTierRetrieval
+}
+
+// GetNotebookEnabled keeps delegated specialists focused on their bounded brief.
+// The parent orchestrator owns investigation state and receives the delegate's
+// evidence when it completes, so a separate child notebook only consumes the
+// delegate's limited iteration budget.
+func (a *dynamicReActAgent) GetNotebookEnabled() bool {
+	return false
 }
 
 // GetMaxIterations implements core.NBAgentIterationProvider to cap the sub-agent's

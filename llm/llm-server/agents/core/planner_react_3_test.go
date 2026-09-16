@@ -29,7 +29,7 @@ func renderReact3Base(t *testing.T, notebookEnabled, hypothesisModeEnabled bool)
 }
 
 // renderReact3BaseWithRoles is renderReact3Base with the orchestrator/executor
-// role-overlay gates exposed, mirroring resolveReact3RoleModes outputs.
+// role-overlay gates exposed, mirroring resolveOrchestratorRoleModes outputs.
 func renderReact3BaseWithRoles(t *testing.T, notebookEnabled, hypothesisModeEnabled, orchestratorMode, executorMode bool) string {
 	t.Helper()
 	base := nbprompts.GetPrompt(context.Background(), nbprompts.PromptReact3Base, "")
@@ -38,7 +38,7 @@ func renderReact3BaseWithRoles(t *testing.T, notebookEnabled, hypothesisModeEnab
 	vars := []string{
 		"tool_names", "tool_descriptions",
 		"delegate_agent_enabled", "notebook_enabled", "hypothesis_mode_enabled",
-		"orchestrator_mode", "executor_mode", "is_investigation",
+		"is_top_level", "orchestrator_mode", "executor_mode", "is_investigation",
 		"conversation_context_enabled", "context_management_rules", "time_handling_rules",
 		"data_protection_rules", "code_analysis_rules", "security_rules",
 		"memory_consumption_rules", "async_completion_rules",
@@ -50,6 +50,7 @@ func renderReact3BaseWithRoles(t *testing.T, notebookEnabled, hypothesisModeEnab
 		"delegate_agent_enabled":       false,
 		"notebook_enabled":             notebookEnabled,
 		"hypothesis_mode_enabled":      hypothesisModeEnabled,
+		"is_top_level":                 true,
 		"orchestrator_mode":            orchestratorMode,
 		"executor_mode":                executorMode,
 		"is_investigation":             true, // keep the full (investigation) prompt for these role/hypothesis fences
@@ -64,6 +65,46 @@ func renderReact3BaseWithRoles(t *testing.T, notebookEnabled, hypothesisModeEnab
 	})
 	assert.NoError(t, err, "react_3 base prompt must render without template errors")
 	return out
+}
+
+func TestReAct3CustomAgentPromptHidesBuiltInToolAssumptions(t *testing.T) {
+	base := nbprompts.GetPrompt(context.Background(), nbprompts.PromptReact3CustomBase, "")
+	require.NotEmpty(t, base)
+	tmpl := prompts.NewPromptTemplate(base, []string{
+		"tool_names", "tool_descriptions", "notebook_enabled", "is_investigation",
+		"time_handling_rules", "security_rules",
+	})
+	out, err := tmpl.Format(map[string]any{
+		"tool_names": "custom_shell_execute", "tool_descriptions": "custom_shell_execute: raw shell input",
+		"notebook_enabled": true, "is_investigation": true,
+		"time_handling_rules": "", "security_rules": "",
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, out, "Specialized Agent Priority")
+	assert.NotContains(t, out, "Specialized Agents vs. Shell")
+	assert.NotContains(t, out, "If a `remediation` tool is available")
+	assert.NotContains(t, out, "Step 1 — target is unknown")
+	assert.Contains(t, out, "A dependency is concrete")
+	assert.Contains(t, out, "fan out the cheapest independent read-only checks")
+	assert.Contains(t, out, "generic approach, not a requirement")
+	assert.Contains(t, out, "independent checks may span several hypotheses")
+}
+
+func TestReAct3CustomAgentQueryOmitsInvestigationPolicy(t *testing.T) {
+	base := nbprompts.GetPrompt(context.Background(), nbprompts.PromptReact3CustomBase, "")
+	tmpl := prompts.NewPromptTemplate(base, []string{
+		"tool_names", "tool_descriptions", "notebook_enabled", "is_investigation",
+		"time_handling_rules", "security_rules",
+	})
+	out, err := tmpl.Format(map[string]any{
+		"tool_names": "custom_tool", "tool_descriptions": "custom_tool: ...",
+		"notebook_enabled": false, "is_investigation": false,
+		"time_handling_rules": "", "security_rules": "",
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, out, "INVESTIGATION PATTERN")
+	assert.NotContains(t, out, "plausible failure domains")
 }
 
 // TestReAct3HypothesisModeFence verifies the hypothesis-driven investigation
@@ -105,6 +146,39 @@ func TestReAct3HypothesisModeFence(t *testing.T) {
 		assert.NotContains(t, out, notebookHeader)
 		assert.NotContains(t, out, hypothesisHeader)
 	})
+}
+
+func TestReAct3InvestigationPromptDistinguishesDependenciesFromParallelBranches(t *testing.T) {
+	out := renderReact3Base(t, true, true)
+
+	assert.Contains(t, out, "Chain dependent steps; parallelize independent branches")
+	assert.Contains(t, out, "three parallel actions")
+	assert.Contains(t, out, "shared purpose, target, hypothesis, or tool name does not by itself create a dependency")
+	assert.NotContains(t, out, "Worked investigation pattern")
+	assert.NotContains(t, out, "at most one targeted confirmation")
+}
+
+func TestCustomAgentsOptOutOfAccountContext(t *testing.T) {
+	custom := &nbCustomAgent{}
+	assert.False(t, ResolveAgentAccountContextEnabled(custom))
+
+	builtIn := &MockAgent{}
+	assert.True(t, ResolveAgentAccountContextEnabled(builtIn),
+		"agents without an explicit capability retain the existing default")
+}
+
+func TestCustomAgentsOptOutOfMemory(t *testing.T) {
+	custom := &nbCustomAgent{}
+	assert.False(t, ResolveAgentMemoryEnabled(custom))
+
+	builtIn := &MockAgent{}
+	assert.True(t, ResolveAgentMemoryEnabled(builtIn),
+		"agents without an explicit capability retain the existing default")
+}
+
+func TestReact3BasePromptNameIsolatesDatabaseBackedCustomAgents(t *testing.T) {
+	assert.Equal(t, nbprompts.PromptReact3CustomBase, react3BasePromptName(&nbCustomAgent{}))
+	assert.Equal(t, nbprompts.PromptReact3Base, react3BasePromptName(&MockAgent{}))
 }
 
 func TestReActPlannerStopWordsCoverAttributedObservations(t *testing.T) {
@@ -201,11 +275,8 @@ func TestReAct3RoleOverlayFence(t *testing.T) {
 // enforcement in buildScratchpad: with orchestrator mode on, a turn that has
 // run 2+ tool actions while the notebook lacks an `## Answer Contract`
 // section gets a system nudge; trivial turns, sub-agents, contract-carrying
-// notebooks, and flag-off deployments do not.
+// notebooks do not.
 func TestReAct3AnswerContractNudge(t *testing.T) {
-	prev := config.Config.LlmServerReact3OrchestratorModeEnabled
-	defer func() { config.Config.LlmServerReact3OrchestratorModeEnabled = prev }()
-
 	step := func(id string) NBAgentPlannerToolActionStep {
 		return NBAgentPlannerToolActionStep{
 			Action:      NBAgentPlannerToolAction{Tool: "kubectl", ToolInput: "get pods", Log: "checking", ToolID: id},
@@ -215,8 +286,6 @@ func TestReAct3AnswerContractNudge(t *testing.T) {
 	}
 	twoSteps := []NBAgentPlannerToolActionStep{step("t1"), step("t2")}
 	const nudgeMarker = "ANSWER CONTRACT MISSING"
-
-	config.Config.LlmServerReact3OrchestratorModeEnabled = true
 
 	t.Run("orchestrator, 2+ steps, no contract: nudge fires", func(t *testing.T) {
 		planner := &NBReActPlanner3{request: NBAgentRequest{AgentId: "a1", ParentAgentId: ""}}
@@ -265,55 +334,34 @@ func TestReAct3AnswerContractNudge(t *testing.T) {
 		planner := &NBReActPlanner3{request: NBAgentRequest{AgentId: "a2", ParentAgentId: "a1"}}
 		assert.NotContains(t, planner.buildScratchpad(twoSteps), nudgeMarker)
 	})
-
-	t.Run("feature off: no nudge", func(t *testing.T) {
-		config.Config.LlmServerReact3OrchestratorModeEnabled = false
-		defer func() { config.Config.LlmServerReact3OrchestratorModeEnabled = true }()
-		planner := &NBReActPlanner3{request: NBAgentRequest{AgentId: "a1", ParentAgentId: ""}}
-		assert.NotContains(t, planner.buildScratchpad(twoSteps), nudgeMarker)
-	})
 }
 
-// TestResolveReact3RoleModes verifies the role gates: mutually exclusive by
-// ParentAgentId, and both false when the feature flag is off.
-func TestResolveReact3RoleModes(t *testing.T) {
-	prev := config.Config.LlmServerReact3OrchestratorModeEnabled
-	defer func() { config.Config.LlmServerReact3OrchestratorModeEnabled = prev }()
-
+// TestResolveOrchestratorRoleModes verifies that role gates are mutually
+// exclusive according to ParentAgentId.
+func TestResolveOrchestratorRoleModes(t *testing.T) {
 	topLevel := NBAgentRequest{AgentId: "a1", ParentAgentId: ""}
 	selfParent := NBAgentRequest{AgentId: "a1", ParentAgentId: "a1"}
 	subAgent := NBAgentRequest{AgentId: "a2", ParentAgentId: "a1"}
 
-	config.Config.LlmServerReact3OrchestratorModeEnabled = true
 	for name, req := range map[string]NBAgentRequest{"empty parent": topLevel, "self parent": selfParent} {
-		orch, exec := resolveReact3RoleModes(req)
+		orch, exec := resolveOrchestratorRoleModes(req)
 		assert.True(t, orch, "%s must resolve as orchestrator", name)
 		assert.False(t, exec, "%s must not resolve as executor", name)
 	}
-	orch, exec := resolveReact3RoleModes(subAgent)
+	orch, exec := resolveOrchestratorRoleModes(subAgent)
 	assert.False(t, orch, "sub-agent must not resolve as orchestrator")
 	assert.True(t, exec, "sub-agent must resolve as executor")
-
-	config.Config.LlmServerReact3OrchestratorModeEnabled = false
-	for name, req := range map[string]NBAgentRequest{"top-level": topLevel, "sub-agent": subAgent} {
-		orch, exec := resolveReact3RoleModes(req)
-		assert.False(t, orch, "%s: orchestrator overlay must be off when feature disabled", name)
-		assert.False(t, exec, "%s: executor overlay must be off when feature disabled", name)
-	}
 }
 
 // TestOrchestratorDeepThinking verifies the elevated thinking level is scoped
 // to the orchestrator's direction-setting calls: first plan call of a turn and
 // post-critique refinement passes — never sub-agents or mid-loop iterations.
 func TestOrchestratorDeepThinking(t *testing.T) {
-	prevEnabled := config.Config.LlmServerReact3OrchestratorModeEnabled
-	prevLevel := config.Config.LlmServerReact3OrchestratorThinkingLevel
+	prevLevel := config.Config.LlmServerOrchestratorThinkingLevel
 	defer func() {
-		config.Config.LlmServerReact3OrchestratorModeEnabled = prevEnabled
-		config.Config.LlmServerReact3OrchestratorThinkingLevel = prevLevel
+		config.Config.LlmServerOrchestratorThinkingLevel = prevLevel
 	}()
-	config.Config.LlmServerReact3OrchestratorModeEnabled = true
-	config.Config.LlmServerReact3OrchestratorThinkingLevel = "medium"
+	config.Config.LlmServerOrchestratorThinkingLevel = "medium"
 
 	orchestrator := &NBReActPlanner3{request: NBAgentRequest{AgentId: "a1", ParentAgentId: ""}}
 	subAgent := &NBReActPlanner3{request: NBAgentRequest{AgentId: "a2", ParentAgentId: "a1"}}
@@ -325,27 +373,23 @@ func TestOrchestratorDeepThinking(t *testing.T) {
 
 	assert.False(t, subAgent.orchestratorDeepThinking(true), "executor sub-agent never gets the override")
 
-	config.Config.LlmServerReact3OrchestratorThinkingLevel = ""
+	config.Config.LlmServerOrchestratorThinkingLevel = ""
 	orchestrator.refinementAttempts = 0
 	assert.False(t, orchestrator.orchestratorDeepThinking(true), "empty level disables the override")
-
-	config.Config.LlmServerReact3OrchestratorThinkingLevel = "medium"
-	config.Config.LlmServerReact3OrchestratorModeEnabled = false
-	assert.False(t, orchestrator.orchestratorDeepThinking(true), "feature flag off disables the override")
 }
 
 // TestResolveOrchestratorThinkingLevel verifies the override is elevate-only:
 // it applies only when configured above the model's dynamic default (or the
 // global LlmProviderThinkingLevel override), and never lowers thinking.
 func TestResolveOrchestratorThinkingLevel(t *testing.T) {
-	prevOrch := config.Config.LlmServerReact3OrchestratorThinkingLevel
+	prevOrch := config.Config.LlmServerOrchestratorThinkingLevel
 	prevGlobal := config.Config.LlmProviderThinkingLevel
 	defer func() {
-		config.Config.LlmServerReact3OrchestratorThinkingLevel = prevOrch
+		config.Config.LlmServerOrchestratorThinkingLevel = prevOrch
 		config.Config.LlmProviderThinkingLevel = prevGlobal
 	}()
 	config.Config.LlmProviderThinkingLevel = ""
-	config.Config.LlmServerReact3OrchestratorThinkingLevel = "medium"
+	config.Config.LlmServerOrchestratorThinkingLevel = "medium"
 
 	// gemini-3 pro defaults to "low" → medium elevates.
 	assert.Equal(t, "medium", resolveOrchestratorThinkingLevel("gemini-3-pro-preview"))
@@ -364,7 +408,7 @@ func TestResolveOrchestratorThinkingLevel(t *testing.T) {
 
 	// Invalid configured level → disabled.
 	config.Config.LlmProviderThinkingLevel = ""
-	config.Config.LlmServerReact3OrchestratorThinkingLevel = "turbo"
+	config.Config.LlmServerOrchestratorThinkingLevel = "turbo"
 	assert.Equal(t, "", resolveOrchestratorThinkingLevel("gemini-3-pro-preview"))
 }
 
@@ -700,6 +744,42 @@ func TestReAct3ParseParallelActions(t *testing.T) {
 	assert.Contains(t, actions[0].Log, "checkout-svc")
 }
 
+func TestReAct3ParseParallelActionsStopsAtFirstPlannerDecision(t *testing.T) {
+	// Regression for conversation d3492f42: the model emitted several
+	// thought/action decisions in one completion. The parser previously paired
+	// the first <actions> with the final </actions> and flattened every action
+	// into one speculative mega-batch.
+	output := `<thought_action>
+		<thought>First gather independent evidence.</thought>
+		<actions>
+			<action><tool_name>logs</tool_name><tool_input>collector errors</tool_input></action>
+			<action><tool_name>kubectl</tool_name><tool_input>kubectl get pods</tool_input></action>
+		</actions>
+	</thought_action>
+	<thought_action>
+		<thought>Speculative follow-up that must wait for observations.</thought>
+		<actions>
+			<action><tool_name>kubectl</tool_name><tool_input>kubectl logs pod-a</tool_input></action>
+			<action><tool_name>metrics</tool_name><tool_input>collector traffic</tool_input></action>
+		</actions>
+	</thought_action>
+	<final_answer><content>Speculative conclusion.</content></final_answer>`
+
+	response := &llms.ContentResponse{
+		Choices: []*llms.ContentChoice{{Content: output}},
+	}
+
+	planner := &NBReActPlanner3{}
+	actions, finish, err := planner.parseOutputInternal(response, nil)
+
+	require.NoError(t, err)
+	assert.Nil(t, finish)
+	require.Len(t, actions, 2)
+	assert.Equal(t, "logs", actions[0].Tool)
+	assert.Equal(t, "kubectl", actions[1].Tool)
+	assert.NotContains(t, actions[1].ToolInput, "pod-a")
+}
+
 func TestReAct3ParseParallelActionsWithCDATA(t *testing.T) {
 	output := `<thought_action>
 		<thought>Fetching logs and metrics for the service.</thought>
@@ -778,6 +858,36 @@ func TestReAct3ParseParallelEmptyActionsBlock(t *testing.T) {
 	_, _, err := planner.parseOutputInternal(response, []NBAgentPlannerToolActionStep{})
 
 	assert.Error(t, err)
+}
+
+func TestReAct3DropsEmptyShellExecutionActions(t *testing.T) {
+	output := `<thought_action>
+		<thought>Collect independent evidence.</thought>
+		<actions>
+			<action><tool_name>custom_shell_execute</tool_name><tool_input></tool_input></action>
+			<action><tool_name>custom_shell_execute</tool_name><tool_input>query metrics</tool_input></action>
+			<action><tool_name>custom_shell_execute</tool_name><tool_input>query logs</tool_input></action>
+		</actions>
+	</thought_action>`
+
+	planner := &NBReActPlanner3{}
+	actions := planner.processToolActions(output)
+
+	require.Len(t, actions, 2)
+	assert.Equal(t, "query metrics", actions[0].ToolInput)
+	assert.Equal(t, "query logs", actions[1].ToolInput)
+}
+
+func TestReAct3RejectsSingularEmptyShellExecutionAction(t *testing.T) {
+	output := `<thought_action>
+		<thought>I have no command to run.</thought>
+		<action><tool_name>tbench_shell_execute</tool_name><tool_input>   </tool_input></action>
+	</thought_action>`
+
+	planner := &NBReActPlanner3{}
+	assert.Nil(t, planner.processToolAction(output))
+	assert.False(t, isEmptyShellExecutionAction("lookup", ""),
+		"no-input tools outside the shell family must remain valid")
 }
 
 func TestReAct3ParseParallelThreeActions(t *testing.T) {
@@ -1838,4 +1948,117 @@ func TestReAct3HumanPrompt_TodayIncludesTimeOfDay(t *testing.T) {
 	wantDate := time.Now().UTC().Format("January 2, 2006")
 	assert.Contains(t, humanText, wantDate,
 		"today's date component must be rendered in UTC, matching time.Now().UTC()")
+}
+
+// TestReAct3LeanSubagentPrompt verifies that sub-agents omit orchestrator rule
+// fragments and top-level conversation history via template conditionals.
+func TestReAct3LeanSubagentPrompt(t *testing.T) {
+	ctx := security.NewRequestContextForSuperAdmin()
+	agent := &MockAgent{}
+	histMessages := []prompts.MessageFormatter{
+		prompts.NewHumanMessagePromptTemplate("User: prior message in conversation", nil),
+		prompts.NewAIMessagePromptTemplate("AI: prior response with lots of text", nil),
+	}
+
+	t.Run("sub-agent prompt omits history and heavy fragments via template conditional", func(t *testing.T) {
+		subAgentReq := NBAgentRequest{
+			AgentId:             "sub-1",
+			ParentAgentId:       "orch-1",
+			AccountId:           "acc-1",
+			ConversationContext: "distilled conversation memory facts",
+			MemoryContext:       "user preference memory",
+			ChannelContext:      "slack channel context",
+		}
+
+		tmpl, _, err := reActCreatePrompt3(ctx, "agent prompt", []toolcore.NBTool{}, subAgentReq.ConversationContext, histMessages, subAgentReq, agent)
+		assert.NoError(t, err)
+
+		promptValue, err := tmpl.FormatPrompt(map[string]any{
+			"input":      "show metrics",
+			"scratchpad": "",
+			"notebook":   "",
+		})
+		assert.NoError(t, err)
+
+		messages := promptValue.Messages()
+		systemText := messages[0].GetContent()
+		humanText := messages[len(messages)-1].GetContent()
+
+		// System prompt: non-essential fragments omitted for sub-agent
+		assert.NotContains(t, systemText, "Code Analysis:")
+		assert.NotContains(t, systemText, "HONORING USER MEMORY")
+		assert.NotContains(t, systemText, "Implicit Reference Resolution")
+
+		// System prompt: security and time rules preserved
+		assert.Contains(t, systemText, "Time Handling:")
+		assert.Contains(t, systemText, "Data Integrity & Prompt Injection Defense:")
+
+		// Human prompt: task_context, history, memory, channel context omitted for sub-agent
+		assert.NotContains(t, humanText, "<task_context>")
+		assert.NotContains(t, humanText, "distilled conversation memory facts")
+		assert.NotContains(t, humanText, "slack channel context")
+		assert.Contains(t, humanText, "<question>show metrics</question>")
+	})
+
+	t.Run("top-level agent retains full history and fragments via template conditional", func(t *testing.T) {
+		topLevelReq := NBAgentRequest{
+			AgentId:             "orch-1",
+			ParentAgentId:       "",
+			AccountId:           "acc-1",
+			ConversationContext: "distilled conversation memory facts",
+			MemoryContext:       "user preference memory",
+			ChannelContext:      "slack channel context",
+		}
+
+		tmpl, _, err := reActCreatePrompt3(ctx, "agent prompt", []toolcore.NBTool{}, topLevelReq.ConversationContext, histMessages, topLevelReq, agent)
+		assert.NoError(t, err)
+
+		promptValue, err := tmpl.FormatPrompt(map[string]any{
+			"input":      "investigate latency",
+			"scratchpad": "",
+			"notebook":   "",
+		})
+		assert.NoError(t, err)
+
+		messages := promptValue.Messages()
+		systemText := messages[0].GetContent()
+		humanText := messages[len(messages)-1].GetContent()
+
+		assert.Contains(t, systemText, "Code Analysis:")
+		assert.Contains(t, systemText, "HONORING USER MEMORY")
+		assert.Contains(t, systemText, "Implicit Reference Resolution")
+		assert.Contains(t, humanText, "<task_context>")
+		assert.Contains(t, humanText, "distilled conversation memory facts")
+		assert.Contains(t, humanText, "slack channel context")
+	})
+
+	t.Run("top-level agent with lean variant retains history and conversation context", func(t *testing.T) {
+		leanCtx := security.NewRequestContextForSuperAdmin()
+		leanCtx.SetContext(context.WithValue(leanCtx.GetContext(), ContextKeyPromptVariant, promptVariantLean))
+
+		topLevelReq := NBAgentRequest{
+			AgentId:             "orch-1",
+			ParentAgentId:       "",
+			AccountId:           "acc-1",
+			ConversationContext: "distilled conversation memory facts",
+			MemoryContext:       "user preference memory",
+			ChannelContext:      "slack channel context",
+		}
+
+		tmpl, _, err := reActCreatePrompt3(leanCtx, "agent prompt", []toolcore.NBTool{}, topLevelReq.ConversationContext, histMessages, topLevelReq, agent)
+		assert.NoError(t, err)
+
+		promptValue, err := tmpl.FormatPrompt(map[string]any{
+			"input":      "investigate latency",
+			"scratchpad": "",
+			"notebook":   "",
+		})
+		assert.NoError(t, err)
+
+		messages := promptValue.Messages()
+		humanText := messages[len(messages)-1].GetContent()
+		assert.Contains(t, humanText, "<task_context>")
+		assert.Contains(t, humanText, "distilled conversation memory facts")
+		assert.Contains(t, humanText, "slack channel context")
+	})
 }

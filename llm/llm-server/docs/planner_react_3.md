@@ -274,7 +274,7 @@ worker        0/1     1
 ```go
 isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
 critiqueAllowed := enableCritique ||
-    (LlmServerReActCritiqueEnabled && isTopLevel && IsInvestigationRequestTask())
+    (isTopLevel && IsInvestigationRequestTask())
 ```
 
 - Only top-level agents (not sub-agents like kubectl, logs)
@@ -367,7 +367,7 @@ stepKeys map[string]bool  // toolID → processed
 ├──────────────────────────────────────────────┤
 │ 2. Client tools priority (if any)             │
 ├──────────────────────────────────────────────┤
-│ 3. Account prompt (optional)                  │
+│ 3. AccountContext / GlobalContext (optional)  │
 ├──────────────────────────────────────────────┤
 │ 4. Agent-specific prompt (domain expertise)   │
 └──────────────────────────────────────────────┘
@@ -377,6 +377,7 @@ stepKeys map[string]bool  // toolID → processed
 
 ```
 ┌──────────────────────────────────────────────┐
+│ request AccountPrompt / global preferences   │
 │ <task_context>                                │
 │   today, conversation_context, history        │
 │ </task_context>                               │

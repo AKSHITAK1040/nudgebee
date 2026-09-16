@@ -52,6 +52,23 @@ func TestToolAlias_NotEnumerated(t *testing.T) {
 	}
 }
 
+func TestToolAlias_ResolveAndGetNBToolAliases(t *testing.T) {
+	assert.Equal(t, ToolExecuteAwsCliCommand, core.ResolveNBToolAlias("aws"))
+	assert.Equal(t, ToolExecuteGcpCliCommand, core.ResolveNBToolAlias("gcp"))
+	assert.Equal(t, ToolExecuteAzureCliCommand, core.ResolveNBToolAlias("azure"))
+	assert.Equal(t, ToolExecuteKubectlCommand, core.ResolveNBToolAlias("kubectl"))
+	assert.Equal(t, "unaliased_tool", core.ResolveNBToolAlias("unaliased_tool"))
+
+	assert.Contains(t, core.GetNBToolAliases(ToolExecuteAwsCliCommand), "aws")
+}
+
+func TestToolAlias_ToolStructsImplementGetNameAliases(t *testing.T) {
+	assert.Contains(t, AwsCliTool{}.GetNameAliases(), "aws")
+	assert.Contains(t, GcpCliTool{}.GetNameAliases(), "gcp")
+	assert.Contains(t, AzureCliTool{}.GetNameAliases(), "azure")
+	assert.Contains(t, KubectlExecuteTool{}.GetNameAliases(), "kubectl")
+}
+
 // Compile-time interface checks so a renamed or unexported ToolPrompt method
 // fails the build instead of silently dropping delegate-context safety rules.
 var (

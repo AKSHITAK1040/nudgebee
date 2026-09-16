@@ -29,6 +29,12 @@ func (m GithubCliTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("gh ...")` instead of `github_execute`.
+func (m GithubCliTool) ShellCommandPrefixes() []string { return []string{"gh"} }
+
 func (m GithubCliTool) Description() string {
 	return `Executes Github CLI ('gh') commands based on natural language queries. This tool allows you to interact with GitHub resources like repositories, issues, pull requests, actions, etc.
 
@@ -235,4 +241,12 @@ func (m GithubCliTool) InferToolRequestTypePrompt(ctx *security.RequestContext, 
 	answer: delete
 	`
 	return prompt, nil
+}
+
+func (m GithubCliTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
+	requestType := inferNestedCLIRequestType(input, "gh", githubReadActions, githubCreateActions, githubUpdateActions, githubDeleteActions)
+	if requestType == "" {
+		ctx.GetLogger().Warn("github: action not recognized by heuristic, falling through to LLM classification", "input", input)
+	}
+	return requestType, nil
 }

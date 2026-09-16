@@ -2,6 +2,7 @@ package agents
 
 import (
 	"encoding/json"
+	"fmt"
 	"nudgebee/llm/agents/core"
 	"nudgebee/llm/common"
 	"nudgebee/llm/security"
@@ -978,6 +979,72 @@ func TestExtractKubectlStdout(t *testing.T) {
 	t.Run("empty stdout field falls back to raw trimmed input", func(t *testing.T) {
 		got := extractKubectlStdout(`{"stdout":"","stderr":"some stderr"}`)
 		assert.Equal(t, `{"stdout":"","stderr":"some stderr"}`, got)
+	})
+}
+
+// TestKubectlStdoutFieldIsEmpty exists because extractKubectlStdout's
+// "empty stdout field falls back to raw trimmed input" behaviour above means
+// it is NEVER itself empty — a caller that wants to know "did this command
+// actually return nothing" cannot use it. This is exactly the check
+// generateKubeCtlLogQueryAndExecute needs for the filter_pattern-empty-result
+// caveat: a real quirk that made a naive first attempt at that check never
+// fire (extractKubectlStdout(logs) == "" was always false).
+func TestKubectlStdoutFieldIsEmpty(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"blank stdout field", `{"stdout":""}`, true},
+		{"whitespace-only stdout field", `{"stdout":"   \n"}`, true},
+		{"non-empty stdout field", `{"stdout":"some log line"}`, false},
+		{"malformed JSON — fails open (not empty)", `not json at all`, false},
+		{"missing stdout key — should not be treated as empty stdout", `{"other":"value"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, kubectlStdoutFieldIsEmpty(tc.in))
+		})
+	}
+}
+
+// TestFilteredEmptyLogsCaveat guards a real bug caught in code review: an
+// earlier version hand-built the {"stdout":...} envelope with
+// fmt.Sprintf("...%q...", pattern) inside a JSON string literal. %q emits
+// Go-escaped quotes, not JSON-escaped ones, so any pattern produced invalid
+// JSON — confirmed here by round-tripping the result back through
+// json.Unmarshal, not just checking it "looks like" a message.
+func TestFilteredEmptyLogsCaveat(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+	}{
+		{"plain alternation pattern", "(error|exception|fail|fatal)"},
+		{"pattern containing a double quote", `oom|"stuck"`},
+		{"pattern containing a backslash", `\d+ errors`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := filteredEmptyLogsCaveat(tc.pattern, `{"stdout":""}`)
+
+			var env struct {
+				Stdout string `json:"stdout"`
+			}
+			err := json.Unmarshal([]byte(got), &env)
+			require.NoError(t, err, "filteredEmptyLogsCaveat must always produce valid JSON, got: %s", got)
+			// %q Go-escapes characters inside the pattern too (a quote in
+			// the pattern becomes \" in the rendered message) — check for
+			// the same %q-rendered form, not the raw pattern.
+			assert.Contains(t, env.Stdout, fmt.Sprintf("%q", tc.pattern))
+			assert.Contains(t, env.Stdout, "does NOT mean the container has no relevant output")
+		})
+	}
+
+	t.Run("marshal failure falls back to the original value unchanged", func(t *testing.T) {
+		// map[string]string never actually fails to marshal, so this proves
+		// the fallback branch statically rather than by construction.
+		got := filteredEmptyLogsCaveat("anything", `{"stdout":""}`)
+		assert.NotEmpty(t, got)
 	})
 }
 

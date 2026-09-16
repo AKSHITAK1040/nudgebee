@@ -2,9 +2,12 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,6 +22,9 @@ import (
 	"github.com/tmc/langchaingo/llms"
 	"github.com/tmc/langchaingo/prompts"
 )
+
+const react4ThoughtArgument = "_thought"
+const react4MemoryRefsArgument = "_memory_refs"
 
 // NBReActPlanner4 is the provider-native tool-calling planner (ReAct4). It
 // implements the same NBAgentPlanner contract as NBReActPlanner3 — the executor
@@ -64,6 +70,8 @@ type NBReActPlanner4 struct {
 	// (fetchEvidenceIndex) into a per-iteration one.
 	userContextBlock string
 	evidenceIndex    string
+	orchestratorMode bool
+	humanPrompt      prompts.PromptTemplate
 
 	// Notebook is the durable investigation state. It is derived at the start of
 	// every Plan() from the most recent update_notebook step in intermediateSteps
@@ -79,6 +87,9 @@ type NBReActPlanner4 struct {
 	persistedNotebook   string
 
 	stepCount int
+	// planCallCount is transient and identifies the first Plan invocation for
+	// this planner instance even when restored history already contains steps.
+	planCallCount int
 
 	// enableCritique is the per-request critique override (request.EnableCritique).
 	// maxRefinementAttempts bounds the refine loop. Both are derived at
@@ -123,22 +134,34 @@ type refinementRecord struct {
 // call. See docs/planner_react_4.md.
 func NewReActAgent4(ctx *security.RequestContext, request NBAgentRequest, nbAgent NBAgent, systemMessage string, extraMessages []prompts.MessageFormatter, initialNotebook string) (*NBReActPlanner4, error) {
 	tools, agentAdditionalPrompt := resolveReact4Tools(ctx, request, nbAgent, systemMessage)
+	isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
+	llmTools := withReact4ThoughtSchemas(nbToolsToLlmTools(tools))
+	if isTopLevel && hasMemoryIndex(request.MemoryContext) {
+		llmTools = withReact4MemoryAttributionSchemas(llmTools)
+	}
 
 	// First-name greeting personalisation, top-level turns only (sub-agents don't
 	// greet) — same gate reActCreatePrompt3 applies.
 	userContextBlock := ""
-	if request.ParentAgentId == "" || request.ParentAgentId == request.AgentId {
+	if isTopLevel {
 		userContextBlock = renderUserContextBlock(ctx)
+	}
+	orchMode, _ := resolveOrchestratorRoleModes(request)
+	evidenceIndex := ""
+	if isTopLevel {
+		evidenceIndex = fetchEvidenceIndex(ctx, request)
 	}
 
 	return &NBReActPlanner4{
 		userContextBlock:      userContextBlock,
-		evidenceIndex:         fetchEvidenceIndex(ctx, request),
+		evidenceIndex:         evidenceIndex,
+		orchestratorMode:      orchMode,
+		humanPrompt:           newReact4HumanPromptTemplate(),
 		ctx:                   ctx,
 		request:               request,
 		nbAgent:               nbAgent,
 		tools:                 tools,
-		llmTools:              nbToolsToLlmTools(tools),
+		llmTools:              llmTools,
 		systemMessage:         composeReact4SystemMessage(ctx, request, nbAgent, systemMessage, agentAdditionalPrompt, tools),
 		history:               messageFormatterToString(extraMessages),
 		Notebook:              initialNotebook,
@@ -187,7 +210,7 @@ func resolveReact4Tools(ctx *security.RequestContext, request NBAgentRequest, nb
 	// Default-tool injection (load_skills when the agent has KB mappings, plus
 	// shell / watch tools). SkillListsMenu is appended for the <skill-lists>
 	// detection that gates load_skills — same call react_3 makes.
-	tools = FilterAndInjectDefaultTools(request.AccountId, nbAgent, systemMessage+request.SkillListsMenu, tools, request.Capabilities)
+	tools = FilterAndInjectDefaultTools(request.AccountId, nbAgent, systemMessage+request.SkillListsMenu, tools, request.Capabilities, request.KnowledgePolicy)
 
 	// Capability-based filtering (parity with reActCreatePrompt3's final FilterTools).
 	tools = FilterTools(tools, request.Capabilities)
@@ -212,6 +235,11 @@ func composeReact4SystemMessage(ctx *security.RequestContext, request NBAgentReq
 	var parts []string
 	if base := renderReact4Base(ctx, request, nbAgent, tools); strings.TrimSpace(base) != "" {
 		parts = append(parts, base)
+	}
+	if ResolveAgentAccountContextEnabled(nbAgent) {
+		if accountContext := renderAccountContextBlock(request.AccountContext); accountContext != "" {
+			parts = append(parts, accountContext)
+		}
 	}
 	if strings.TrimSpace(additionalAgentPrompt) != "" {
 		parts = append(parts, fmt.Sprintf("<additional_agent_prompt>\n%s\n</additional_agent_prompt>", additionalAgentPrompt))
@@ -238,16 +266,14 @@ func ensureNotebookTool(ctx *security.RequestContext, accountId string, tools []
 	return tools
 }
 
-// renderReact4Base renders the react_4 base system prompt with the same
-// role-mode gates and shared-rule fragments react_3 uses (resolveReact3RoleModes,
-// resolveHypothesisModeEnabled, the versioned prompt tree's shared-rule
-// fragments), so a react_4 agent runs with the same operational guidance as its
-// react_3 counterpart — only the response-format section differs (native tools
-// instead of XML). Returns "" on any load/render error; the caller falls back to
-// the agent prompt alone. Every prompt loaded here is verified at startup by
-// MustResolveAll, so an error is a build defect rather than a runtime condition.
+// renderReact4Base renders the provider-native planner contract. Built-in agents
+// receive the same role gates and shared fragments as react_3. Database-backed
+// custom agents receive the compact custom base plus only the generally applicable
+// time and security fragments; their stored instructions define everything else.
+// Returns "" on any load/render error; the caller falls back to the agent prompt.
 func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agent NBAgent, tools []toolcore.NBTool) string {
-	base, baseErr := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptReact4Base, request.AccountId)
+	basePromptName := react4BasePromptName(agent)
+	base, baseErr := nbprompts.GetPromptStrict(ctx.GetContext(), basePromptName, request.AccountId)
 	if baseErr != nil || strings.TrimSpace(base) == "" {
 		ctx.GetLogger().Error("react4: failed to load base prompt; using agent prompt only", "error", baseErr)
 		return ""
@@ -255,25 +281,39 @@ func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agen
 
 	notebookEnabled := ResolveAgentNotebookEnabled(agent)
 	hypothesisModeEnabled := resolveHypothesisModeEnabled(request, agent)
-	orchestratorMode, executorMode := resolveReact3RoleModes(request)
+	orchestratorMode, executorMode := resolveOrchestratorRoleModes(request)
+	promptVariant := promptVariantFromCtx(ctx)
+	if promptVariant == promptVariantLean {
+		notebookEnabled = false
+		hypothesisModeEnabled = false
+		orchestratorMode = false
+	}
+	isInvestigation := promptVariant != promptVariantLean
 
-	// Shared-rule fragments resolve with an empty accountID (include-only, no
-	// per-account override), matching reActCreatePrompt3. async_completion_rules is
-	// derived per-agent (asyncCompletionRules), not loaded as a fragment.
-	contextManagementRules, err1 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptContextContinuity, "")
-	timeHandlingRules, err2 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptTimeHandlingRules, "")
-	dataProtectionRules, err3 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptDataProtectionRules, "")
-	codeAnalysisRules, err4 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptCodeAnalysisRules, "")
-	securityRules, err5 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptSecurityRules, "")
-	memoryConsumptionRules, err6 := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptMemoryConsumptionRules, "")
-	if fragErr := errors.Join(err1, err2, err3, err4, err5, err6); fragErr != nil {
+	// Fragment lookups use an empty account ID (include-only), matching react_3.
+	// Custom agents deliberately skip built-in-only fragments rather than paying
+	// their DB/cache lookup cost merely to omit their text from the template.
+	timeHandlingRules, timeErr := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptTimeHandlingRules, "")
+	securityRules, securityErr := nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptSecurityRules, "")
+	var contextManagementRules, dataProtectionRules, codeAnalysisRules, memoryConsumptionRules string
+	var builtInFragErr error
+	if basePromptName == nbprompts.PromptReact4Base {
+		var err1, err2, err3, err4 error
+		contextManagementRules, err1 = nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptContextContinuity, "")
+		dataProtectionRules, err2 = nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptDataProtectionRules, "")
+		codeAnalysisRules, err3 = nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptCodeAnalysisRules, "")
+		memoryConsumptionRules, err4 = nbprompts.GetPromptStrict(ctx.GetContext(), nbprompts.PromptMemoryConsumptionRules, "")
+		builtInFragErr = errors.Join(err1, err2, err3, err4)
+	}
+	if fragErr := errors.Join(timeErr, securityErr, builtInFragErr); fragErr != nil {
 		ctx.GetLogger().Error("react4: failed to load shared-rule fragment; using agent prompt only", "error", fragErr)
 		return ""
 	}
 
+	isTopLevel := request.ParentAgentId == "" || request.ParentAgentId == request.AgentId
 	vars := []string{
-		"notebook_enabled", "hypothesis_mode_enabled", "orchestrator_mode", "executor_mode",
-		"delegate_agent_enabled",
+		"notebook_enabled", "hypothesis_mode_enabled", "is_top_level", "orchestrator_mode", "executor_mode",
+		"delegate_agent_enabled", "is_investigation",
 		"context_management_rules", "time_handling_rules", "data_protection_rules",
 		"code_analysis_rules", "security_rules", "memory_consumption_rules", "async_completion_rules",
 	}
@@ -281,12 +321,14 @@ func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agen
 	out, err := tmpl.Format(map[string]any{
 		"notebook_enabled":        notebookEnabled,
 		"hypothesis_mode_enabled": hypothesisModeEnabled,
+		"is_investigation":        isInvestigation,
 		// Gates the DELEGATION section. react_4 shipped with the delegate_agent
 		// TOOL available but no guidance on when to use it, so the model kept
 		// multi-step discovery inline: on one comparison case the orchestrator made
 		// 31 LLM calls under react_4 versus 9 under react_3, and orchestrator calls
 		// carry the full accumulated context. Same gate react_3 uses.
 		"delegate_agent_enabled":   HasDelegateAgentTool(tools),
+		"is_top_level":             isTopLevel,
 		"orchestrator_mode":        orchestratorMode,
 		"executor_mode":            executorMode,
 		"context_management_rules": contextManagementRules,
@@ -302,6 +344,16 @@ func renderReact4Base(ctx *security.RequestContext, request NBAgentRequest, agen
 		return ""
 	}
 	return out
+}
+
+// react4BasePromptName keeps database-backed custom agents isolated from the
+// built-in orchestration, infrastructure, delegation, and hypothesis guidance.
+// It mirrors react3BasePromptName; all built-in agents retain react_4_base.
+func react4BasePromptName(agent NBAgent) string {
+	if _, ok := agent.(*nbCustomAgent); ok {
+		return nbprompts.PromptReact4CustomBase
+	}
+	return nbprompts.PromptReact4Base
 }
 
 func (o *NBReActPlanner4) GetTools() []toolcore.NBTool { return o.tools }
@@ -394,6 +446,7 @@ func (o *NBReActPlanner4) Plan(
 	// no-op: len(intermediateSteps) already equals the running count.
 	o.stepCount = len(intermediateSteps)
 	o.refreshNotebookFromSteps(intermediateSteps)
+	firstPlanCallOfTurn := o.beginPlanCall()
 
 	clarificationContinuationPending := needsClarificationContinuation(intermediateSteps)
 	plannerInput := input
@@ -409,6 +462,20 @@ func (o *NBReActPlanner4) Plan(
 		// (OpenAI, Anthropic, Gemini) reject a request that carries an empty tools
 		// array with a 400, so pass WithTools only when llmTools is non-empty.
 		opts := []llms.CallOption{llms.WithTemperature(0.0)}
+		thinkingLevel := ""
+		if o.orchestratorDeepThinking(firstPlanCallOfTurn) {
+			agentName := o.agentName()
+			provider := GetLLMProvider(o.ctx, o.request.AccountId, agentName, true, o.request.ConversationId)
+			model := GetLLMModelName(o.ctx, o.request.AccountId, provider, agentName, true, o.request.ConversationId)
+			thinkingLevel = resolveOrchestratorThinkingLevel(model)
+		}
+		// Agent-level policy remains the final authority, matching ReAct3.
+		if level := ResolveAgentThinkingLevel(o.nbAgent); level != "" {
+			thinkingLevel = level
+		}
+		if thinkingLevel != "" {
+			opts = append(opts, WithThinkingLevel(thinkingLevel))
+		}
 		if len(o.llmTools) > 0 {
 			opts = append(opts, llms.WithTools(o.llmTools))
 		}
@@ -418,8 +485,9 @@ func (o *NBReActPlanner4) Plan(
 		if sigOpt := thoughtSignatureOption(intermediateSteps); sigOpt != nil {
 			opts = append(opts, sigOpt)
 		}
+		agentCtx := o.resolveAgentContext()
 		result, err := GenerateAndTrackLLMContent(
-			o.ctx, o.request.UserId, o.request.AccountId, o.request.ConversationId,
+			agentCtx, o.request.UserId, o.request.AccountId, o.request.ConversationId,
 			o.request.MessageId, o.request.AgentId, false, messages, true,
 			opts...,
 		)
@@ -457,7 +525,6 @@ func (o *NBReActPlanner4) Plan(
 				"enableCritique", o.enableCritique,
 				"isTopLevel", o.isTopLevel(),
 				"isInvestigation", IsInvestigationRequestTask(o.request.Query),
-				"autoCritiqueEnabled", config.Config.LlmServerReActCritiqueEnabled,
 				"refinementsUsed", len(o.refinementData),
 				"maxRefinements", o.maxRefinementAttempts,
 				"agent", o.agentName())
@@ -489,6 +556,48 @@ func (o *NBReActPlanner4) Plan(
 		o.ctx.GetLogger().Info("react4: critique requested refinement", "attempt", len(o.refinementData))
 		messages = append(messages, o.refinementMessages(finish.Data, feedback)...)
 	}
+}
+
+// resolveAgentContext derives a RequestContext carrying the agent's declared
+// CacheScope and Capabilities. It mirrors reActCreatePrompt3's cache-scope
+// resolution: if ClientTools are present (per-chat dynamic tools injected into
+// the prompt), the scope is downgraded to Conversation so they cannot share an
+// Account-scope cache across sessions.
+func (o *NBReActPlanner4) resolveAgentContext() *security.RequestContext {
+	cacheScope := CacheScopeConversation
+	if cacheProvider, ok := o.nbAgent.(NBAgentCacheScopeProvider); ok {
+		cacheScope = cacheProvider.GetCacheScope()
+	}
+	if len(o.request.ClientTools) > 0 && cacheScope != CacheScopeConversation {
+		if o.ctx != nil && o.ctx.GetLogger() != nil {
+			o.ctx.GetLogger().Debug("react4: downgrading cache scope to conversation due to client tools",
+				"agent", o.nbAgent.GetName(), "from", cacheScope)
+		}
+		cacheScope = CacheScopeConversation
+	}
+	baseCtx := context.Background()
+	if o.ctx != nil && o.ctx.GetContext() != nil {
+		baseCtx = o.ctx.GetContext()
+	}
+	if o.ctx == nil {
+		return security.NewRequestContext(
+			context.WithValue(
+				context.WithValue(baseCtx, ContextKeyCacheScope, cacheScope),
+				ContextKeyCapabilities, o.request.Capabilities,
+			),
+			nil, nil, nil, nil,
+		)
+	}
+	return security.NewRequestContext(
+		context.WithValue(
+			context.WithValue(baseCtx, ContextKeyCacheScope, cacheScope),
+			ContextKeyCapabilities, o.request.Capabilities,
+		),
+		o.ctx.GetSecurityContext(),
+		o.ctx.GetLogger(),
+		o.ctx.GetTracer(),
+		o.ctx.GetMeter(),
+	)
 }
 
 // needsClarificationContinuation reports whether the latest substantive step is
@@ -547,8 +656,8 @@ func (o *NBReActPlanner4) refinementMessages(answer, feedback string) []llms.Mes
 // text-protocol attempt apart from a genuine prose answer that merely mentions
 // these tags (hence the opening-tag match rather than a substring search).
 func containsActionGrammar(text string) bool {
-	for _, tag := range []string{"<thought_action>", "<tool_name>", "<tool_input>", "<actions>"} {
-		if strings.Contains(text, tag) {
+	for _, tag := range []string{"thought_action", "action", "tool_name", "tool_input", "actions"} {
+		if strings.Contains(text, "<"+tag+">") || strings.Contains(text, "</"+tag+">") {
 			return true
 		}
 	}
@@ -576,6 +685,245 @@ func containsToolNameGrammar(text string, tools []toolcore.NBTool) bool {
 		}
 	}
 	return false
+}
+
+// normalizeNativeToolThought keeps only user-displayable intent from the text
+// accompanying a provider-native tool call. Models can emit a valid native call
+// and also repeat react_3's XML action protocol in Content when XML examples
+// remain in prior history or model training. The native call is authoritative;
+// persisting or replaying the duplicate XML leaks implementation syntax into the
+// UI and teaches the model to repeat it on every subsequent turn.
+func normalizeNativeToolThought(text string) string {
+	text = strings.TrimSpace(text)
+	if !containsActionGrammar(text) {
+		return text
+	}
+	if thought := strings.TrimSpace(common.XmlExtractTagContent(text, "thought")); thought != "" {
+		return stripLegacyActionGrammar(thought)
+	}
+	return stripLegacyActionGrammar(text)
+}
+
+// withReact4ThoughtSchemas adds planner-only display intent to every native
+// function schema. Native tool APIs do not require assistant prose alongside a
+// function call, so prompt wording alone cannot guarantee Action.Log is filled.
+// The reserved argument is removed before validation/execution by
+// extractReact4Thought; the provider-original JSON is retained for replay.
+func withReact4ThoughtSchemas(tools []llms.Tool) []llms.Tool {
+	out := make([]llms.Tool, len(tools))
+	for i, tool := range tools {
+		out[i] = tool
+		if tool.Function == nil {
+			continue
+		}
+
+		definition := *tool.Function
+		parameters, ok := definition.Parameters.(map[string]any)
+		if !ok {
+			out[i].Function = &definition
+			continue
+		}
+		parametersCopy := make(map[string]any, len(parameters))
+		for key, value := range parameters {
+			parametersCopy[key] = value
+		}
+		properties, _ := parameters["properties"].(map[string]any)
+		propertiesCopy := make(map[string]any, len(properties)+1)
+		for key, value := range properties {
+			propertiesCopy[key] = value
+		}
+		propertiesCopy[react4ThoughtArgument] = map[string]any{
+			"type":        "string",
+			"description": "One short user-displayable sentence explaining why this tool call is needed. Do not include hidden chain-of-thought or XML.",
+		}
+		parametersCopy["properties"] = propertiesCopy
+
+		requiredCopy := react4SchemaRequiredFields(parameters["required"])
+		if !slices.Contains(requiredCopy, react4ThoughtArgument) {
+			requiredCopy = append(requiredCopy, react4ThoughtArgument)
+		}
+		parametersCopy["required"] = requiredCopy
+		definition.Parameters = parametersCopy
+		out[i].Function = &definition
+	}
+	return out
+}
+
+// react4SchemaRequiredFields normalizes both programmatically constructed
+// schemas ([]string) and JSON-decoded schemas ([]any). Keeping this conversion
+// at the decorator boundary prevents reserved planner fields from accidentally
+// replacing a tool's original required arguments if the schema source changes.
+func react4SchemaRequiredFields(value any) []string {
+	switch fields := value.(type) {
+	case []string:
+		return slices.Clone(fields)
+	case []any:
+		required := make([]string, 0, len(fields))
+		for _, field := range fields {
+			if name, ok := field.(string); ok {
+				required = append(required, name)
+			}
+		}
+		return required
+	default:
+		return nil
+	}
+}
+
+// extractReact4Thought separates planner metadata from executable tool input.
+// Malformed/non-string metadata is still removed so an implementation tool
+// never receives an argument that is absent from its own input schema.
+func extractReact4Thought(input string) (string, string) {
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(input), &args); err != nil {
+		return input, ""
+	}
+	rawThought, ok := args[react4ThoughtArgument]
+	if !ok {
+		return input, ""
+	}
+	delete(args, react4ThoughtArgument)
+	clean, err := json.Marshal(args)
+	if err != nil {
+		return input, ""
+	}
+	var thought string
+	if err := json.Unmarshal(rawThought, &thought); err == nil {
+		thought = normalizeNativeToolThought(thought)
+	}
+	return string(clean), thought
+}
+
+func withReact4MemoryAttributionSchemas(tools []llms.Tool) []llms.Tool {
+	out := make([]llms.Tool, len(tools))
+	for i, tool := range tools {
+		out[i] = tool
+		if tool.Function == nil {
+			continue
+		}
+		definition := *tool.Function
+		parameters, ok := definition.Parameters.(map[string]any)
+		if !ok {
+			out[i].Function = &definition
+			continue
+		}
+		parametersCopy := make(map[string]any, len(parameters))
+		for key, value := range parameters {
+			parametersCopy[key] = value
+		}
+		properties, _ := parameters["properties"].(map[string]any)
+		propertiesCopy := make(map[string]any, len(properties)+1)
+		for key, value := range properties {
+			propertiesCopy[key] = value
+		}
+		propertiesCopy[react4MemoryRefsArgument] = map[string]any{
+			"type":        "array",
+			"description": "Memory items from <memory_index> actually applied to this call. Use [] when none were applied.",
+			"items": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"position": map[string]any{"type": "integer", "description": "The integer N from [mN]."},
+					"note":     map[string]any{"type": "string", "description": "Short reason the memory changed this call."},
+				},
+				"required": []string{"position"},
+			},
+		}
+		parametersCopy["properties"] = propertiesCopy
+		requiredCopy := react4SchemaRequiredFields(parameters["required"])
+		if !slices.Contains(requiredCopy, react4MemoryRefsArgument) {
+			requiredCopy = append(requiredCopy, react4MemoryRefsArgument)
+		}
+		parametersCopy["required"] = requiredCopy
+		definition.Parameters = parametersCopy
+		out[i].Function = &definition
+	}
+	return out
+}
+
+func extractReact4MemoryAttribution(input string) (string, []NBAgentPlannerToolActionMemoryRef) {
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(input), &args); err != nil {
+		return input, nil
+	}
+	rawRefs, ok := args[react4MemoryRefsArgument]
+	if !ok {
+		return input, nil
+	}
+	delete(args, react4MemoryRefsArgument)
+	clean, err := json.Marshal(args)
+	if err != nil {
+		return input, nil
+	}
+	var candidates []NBAgentPlannerToolActionMemoryRef
+	if err := json.Unmarshal(rawRefs, &candidates); err != nil {
+		return string(clean), nil
+	}
+	refs := make([]NBAgentPlannerToolActionMemoryRef, 0, len(candidates))
+	seen := make(map[int]struct{}, len(candidates))
+	for _, ref := range candidates {
+		if ref.Position <= 0 {
+			continue
+		}
+		if _, duplicate := seen[ref.Position]; duplicate {
+			continue
+		}
+		seen[ref.Position] = struct{}{}
+		ref.Note = strings.TrimSpace(ref.Note)
+		refs = append(refs, ref)
+	}
+	return string(clean), refs
+}
+
+func hasMemoryIndex(memoryContext string) bool {
+	return strings.Contains(memoryContext, "<memory_index>") && strings.Contains(memoryContext, "</memory_index>")
+}
+
+// react4MemoryContext retains the memory slab/index but replaces ReAct3's XML
+// action examples with native per-call argument instructions.
+func react4MemoryContext(memoryContext string) string {
+	const endTag = "</memory_index>"
+	end := strings.Index(memoryContext, endTag)
+	if end < 0 {
+		return memoryContext
+	}
+	base := strings.TrimSpace(memoryContext[:end+len(endTag)])
+	return base + `
+
+For every native function call, set the required _memory_refs argument to the
+memory items from <memory_index> that were actually applied to that call. Use
+an empty array when none were applied. Each item has the shape
+{"position": N, "note": "short reason"}, where N is the integer from [mN].
+Applied means the memory value changed the selected function or its executable
+arguments. Do not cite memory that was only considered or was overridden by the
+current <question>. Attribution is per sibling function call.`
+}
+
+func stripLegacyActionGrammar(text string) string {
+	for _, tag := range []string{"thought_action", "actions", "action"} {
+		text = stripXMLBlocks(text, tag)
+		text = strings.ReplaceAll(text, "</"+tag+">", "")
+	}
+	text = strings.TrimSpace(text)
+	if containsActionGrammar(text) {
+		return ""
+	}
+	return text
+}
+
+func stripXMLBlocks(text, tag string) string {
+	open, close := "<"+tag+">", "</"+tag+">"
+	for {
+		start := strings.Index(text, open)
+		if start < 0 {
+			return text
+		}
+		relEnd := strings.Index(text[start+len(open):], close)
+		if relEnd < 0 {
+			return text[:start]
+		}
+		end := start + len(open) + relEnd + len(close)
+		text = text[:start] + text[end:]
+	}
 }
 
 // extractXMLFinalAnswer unwraps a react_3-style <final_answer> block, mirroring
@@ -688,12 +1036,15 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 		if finish := extractXMLFinalAnswer(choice.Content); finish != nil {
 			return nil, finish, nil
 		}
+
 		return nil, &NBAgentPlannerFinishAction{
 			Data:       choice.Content,
 			Log:        choice.Content,
 			IsTerminal: true,
 		}, nil
 	}
+
+	thought = normalizeNativeToolThought(choice.Content)
 
 	// Positionally aligned with choice.ToolCalls (the provider has no id to key
 	// on at that point), so it must be indexed by the RANGE index, not by the
@@ -727,7 +1078,12 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 			continue
 		}
 		name := tc.FunctionCall.Name
-		args := tc.FunctionCall.Arguments
+		nativeArgs := tc.FunctionCall.Arguments
+		args, actionThought := extractReact4Thought(nativeArgs)
+		args, memoryRefs := extractReact4MemoryAttribution(args)
+		if actionThought == "" {
+			actionThought = thought
+		}
 		id := tc.ID
 		o.stepCount++
 		if id == "" {
@@ -764,11 +1120,13 @@ func (o *NBReActPlanner4) parseCompletion(choice *llms.ContentChoice) ([]NBAgent
 		actions = append(actions, NBAgentPlannerToolAction{
 			Tool:             name,
 			ToolInput:        args,
+			NativeToolInput:  nativeArgs,
 			ToolID:           id,
-			Log:              thought,
+			Log:              actionThought,
 			DisplayID:        fmt.Sprintf("E%d", o.stepCount),
 			TurnID:           turnID,
 			ThoughtSignature: signature,
+			MemoryRefs:       memoryRefs,
 		})
 	}
 
@@ -842,51 +1200,85 @@ func (o *NBReActPlanner4) buildMessages(input string, steps []NBAgentPlannerTool
 	return messages
 }
 
-// humanText renders the dynamic per-turn human message. Kept out of the system
-// message so the cached system prefix stays stable across turns.
+const react4HumanPromptTemplate = `The current date and time is {{.today}}.
+{{if .kb_prestep_content}}
+{{.kb_prestep_content}}
+{{end}}{{if .skill_lists_menu}}
+{{.skill_lists_menu}}
+{{end}}{{if .global_preferences_block}}
+{{.global_preferences_block}}
+{{end}}{{if .user_context_block}}
+{{.user_context_block}}
+{{end}}{{if .is_top_level}}{{if .conversation_context}}
+<conversation_context>
+{{.conversation_context}}
+</conversation_context>
+{{end}}{{if .history}}
+<history>
+{{.history}}
+</history>
+{{end}}{{if .evidence_index}}
+{{.evidence_index}}
+{{end}}{{if .memory_context_block}}
+{{.memory_context_block}}
+{{end}}{{if .channel_context_block}}
+{{.channel_context_block}}
+{{end}}{{end}}{{if .notebook}}
+<notebook>
+{{.notebook}}
+</notebook>
+{{end}}
+<question>{{.input}}</question>`
+
+// newReact4HumanPromptTemplate constructs the pre-parsed human prompt template
+// once at planner construction to avoid parsing overhead on every iteration.
+func newReact4HumanPromptTemplate() prompts.PromptTemplate {
+	vars := []string{
+		"today", "kb_prestep_content", "skill_lists_menu", "global_preferences_block",
+		"user_context_block", "is_top_level", "orchestrator_mode", "conversation_context", "history",
+		"evidence_index", "memory_context_block", "channel_context_block", "notebook", "input",
+	}
+	return prompts.NewPromptTemplate(react4HumanPromptTemplate, vars)
+}
+
+// humanText renders the dynamic per-turn human message using template evaluation.
+// Kept out of the system message so the cached system prefix stays stable across turns.
 func (o *NBReActPlanner4) humanText(input string) string {
-	var b strings.Builder
-	// Block order mirrors reActCreatePrompt3's human-message template so react_4
-	// presents the same context in the same sequence; only the scratchpad is
-	// absent, replaced by the reconstructed native tool turns that follow.
-	fmt.Fprintf(&b, "The current date and time is %s.\n", time.Now().UTC().Format("Monday, January 2, 2006, 15:04:05 UTC"))
-	// KB pre-step content + the skill-lists menu, so KB/skill-driven flows (and
-	// the load_skills tool) have the context react_3 provides.
-	if kb := strings.TrimSpace(o.request.KBPrestepContent); kb != "" {
-		fmt.Fprintf(&b, "\n%s\n", kb)
+	tmpl := o.humanPrompt
+	if tmpl.Template == "" {
+		tmpl = newReact4HumanPromptTemplate()
 	}
-	if menu := strings.TrimSpace(o.request.SkillListsMenu); menu != "" {
-		fmt.Fprintf(&b, "\n%s\n", menu)
+
+	isTopLevel := o.isTopLevel()
+	var memoryContextBlock, channelContextBlock string
+	if isTopLevel {
+		memoryContextBlock = strings.TrimSpace(renderMemoryContextBlock(react4MemoryContext(o.request.MemoryContext)))
+		channelContextBlock = strings.TrimSpace(renderChannelContextBlock(o.request.ChannelContext))
 	}
-	// Account global preferences (rendered from AccountPrompt) live in the human
-	// message — not the system prefix — so the event-analysis fragment doesn't
-	// bust the Account-scope cache, matching react_3.
-	if gp := strings.TrimSpace(renderGlobalPreferencesBlock(o.request.AccountPrompt)); gp != "" {
-		fmt.Fprintf(&b, "\n%s\n", gp)
+
+	out, err := tmpl.Format(map[string]any{
+		"today":                    time.Now().UTC().Format("Monday, January 2, 2006, 15:04:05 UTC"),
+		"kb_prestep_content":       strings.TrimSpace(o.request.KBPrestepContent),
+		"skill_lists_menu":         strings.TrimSpace(o.request.SkillListsMenu),
+		"global_preferences_block": strings.TrimSpace(renderGlobalPreferencesBlock(o.request.AccountPrompt)),
+		"user_context_block":       strings.TrimSpace(o.userContextBlock),
+		"is_top_level":             isTopLevel,
+		"orchestrator_mode":        o.orchestratorMode,
+		"conversation_context":     strings.TrimSpace(o.request.ConversationContext),
+		"history":                  strings.TrimSpace(o.history),
+		"evidence_index":           strings.TrimSpace(o.evidenceIndex),
+		"memory_context_block":     memoryContextBlock,
+		"channel_context_block":    channelContextBlock,
+		"notebook":                 strings.TrimSpace(o.Notebook),
+		"input":                    input,
+	})
+	if err != nil {
+		if o.ctx != nil && o.ctx.GetLogger() != nil {
+			o.ctx.GetLogger().Error("react4: failed to format human message template", "error", err)
+		}
+		return fmt.Sprintf("<question>%s</question>", input)
 	}
-	if uc := strings.TrimSpace(o.userContextBlock); uc != "" {
-		fmt.Fprintf(&b, "\n%s\n", uc)
-	}
-	if ctxStr := strings.TrimSpace(o.request.ConversationContext); ctxStr != "" {
-		fmt.Fprintf(&b, "\n<conversation_context>\n%s\n</conversation_context>\n", ctxStr)
-	}
-	if h := strings.TrimSpace(o.history); h != "" {
-		fmt.Fprintf(&b, "\n<history>\n%s\n</history>\n", h)
-	}
-	if ei := strings.TrimSpace(o.evidenceIndex); ei != "" {
-		fmt.Fprintf(&b, "\n%s\n", ei)
-	}
-	if nb := strings.TrimSpace(o.Notebook); nb != "" {
-		fmt.Fprintf(&b, "\n<notebook>\n%s\n</notebook>\n", nb)
-	}
-	if mc := strings.TrimSpace(renderMemoryContextBlock(o.request.MemoryContext)); mc != "" {
-		fmt.Fprintf(&b, "\n%s\n", mc)
-	}
-	if cc := strings.TrimSpace(renderChannelContextBlock(o.request.ChannelContext)); cc != "" {
-		fmt.Fprintf(&b, "\n%s\n", cc)
-	}
-	fmt.Fprintf(&b, "\n<question>%s</question>", input)
-	return b.String()
+	return out
 }
 
 // renderStepsToMessages reconstructs the native tool-calling history from the
@@ -975,16 +1367,20 @@ func (o *NBReActPlanner4) renderTurn(steps []NBAgentPlannerToolActionStep, group
 		// The thought is shared by the whole batch (parseCompletion copies the
 		// same Log onto every sibling), so emit it once, ahead of the calls.
 		if len(assistantParts) == 0 {
-			if thought := strings.TrimSpace(step.Action.Log); thought != "" {
-				assistantParts = append(assistantParts, llms.TextContent{Text: step.Action.Log})
+			if thought := normalizeNativeToolThought(step.Action.Log); thought != "" {
+				assistantParts = append(assistantParts, llms.TextContent{Text: thought})
 			}
+		}
+		replayInput := step.Action.NativeToolInput
+		if replayInput == "" {
+			replayInput = step.Action.ToolInput
 		}
 		assistantParts = append(assistantParts, llms.ToolCall{
 			ID:   step.Action.ToolID,
 			Type: "function",
 			FunctionCall: &llms.FunctionCall{
 				Name:      step.Action.Tool,
-				Arguments: step.Action.ToolInput,
+				Arguments: replayInput,
 			},
 		})
 		results = append(results, llms.MessageContent{
@@ -1043,19 +1439,22 @@ func (o *NBReActPlanner4) renderObservation(step *NBAgentPlannerToolActionStep, 
 	return obs
 }
 
-// refreshNotebookFromSteps sets o.Notebook to the content of the most recent
-// update_notebook step, so the human message reflects the latest state the model
-// recorded. update_notebook is dispatched like any other tool; its observation
-// carries the content the model wrote.
+// refreshNotebookFromSteps applies the most recent successful update_notebook
+// step. Replacement remains the default. An append request adds a server-framed
+// journal entry; its stable marker prevents replay after persistence retries or
+// suspend/resume from duplicating the entry.
 func (o *NBReActPlanner4) refreshNotebookFromSteps(steps []NBAgentPlannerToolActionStep) {
 	for i := len(steps) - 1; i >= 0; i-- {
 		step := &steps[i]
 		if !isNotebookToolName(step.Action.Tool) || step.Status != ToolStatusSuccess {
 			continue
 		}
-		content := extractNotebookContent(step.Action.ToolInput)
+		content, appendEntry := extractNotebookUpdate(step.Action.ToolInput)
 		if content == "" {
 			return
+		}
+		if appendEntry {
+			content = o.appendNotebookJournalEntry(content, step.Action, i)
 		}
 		if content != o.Notebook {
 			o.Notebook = content
@@ -1066,6 +1465,31 @@ func (o *NBReActPlanner4) refreshNotebookFromSteps(steps []NBAgentPlannerToolAct
 		}
 		return
 	}
+}
+
+func (o *NBReActPlanner4) appendNotebookJournalEntry(content string, action NBAgentPlannerToolAction, stepIndex int) string {
+	entryID := action.ToolID
+	if entryID == "" {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%d:%s", action.PlannerIteration, stepIndex, content)))
+		entryID = fmt.Sprintf("%x", sum[:8])
+	}
+	marker := fmt.Sprintf("<!-- notebook-entry:%s -->", entryID)
+	if strings.Contains(o.Notebook, marker) {
+		return o.Notebook
+	}
+
+	iteration := action.PlannerIteration
+	if iteration <= 0 {
+		iteration = stepIndex + 1
+	}
+	entry := fmt.Sprintf(
+		"## Journal entry — %s · Iteration %d\n%s\n\n%s",
+		time.Now().UTC().Format(time.RFC3339), iteration, marker, strings.TrimSpace(content),
+	)
+	if strings.TrimSpace(o.Notebook) == "" {
+		return entry
+	}
+	return strings.TrimRight(o.Notebook, "\n") + "\n\n" + entry
 }
 
 // persistNotebook mirrors ReAct3's notebook visibility contract without
@@ -1136,17 +1560,23 @@ func (o *NBReActPlanner4) persistNotebook(content string, turnIdx int, stats not
 // arguments payload, which is a JSON string like {"content":"..."}. Falls back
 // to the raw string when it is not JSON with a content field.
 func extractNotebookContent(args string) string {
+	content, _ := extractNotebookUpdate(args)
+	return content
+}
+
+func extractNotebookUpdate(args string) (content string, appendEntry bool) {
 	args = strings.TrimSpace(args)
 	if args == "" {
-		return ""
+		return "", false
 	}
 	parsed := map[string]any{}
 	if err := common.UnmarshalJson([]byte(args), &parsed); err == nil {
 		if c, ok := parsed["content"].(string); ok && strings.TrimSpace(c) != "" {
-			return c
+			appendEntry, _ = parsed["append"].(bool)
+			return c, appendEntry
 		}
 	}
-	return args
+	return args, false
 }
 
 const react4CritiqueMaxRetries = 2
@@ -1157,12 +1587,25 @@ func (o *NBReActPlanner4) isTopLevel() bool {
 	return o.request.ParentAgentId == "" || o.request.ParentAgentId == o.request.AgentId
 }
 
+func (o *NBReActPlanner4) beginPlanCall() bool {
+	first := o.planCallCount == 0
+	o.planCallCount++
+	return first
+}
+
+// orchestratorDeepThinking scopes the shared elevate-only override to the first
+// top-level planning call and post-critique refinement passes. Tool-driven
+// mid-loop calls and executor sub-agents keep their normal model resolution.
+func (o *NBReActPlanner4) orchestratorDeepThinking(firstPlanCallOfTurn bool) bool {
+	return config.Config.LlmServerOrchestratorThinkingLevel != "" &&
+		o.isTopLevel() && (firstPlanCallOfTurn || len(o.refinementData) > 0)
+}
+
 // shouldCritique mirrors react_3's gate: allowed when explicitly enabled for the
-// request, or (config on AND top-level AND an investigation task); a
+// request, or for a top-level investigation task; a
 // CritiqueSupport agent can further veto it.
 func (o *NBReActPlanner4) shouldCritique() bool {
-	allowed := o.enableCritique ||
-		(config.Config.LlmServerReActCritiqueEnabled && o.isTopLevel() && IsInvestigationRequestTask(o.request.Query))
+	allowed := o.enableCritique || (o.isTopLevel() && IsInvestigationRequestTask(o.request.Query))
 	if agent, ok := o.nbAgent.(NBAgentReActPlannerCritiqueSupport); ok {
 		allowed = allowed && agent.CritiqueEnabled()
 	}

@@ -372,21 +372,7 @@ func runAgentResumeV2(ctx *security.RequestContext, req NBAgentRequest, agent Co
 	// (previousQuery). So the sequence is: answer → stored as response →
 	// refine uses it as config → refine replaces Query → planner sees
 	// original task. We must not short-circuit this sequence.
-	resumeReq := NBAgentRequest{
-		Query:                 req.Query,
-		AccountId:             req.AccountId,
-		UserId:                req.UserId,
-		ConversationId:        req.ConversationId,
-		MessageId:             req.MessageId,
-		AgentId:               req.AgentId,
-		ParentAgentId:         parentAgentID,
-		PreviousState:         previousState,
-		QueryConfig:           queryConfig,
-		QueryContext:          req.QueryContext,
-		SessionId:             req.SessionId,
-		ConversationSource:    req.ConversationSource,
-		EnableQueryRefinement: req.EnableQueryRefinement,
-	}
+	resumeReq := buildResumeAgentRequest(req, parentAgentID, previousState, queryConfig)
 
 	ctx.GetLogger().Info("resume_v2: executing agent resume",
 		"agent_name", agentName,
@@ -403,6 +389,31 @@ func runAgentResumeV2(ctx *security.RequestContext, req NBAgentRequest, agent Co
 	// correctly considers sibling state.
 
 	return executeAgent(ctx, agentImpl, resumeReq)
+}
+
+// buildResumeAgentRequest restores both forms of tool configuration. QueryConfig
+// is the durable representation loaded from message_config, while ClientTools
+// and Capabilities are the runtime fields consumed directly by the planner and
+// executor. Omitting the runtime fields makes a request-scoped client tool work
+// for the first iteration and disappear after client-tool-result resumes it.
+func buildResumeAgentRequest(req NBAgentRequest, parentAgentID, previousState string, queryConfig toolcore.NBQueryConfig) NBAgentRequest {
+	return NBAgentRequest{
+		Query:                 req.Query,
+		AccountId:             req.AccountId,
+		UserId:                req.UserId,
+		ConversationId:        req.ConversationId,
+		MessageId:             req.MessageId,
+		AgentId:               req.AgentId,
+		ParentAgentId:         parentAgentID,
+		PreviousState:         previousState,
+		QueryConfig:           queryConfig,
+		QueryContext:          req.QueryContext,
+		SessionId:             req.SessionId,
+		ConversationSource:    req.ConversationSource,
+		EnableQueryRefinement: req.EnableQueryRefinement,
+		ClientTools:           queryConfig.ClientTools,
+		Capabilities:          queryConfig.Capabilities,
+	}
 }
 
 // bubbleUpIfSiblingsDone is the recursive parent-resume helper.

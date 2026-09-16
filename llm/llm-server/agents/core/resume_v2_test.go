@@ -4,11 +4,37 @@ import (
 	"testing"
 
 	"nudgebee/llm/security"
+	toolcore "nudgebee/llm/tools/core"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBuildResumeAgentRequestRestoresClientToolRuntimeFields(t *testing.T) {
+	clientTools := []toolcore.NBToolCommand{{
+		Name:        "custom_shell_execute",
+		Description: "Run a command in the custom agent environment",
+	}}
+	capabilities := toolcore.AgentCapabilities{
+		AllowedTools: []string{"custom_shell_execute"},
+	}
+	queryConfig := toolcore.NBQueryConfig{
+		ClientTools:  clientTools,
+		Capabilities: capabilities,
+	}
+
+	got := buildResumeAgentRequest(
+		NBAgentRequest{Query: "investigate", AgentId: "agent-id"},
+		"parent-id",
+		"saved-state",
+		queryConfig,
+	)
+
+	assert.Equal(t, clientTools, got.ClientTools)
+	assert.Equal(t, capabilities, got.Capabilities)
+	assert.Equal(t, queryConfig, got.QueryConfig)
+}
 
 // TestIsResumableAgentStatus locks in the contract for which agent statuses
 // V2's idempotency guard treats as eligible for resume vs already-progressed.

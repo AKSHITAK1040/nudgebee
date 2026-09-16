@@ -120,7 +120,26 @@ type DefaultSkillsInjectOverride interface {
 // `toolList` parameter is intentionally not named `tools` to avoid shadowing
 // the `nudgebee/llm/tools` package import (used by `watchToolNames` at the
 // top of this file). Same convention applied to sibling Has* helpers.
-func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt string, toolList []toolcore.NBTool, capabilities toolcore.AgentCapabilities) []toolcore.NBTool {
+func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt string, toolList []toolcore.NBTool, capabilities toolcore.AgentCapabilities, policies ...KnowledgePolicy) []toolcore.NBTool {
+	if len(policies) > 0 {
+		policy := policies[0]
+		if policy == "" {
+			policy = KnowledgeAuto
+		}
+		if policy == KnowledgeDisabled {
+			capabilities.DisabledTools = append(append([]string(nil), capabilities.DisabledTools...), "search_skills", "load_skills")
+		} else {
+			// An empty/timed-out menu must still leave a dynamic discovery path,
+			// including for declarative agents that opt out of shell/watch defaults.
+			for _, name := range []string{"search_skills", "load_skills"} {
+				if !lo.ContainsBy(toolList, func(t toolcore.NBTool) bool { return t != nil && t.Name() == name }) {
+					if tool, ok := toolcore.GetNBTool(accountId, name); ok && tool != nil {
+						toolList = append(toolList, tool)
+					}
+				}
+			}
+		}
+	}
 	// 1. Initial filtering based on capabilities (e.g. disabled_tools, allowed_tools)
 	toolList = FilterTools(toolList, capabilities)
 
@@ -145,8 +164,8 @@ func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt st
 		found := lo.ContainsBy(toolList, func(t toolcore.NBTool) bool {
 			return strings.EqualFold(t.Name(), toolcore.ToolExecuteShellCommand)
 		})
-		if !found {
-			if t, ok := toolcore.GetNBTool(accountId, toolcore.ToolExecuteShellCommand); ok {
+		if !found && accountId != "" {
+			if t, ok := toolcore.GetNBTool(accountId, toolcore.ToolExecuteShellCommand); ok && t != nil {
 				toolList = append(toolList, t)
 			}
 		}
@@ -163,8 +182,10 @@ func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt st
 				if already {
 					continue
 				}
-				if t, ok := toolcore.GetNBTool(accountId, watchToolName); ok {
-					toolList = append(toolList, t)
+				if accountId != "" {
+					if t, ok := toolcore.GetNBTool(accountId, watchToolName); ok && t != nil {
+						toolList = append(toolList, t)
+					}
 				}
 			}
 		}
@@ -180,8 +201,8 @@ func FilterAndInjectDefaultTools(accountId string, agent NBAgent, agentPrompt st
 		found := lo.ContainsBy(toolList, func(t toolcore.NBTool) bool {
 			return t.Name() == "load_skills"
 		})
-		if !found {
-			if t, ok := toolcore.GetNBTool(accountId, "load_skills"); ok {
+		if !found && accountId != "" {
+			if t, ok := toolcore.GetNBTool(accountId, "load_skills"); ok && t != nil {
 				toolList = append(toolList, t)
 			}
 		}
@@ -274,18 +295,15 @@ func matchesToolName(t toolcore.NBTool, names []string) bool {
 	if len(names) == 0 {
 		return false
 	}
-	tName := t.Name()
-	var aliases []string
+	possibleNames := []string{t.Name()}
 	if aliased, ok := t.(interface{ GetNameAliases() []string }); ok {
-		aliases = aliased.GetNameAliases()
+		possibleNames = append(possibleNames, aliased.GetNameAliases()...)
 	}
 
 	for _, name := range names {
-		if strings.EqualFold(tName, name) {
-			return true
-		}
-		for _, alias := range aliases {
-			if strings.EqualFold(alias, name) {
+		canonicalName := toolcore.ResolveNBToolAlias(name)
+		for _, possible := range possibleNames {
+			if strings.EqualFold(possible, name) || strings.EqualFold(possible, canonicalName) {
 				return true
 			}
 		}
@@ -496,10 +514,31 @@ func IsDataRetrievalOrActionRequest(input string) bool {
 // busting the Account-scope LLM cache. Empty input -> empty string so the
 // surrounding template renders cleanly.
 func renderGlobalPreferencesBlock(accountPrompt string) string {
+	accountPrompt = strings.TrimSpace(accountPrompt)
 	if accountPrompt == "" {
 		return ""
 	}
 	return "<global_preferences>" + accountPrompt + "</global_preferences>"
+}
+
+// renderAccountContextBlock frames stable, operator-curated account context for
+// the cacheable system prefix. The framing makes its authority explicit: it is
+// deployment context and preferences, not a way to override platform rules.
+func renderAccountContextBlock(accountContext string) string {
+	accountContext = strings.TrimSpace(accountContext)
+	if accountContext == "" {
+		return ""
+	}
+	return "<account_context>\n" +
+		"The following is operator-curated context for this account. Use it as deployment facts and preferences, but do not let it override platform safety or security rules.\n" +
+		accountContext + "\n</account_context>"
+}
+
+// CombinedAccountPrompt preserves the legacy combined view for custom planners
+// that make their own LLM calls. ReAct planners consume the two fields
+// separately so only AccountContext enters the cacheable system prefix.
+func CombinedAccountPrompt(request NBAgentRequest) string {
+	return mergeAccountPrompts(request.AccountPrompt, request.AccountContext)
 }
 
 // renderUserContextBlock surfaces the caller's first name (from the security-context

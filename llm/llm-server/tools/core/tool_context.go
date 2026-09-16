@@ -235,6 +235,7 @@ type NbToolContext struct {
 	Ctx            *security.RequestContext
 	ToolConfig     ToolConfig
 	ToolCallId     string
+	AccountContext string
 	AccountPrompt  string
 	// SessionId is the top-level conversation session ID. Propagated from parent
 	// agents so sub-agents (e.g. agent_code_2) can pass it to external services

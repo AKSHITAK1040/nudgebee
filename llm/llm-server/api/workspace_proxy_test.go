@@ -14,6 +14,8 @@ import (
 
 	"nudgebee/llm/config"
 	"nudgebee/llm/security"
+	"nudgebee/llm/tools"
+	core "nudgebee/llm/tools/core"
 	"nudgebee/llm/workspace"
 
 	"github.com/gin-gonic/gin"
@@ -341,4 +343,37 @@ func TestHandleWorkspaceGetFileWithPayload(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, w.Code)
 		assert.Contains(t, w.Body.String(), "relay unavailable")
 	})
+}
+
+func TestWorkspaceRelayTargetPreservesWorkspaceIdentity(t *testing.T) {
+	ctx := core.NbToolContext{Ctx: security.NewRequestContextForSuperAdmin(), AccountId: "original-aws", ConversationId: "original-conversation", ToolConfig: core.ToolConfig{Name: "selected-cluster", Values: []core.ToolConfigValue{{Name: "id", Value: "target-k8s"}}}}
+	target, err := workspaceRelayTarget(ctx, tools.RelayJobKubectl, "selected-cluster")
+	require.NoError(t, err)
+	require.Equal(t, "target-k8s", target)
+	require.Equal(t, "original-aws", ctx.AccountId)
+	require.Equal(t, "original-conversation", ctx.ConversationId)
+	_, err = workspaceRelayTarget(ctx, tools.RelayJobKubectl, "stale-selection")
+	require.Error(t, err)
+	ctx.Ctx = security.NewRequestContextForTenantAccountAdmin("tenant", "user", []string{"original-aws"})
+	_, err = workspaceRelayTarget(ctx, tools.RelayJobKubectl, "selected-cluster")
+	require.ErrorContains(t, err, "access denied")
+}
+
+func TestWorkspaceTokenBindsCrossClusterTarget(t *testing.T) {
+	security.SetTenantIdCacheForTest("bound-workspace", "bound-tenant")
+	token, err := workspace.KubernetesTargetToken(security.NewRequestContextForTenantAccountAdmin("bound-tenant", "user", []string{"bound-workspace", "selected-target"}), "bound-workspace", "selected-target")
+	require.NoError(t, err)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/workspace/execute", nil)
+	c.Request.Header.Set("X-Workspace-Token", token)
+	_, err = authorizeWorkspaceRequest(c, "bound-workspace", nil, nil)
+	require.NoError(t, err)
+	allowed, ok := c.Get("workspace_allowed_target")
+	require.True(t, ok)
+	require.Equal(t, "selected-target", allowed)
+	_, err = authorizeWorkspaceRequest(c, "selected-target", nil, nil)
+	require.Error(t, err)
+	_, err = workspace.KubernetesTargetToken(security.NewRequestContextForTenantAccountAdmin("bound-tenant", "user", []string{"bound-workspace"}), "bound-workspace", "selected-target")
+	require.Error(t, err)
 }

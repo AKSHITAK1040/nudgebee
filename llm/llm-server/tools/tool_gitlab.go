@@ -28,6 +28,12 @@ func (m GitlabCliTool) GetType() core.NBToolType {
 	return core.NBToolTypeTool
 }
 
+// ShellCommandPrefixes returns the shell command prefixes that map to this
+// tool. Implements core.ShellWrappable so shell_execute's classifier can
+// delegate confirmation-gate decisions to this tool when the LLM invokes
+// the CLI via `shell_execute("glab ...")` instead of `gitlab_execute`.
+func (m GitlabCliTool) ShellCommandPrefixes() []string { return []string{"glab"} }
+
 func (m GitlabCliTool) Description() string {
 	return `Executes GitLab CLI ('glab') commands based on natural language queries. This tool allows you to interact with GitLab resources like projects, issues, merge requests, CI/CD pipelines and jobs, releases, etc.
 
@@ -229,4 +235,12 @@ func (m GitlabCliTool) InferToolRequestTypePrompt(ctx *security.RequestContext, 
 	answer: delete
 	`
 	return prompt, nil
+}
+
+func (m GitlabCliTool) InferToolRequestType(ctx *security.RequestContext, toolName, input string) (core.ToolRequestType, error) {
+	requestType := inferNestedCLIRequestType(input, "glab", gitlabReadActions, gitlabCreateActions, gitlabUpdateActions, gitlabDeleteActions)
+	if requestType == "" {
+		ctx.GetLogger().Warn("gitlab: action not recognized by heuristic, falling through to LLM classification", "input", input)
+	}
+	return requestType, nil
 }

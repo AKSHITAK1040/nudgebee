@@ -3,13 +3,36 @@ package tools
 import (
 	"errors"
 	"fmt"
+	"nudgebee/llm/security"
 	"testing"
 
 	core "nudgebee/llm/tools/core"
 	"nudgebee/llm/workspace"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+type captureShellWorkspaceManager struct {
+	workspace.WorkspaceManager
+	command string
+}
+
+func (m *captureShellWorkspaceManager) ExecuteOrLazyCreate(_ *security.RequestContext, _, _ string, command string, _ map[string]string) (string, error) {
+	m.command = command
+	return "ok", nil
+}
+
+func TestShellCallDoesNotSourceWritableProfile(t *testing.T) {
+	capture := &captureShellWorkspaceManager{}
+	tool := ShellTool{workspaceManager: capture}
+	ctx := core.NewNbToolContext(security.NewRequestContextForSuperAdmin(), tool, "", "", "conversation", "", "", "", nil, "", core.NBQueryConfig{}, "")
+	response, err := tool.Call(ctx, core.NBToolCallRequest{Command: "printf hello"})
+	require.NoError(t, err)
+	assert.Equal(t, core.NBToolResponseStatusSuccess, response.Status)
+	assert.Equal(t, "printf hello", capture.command)
+	assert.NotContains(t, capture.command, ".nb_profile")
+}
 
 // --- Change 1: grep/find/jq exit 1 reclassified as success-with-no-matches ---
 
@@ -421,8 +444,8 @@ func TestShellToolDescription_CarriesWorkspaceContract(t *testing.T) {
 		"per-conversation directory": "must state the cwd scope is per-conversation, not per-account or per-task",
 		"`/tmp/`":                    "must explicitly call out absolute /tmp/... as the cross-conversation leak vector",
 		"shared with other conversations on the same account": "must explain the /tmp/ scope so the LLM treats it as system scratch, not per-chat scratch",
-		"`ls -la`":                    "must point the LLM at the discovery move for tool-saved artifacts",
-		"`.nb_profile`":               "must teach env-var persistence, since each shell_execute is a fresh sh -c",
+		"`ls -la`": "must point the LLM at the discovery move for tool-saved artifacts",
+		"environment setup and the command that consumes it in the same call": "must explain how to use environment variables without persistent executable profiles",
 		"`kubectl`":                   "must surface the shim CLIs the LLM is supposed to call via shell when no specialized agent fits",
 		"`aws`":                       "must surface the cloud CLIs the LLM is supposed to call via shell when no specialized agent fits",
 		"`gh`":                        "must surface the GitHub CLI (auto-injected token relies on it)",
@@ -439,6 +462,7 @@ func TestShellToolDescription_CarriesWorkspaceContract(t *testing.T) {
 		assert.Contains(t, desc, snippet,
 			"ShellTool.Description() is missing %q — %s", snippet, why)
 	}
+	assert.NotContains(t, desc, ".nb_profile", "writable shell profiles must not be advertised or sourced automatically")
 
 	// --- Negative assertions: claims the execution handler contradicts ---
 	forbidden := map[string]string{

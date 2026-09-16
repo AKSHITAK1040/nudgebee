@@ -127,8 +127,8 @@ func TestParseDelegateInput_NotebookMisuseRejected(t *testing.T) {
 			assert.Error(t, err)
 			assert.Contains(t, err.Error(), "starts with 'update the notebook'",
 				"rejection error must name the misuse pattern explicitly")
-			assert.Contains(t, err.Error(), "<update_notebook>",
-				"rejection error must point at the correct path (use the XML tag in your thought)")
+			assert.Contains(t, err.Error(), "parent agent's notebook directly",
+				"rejection error must point at the parent-owned notebook path")
 		})
 	}
 }
@@ -657,6 +657,13 @@ func TestDynamicReActAgent_RunsOnCheapTier(t *testing.T) {
 	a := &dynamicReActAgent{name: DelegateAgentToolName}
 	assert.Equal(t, core.ModelTierRetrieval, a.GetModelCategory(),
 		"delegated sub-agents must run on the cheap Retrieval tier, not Reasoning")
+}
+
+func TestDynamicReActAgent_DisablesNotebook(t *testing.T) {
+	a := &dynamicReActAgent{name: DelegateAgentToolName}
+	assert.False(t, a.GetNotebookEnabled())
+	assert.False(t, core.ResolveAgentNotebookEnabled(a),
+		"the parent orchestrator owns investigation state for delegated sub-agents")
 }
 
 // TestFlattenAgentGuidance_CarriesInstructionsConstraintsExamples pins that flattening a

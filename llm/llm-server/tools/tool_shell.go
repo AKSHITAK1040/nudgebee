@@ -37,7 +37,8 @@ func isAlphaNum(c uint8) bool {
 }
 
 type ShellTool struct {
-	AccountId string
+	AccountId        string
+	workspaceManager workspace.WorkspaceManager
 }
 
 func (m ShellTool) Name() string {
@@ -57,11 +58,17 @@ func (m ShellTool) Description() string {
 
 	**Persistence:** Files at relative paths persist across turns within this conversation. Files at absolute ` + "`/tmp/...`" + ` paths are shared with other conversations on the same account — do NOT write secrets, credentials, or per-chat state there. Treat absolute ` + "`/tmp/`" + ` as system scratch only.
 
-	**Stateless shell:** Each call is a fresh ` + "`sh -c`" + `, so ` + "`cd`" + ` and unexported variables do NOT persist. Files do (they live on disk). For env vars that must survive across calls, append to ` + "`.nb_profile`" + ` (` + "`echo 'export FOO=bar' >> .nb_profile`" + `).
+	**Stateless shell:** Each call is a fresh ` + "`sh -c`" + `, so ` + "`cd`" + ` and environment variables do NOT persist. Files do (they live on disk). Put environment setup and the command that consumes it in the same call (` + "`export FOO=bar && command`" + `), or pass the value through the CLI's explicit flags. Shell profile files are not sourced automatically.
 
 	**Credentials auto-injected:** AWS / GCP / Azure credentials, ` + "`GITHUB_TOKEN`" + ` and ` + "`GITLAB_TOKEN`" + ` are injected automatically when the command invokes the corresponding CLI. You do NOT need to plan an ` + "`aws configure`, `gcloud auth`, `gh auth login`, or `glab auth login`" + ` step.
 
 	**Large Data Redirection:** Identify large output by command intent (log dumps, metric time-series, multi-resource JSON, or queries expecting >50 records). Redirect stdout to a relative workspace file (` + "`command > data.json`" + `). Then inspect using ` + "`jq`, `grep`, `awk`, or `head` (`jq .key data.json | head -n 50`)" + ` to keep context usage bounded.
+
+	**Collection and analysis:** Invoke infrastructure CLIs directly in shell commands; use local tools to analyze the saved output. Prefer jq for JSON selection and aggregation, and grep/head for bounded text inspection. Use Python when the analysis needs more complex parsing or joins; keep it focused on local files, with standard-library modules. Reuse existing captures when they cover the requested scope and time range.
+
+	**Python quoting:** For multiline Python, use a quoted heredoc (python3 - <<'PY', followed by the script and a closing PY on its own line). Avoid packing multiline logic or nested shell quotes into python3 -c. Pass file paths as arguments instead of interpolating them into source code.
+
+	**Preserve failures:** Check collection succeeded before analyzing its output. Keep stderr visible; avoid blanket error suppression or appending || true to every command. A partial or failed collection must not be presented as an empty successful result.
 
 	**Empty-match is success.** When grep-family searchers (` + "`grep` / `egrep` / `fgrep` / `rg` / `ack` / `ag`" + `) find no matches, the observation comes back as ` + "`{\"stdout\":\"\",\"no_matches\":true}`" + ` with a Success status — the command ran fine and there is nothing to find. Do NOT retry the same command — either widen the pattern or conclude that no match exists. This semantic also applies when the searcher is the last segment of a pipeline (` + "`kubectl get pods | grep ready`" + `). It does NOT apply to ` + "`find`" + ` (whose exit 1 is a real path / permission error) or plain ` + "`jq`" + ` (which exits 0 and returns ` + "`null`" + ` on missing keys).
 
@@ -119,7 +126,7 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 	}
 
 	// originalCommand snapshots the user-issued command before any
-	// downstream wrapping (work_dir prefix, .nb_profile sourcing,
+	// downstream wrapping (work_dir prefix,
 	// cloud-auth env). Captured here while command is still the
 	// trimmed, validated user input so first-token-based classification
 	// (e.g. grep-exit-1 success reinterpretation) and error-hint
@@ -151,18 +158,26 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 		}
 	}
 
-	// Auto-persistence: touch the profile to ensure it exists, then source it, then run command
-	// We use '.' instead of 'source' for better POSIX compatibility (e.g. Alpine ash)
-	const profileFile = ".nb_profile"
-	command = fmt.Sprintf("touch %s && . ./%s && %s", profileFile, profileFile, command)
-
 	// Prepare env — inject cloud credentials if the account is a cloud account (AWS/GCP/Azure).
 	// This allows the shell tool to run cloud CLI commands (aws, gcloud, az) without requiring
 	// the planner to route through specialized cloud tools.
 	env := map[string]string{}
+	if ShellConfigToolName(originalCommand) == ToolExecuteKubectlCommand {
+		selected, err := ResolveShellTarget(nbRequestContext, ToolExecuteKubectlCommand)
+		if err != nil {
+			return core.NBToolResponse{}, err
+		}
+		env, err = KubernetesTargetEnv(nbRequestContext, selected)
+		if err != nil {
+			return core.NBToolResponse{}, err
+		}
+	}
 	cloudAuth, err := m.buildCloudAuthEnv(nbRequestContext, command)
 	if err != nil {
-		// Non-fatal: log the warning and proceed without cloud auth.
+		if ShellConfigToolName(originalCommand) != "" {
+			return core.NBToolResponse{}, fmt.Errorf("shell: target credentials unavailable: %w", err)
+		}
+		// Non-fatal for local commands only.
 		// The account may not be a cloud account (e.g. K8s-only), or creds may be missing.
 		slog.Warn("shell: cloud auth injection skipped", "account_id", m.AccountId, "error", err)
 	} else if cloudAuth != nil {
@@ -193,7 +208,11 @@ func (m ShellTool) Call(nbRequestContext core.NbToolContext, input core.NBToolCa
 		}
 	}
 
-	response, err := wm.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
+	manager := m.workspaceManager
+	if manager == nil {
+		manager = wm
+	}
+	response, err := manager.ExecuteOrLazyCreate(nbRequestContext.Ctx, nbRequestContext.AccountId, nbRequestContext.ConversationId, command, env)
 
 	// Scrub any sensitive credential values from the output to prevent accidental
 	// exposure (e.g. if the LLM runs "env" or "printenv" on a cloud account).
@@ -494,6 +513,22 @@ func (m ShellTool) buildCloudAuthEnv(nbRequestContext core.NbToolContext, comman
 	if m.AccountId == "" {
 		return nil, nil
 	}
+	if owner := ShellConfigToolName(command); owner != "" {
+		if owner == ToolExecuteKubectlCommand {
+			return nil, nil
+		}
+		selected, err := ResolveShellTarget(nbRequestContext, owner)
+		if err != nil {
+			return nil, err
+		}
+		provider, _ := detectCloudCLI(command)
+		for _, value := range selected.Values {
+			if value.Name == "id" {
+				return buildAuthForAccount(nbRequestContext, provider, value.Value)
+			}
+		}
+		return nil, fmt.Errorf("shell: selected target has no account id")
+	}
 
 	creds, err := GetCloudAccountCredentials(m.AccountId)
 	if err != nil {
@@ -528,6 +563,7 @@ var cloudCLIMapping = []struct {
 	{keywords: []string{"gcloud", "gsutil", "bq"}, provider: "gcp", toolName: ToolExecuteGcpCliCommand},
 	{keywords: []string{"aws"}, provider: "aws", toolName: ToolExecuteAwsCliCommand},
 	{keywords: []string{"az"}, provider: "azure", toolName: ToolExecuteAzureCliCommand},
+	{keywords: []string{"kubectl"}, provider: "k8s", toolName: ToolExecuteKubectlCommand},
 }
 
 // detectCloudCLI checks if the command invokes a cloud CLI and returns the
